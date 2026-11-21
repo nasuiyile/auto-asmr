@@ -23,6 +23,13 @@
    "tip_en": "For trigger sounds such as cotton swabs and scratching (not for voice). Turn denoise off or down"
   },
   {
+   "action": "style_breath",
+   "label": "呼吸音",
+   "label_en": "Breathing",
+   "tip": "突出录音里贴近耳边的吸气和呼气。",
+   "tip_en": "Brings out close-miked inhalations and exhalations in the recording."
+  },
+  {
    "action": "reset",
    "label": "恢复默认",
    "label_en": "Reset",
@@ -230,6 +237,30 @@
      "label_en": "Breath lift",
      "tip": "原声中轻微送气和呼吸声的最大增益，响亮的齿音不会得到额外增强。0 = 关闭",
      "tip_en": "Maximum gain for soft breath sounds in the recording. Loud sibilants receive no extra gain. 0 = off",
+     "min": 0.0,
+     "max": 12.0,
+     "decimals": 1,
+     "unit": "dB",
+     "unit_en": "dB"
+    },
+    {
+     "type": "slider",
+     "key": "breath_tone",
+     "label": "薄声补偿",
+     "label_en": "Thin breath compensation",
+     "tip": "呼吸低频偏少时补气流，3 kHz 以上过亮时柔化。0 = 关闭。",
+     "tip_en": "Fills in missing low-frequency airflow and softens excess brightness above 3 kHz. 0 = off.",
+     "min": 0.0,
+     "max": 1.0,
+     "decimals": 2
+    },
+    {
+     "type": "slider",
+     "key": "breath_deboom_db",
+     "label": "呼吸去闷",
+     "label_en": "Breath de-boom",
+     "tip": "呼吸在 100–300 Hz 的能量过强时，最多压低多少分贝。0 = 关闭",
+     "tip_en": "Maximum attenuation when a breath has excess energy at 100–300 Hz. 0 = off",
      "min": 0.0,
      "max": 12.0,
      "decimals": 1,
@@ -490,6 +521,18 @@
        "Sweep",
        "Random"
       ]
+     }
+    },
+    {
+     "type": "check",
+     "key": "breath_pause_switch",
+     "label": "换气时换边",
+     "label_en": "Switch ears between breaths",
+     "tip": "在一侧停够设定时间后，等换气间隙再移动。",
+     "tip_en": "After the hold time has elapsed, wait for a gap between breaths to move.",
+     "show_if": {
+      "key": "mode",
+      "in": ["Sweep"]
      }
     },
     {

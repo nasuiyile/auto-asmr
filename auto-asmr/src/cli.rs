@@ -45,7 +45,7 @@ convert 的选项（括号里是默认值）：
   --duo [毫秒]            第 2 个声音晚多少毫秒（1–300；不写数值 = 80）。30 ms 以下两边容易融成一个声音，
                           50–120 ms 像两个人一前一后地说，150 ms 以上像回声。可以和 --pos（两个位置）、--mix-gain、
                           --mix-follow、--mix-balance 一起用；输出比原音频长出这段延迟
-  --style ear|ku100|earclean   ear=贴耳加强；ku100=KU100 近耳轻语（突出轻微呼吸，随机走位，远耳保留实测房间声）；
+  --style ear|ku100|breath|earclean   ear=贴耳加强；ku100=KU100 近耳轻语；breath=呼吸音（近耳呼吸与气流）；
                           earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
                           带耳道共鸣和耳内低频，每只耳朵约 40 秒才换边，目标响度默认 −20 LUFS）
   --start <秒> --duration <秒>      只处理一段
@@ -71,6 +71,9 @@ convert 的选项（括号里是默认值）：
   --far-lf-cut <dB>       远耳低频再压低（12）    --dark <dB>         近耳 5 kHz 压低（0）
   --ku100-eq              近耳用 KU100 实测校正曲线
   --breath <dB>           气声增强：贴耳时轻的送气声 / 气息最多提高多少，响的齿音不提（6，0=关闭）
+  --breath-deboom <0–12>  呼吸去闷：100–300 Hz 堆积时的最大衰减 dB（0=关，呼吸音预设为 6）
+  --breath-tone <0–1>     薄声补偿：按输入的气流低频和高频亮度调节，0=关
+  --breath-pause-switch on|off   穿梭达到停留时间后在换气间隙换边（呼吸音预设开启）
   --breath-reach <0–1>    近处气声范围：身前等近处也保留部分气声增强，到头中心 20 cm 内最强，65 cm 处淡出（0=仅贴耳）
   --puff <x>              气流扑耳：送气时气流扑到耳朵上的低频脉冲，由嗓音自己的送气声导出（1，0=关闭）
   --pinna ku100|A…G       耳廓选择：ku100=人工头自己的耳廓；A…G=真人耳廓（挑最像自己耳朵的）；--pinna list 列出（ku100）
@@ -125,12 +128,26 @@ fn parse_bg_preset(p: Params, v: Option<&str>) -> Result<Params, String> {
     }
 }
 
-fn parse_static_ambience(value: Option<&String>) -> Result<bool, String> {
+fn parse_on_off(value: Option<&String>, name: &str) -> Result<bool, String> {
     match value.map(String::as_str) {
         Some("on") => Ok(true),
         Some("off") => Ok(false),
-        _ => Err("--static-ambience 需要 on 或 off".into()),
+        _ => Err(format!("{name} 需要 on 或 off")),
     }
+}
+
+fn realtime_breath_options(p: &mut Params, args: &[String]) -> Result<(), String> {
+    for (i, name) in args.iter().enumerate() {
+        let value = args.get(i + 1);
+        match name.as_str() {
+            "--breath-tone" => p.breath_tone = parse_f(value, name)?.clamp(0.0, 1.0),
+            "--breath-deboom" => p.breath_deboom_db = parse_f(value, name)?.clamp(0.0, 12.0),
+            "--breath-pause-switch" => p.breath_pause_switch = parse_on_off(value, name)?,
+            "--static-ambience" => p.static_ambience = parse_on_off(value, name)?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// 背景音的选项（convert 和 bg 共用）；是背景音选项时返回 true。
@@ -308,16 +325,14 @@ pub fn run(args: Vec<String>) -> i32 {
         "rt-test" => {
             // 调试用：用默认设备实时跑几秒（可加 秒数、--buffer 帧数、--style ku100、--denoise）
             let secs = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(5.0);
-            let mut p = Params::default();
-            if args.iter().any(|a| a == "ku100") {
-                p = p.style_ku100();
-            }
+            let mut p = match style_from_args(&args) {
+                Ok((p, _)) => p,
+                Err(e) => { eprintln!("{e}"); return 1; }
+            };
             p.denoise = args.iter().any(|a| a == "--denoise");
-            if let Some(i) = args.iter().position(|a| a == "--static-ambience") {
-                match parse_static_ambience(args.get(i + 1)) {
-                    Ok(enabled) => p.static_ambience = enabled,
-                    Err(e) => { eprintln!("{e}"); return 1; }
-                }
+            if let Err(e) = realtime_breath_options(&mut p, &args) {
+                eprintln!("{e}");
+                return 1;
             }
             let mut o = crate::realtime::RtOptions::default();
             if let Some(i) = args.iter().position(|a| a == "--buffer") {
@@ -359,38 +374,35 @@ pub fn run(args: Vec<String>) -> i32 {
     }
 }
 
+fn style_from_args(args: &[String]) -> Result<(Params, f32), String> {
+    let p = Params::default();
+    let default_lufs = p.target_lufs;
+    let Some(i) = args.iter().position(|a| a == "--style") else { return Ok((p, default_lufs)); };
+    match args.get(i + 1).map(String::as_str) {
+        Some("ear") => Ok((p.style_ear(), default_lufs)),
+        Some("ku100") => Ok((p.style_ku100(), default_lufs)),
+        Some("breath" | "呼吸音") => Ok((p.style_breath(), crate::dsp::params::BREATH_LUFS)),
+        Some("earclean" | "ear-clean" | "掏耳") => Ok((p.style_earclean(), crate::dsp::params::EARCLEAN_LUFS)),
+        _ => Err("--style 只能是 ear、ku100、breath 或 earclean".into()),
+    }
+}
+
 fn run_convert(args: &[String]) -> Result<(), String> {
-    let mut p = Params::default();
+    let (mut p, mut lufs) = style_from_args(args)?;
+    let style_mode = p.mode;
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut out_dir: Option<PathBuf> = None;
     let mut jobs = crate::batch::default_threads();
     let mut output: Option<PathBuf> = None;
     let (mut start, mut duration) = (0.0f64, None);
     let mut channel = Channel::Auto;
-    let (mut bits, mut lufs, mut peak, mut max_gr) = (24u16, -16.0f32, -1.0f32, 8.0f32);
-    let mut lufs_set = false;
-    let (mut earclean, mut style_ku) = (false, false);
+    let (mut bits, mut peak, mut max_gr) = (24u16, -1.0f32, 8.0f32);
     let mut level_follow: Option<f32> = None;
     let mut save_traj: Option<PathBuf> = None;
     let (mut mix_on, mut mix_follow, mut mix_align) = (false, false, false);
     let mut mix_balance = 0.0f32;
     let mut duo_ms = 0.0f32;
     let (mut pos_list, mut gain_list): (Option<String>, Option<String>) = (None, None);
-    // 风格先生效，后面的参数再覆盖
-    if let Some(i) = args.iter().position(|a| a == "--style") {
-        match args.get(i + 1).map(|s| s.as_str()) {
-            Some("ear") => p = p.style_ear(),
-            Some("ku100") => {
-                p = p.style_ku100();
-                style_ku = true;
-            }
-            Some("earclean") | Some("ear-clean") | Some("掏耳") => {
-                p = p.style_earclean();
-                earclean = true;
-            }
-            _ => return Err("--style 只能是 ear、ku100 或 earclean".into()),
-        }
-    }
     // 背景音的预设也先生效，后面的背景音选项再覆盖
     if let Some(i) = args.iter().position(|a| a == "--bg") {
         p = parse_bg_preset(p, args.get(i + 1).map(|s| s.as_str()))?;
@@ -440,6 +452,9 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             "--dark" => p.dark_db = f(&mut it)?,
             "--ku100-eq" => p.ku100_eq = true,
             "--breath" => p.breath_db = f(&mut it)?.max(0.0),
+            "--breath-deboom" => p.breath_deboom_db = f(&mut it)?.clamp(0.0, 12.0),
+            "--breath-tone" => p.breath_tone = f(&mut it)?.clamp(0.0, 1.0),
+            "--breath-pause-switch" => p.breath_pause_switch = parse_on_off(it.next(), name)?,
             "--breath-reach" => p.breath_reach = f(&mut it)?.clamp(0.0, 1.0),
             "--puff" => p.puff = f(&mut it)?.max(0.0),
             "--concha" => p.concha_db = f(&mut it)?,
@@ -519,7 +534,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
                 }
             }
             "--wet" => p.wet_db = f(&mut it)?,
-            "--static-ambience" => p.static_ambience = parse_static_ambience(it.next())?,
+            "--static-ambience" => p.static_ambience = parse_on_off(it.next(), name)?,
             "--headphone" => {
                 let v = it.next().ok_or("--headphone 后面缺少名称")?;
                 let norm = |s: &str| s.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
@@ -554,10 +569,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             "--deess" => p.deess_db = f(&mut it)?,
             "--sharp-soften" => p.sharp_soften_db = f(&mut it)?.clamp(0.0, 8.0),
             "--soft-voice" => p.soft_voice = f(&mut it)?,
-            "--lufs" => {
-                lufs = f(&mut it)?;
-                lufs_set = true;
-            }
+            "--lufs" => lufs = f(&mut it)?,
             "--peak" => peak = f(&mut it)?,
             "--max-gr" => max_gr = f(&mut it)?,
             "--bits" => bits = if f(&mut it)? as u16 == 16 { 16 } else { 24 },
@@ -567,16 +579,11 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             _ => inputs.push(PathBuf::from(name)),
         }
     }
-    // 掏耳预设：目标响度默认 −20 LUFS（低频为主，K 加权读数偏低）
     p.level_follow = match level_follow {
         Some(v) => v,
-        // 掏耳、KU100 实录这两个风格自己定了"响度随位置变化"；另选了别的模式时按模式的默认值
-        None if (earclean && p.mode == MotionMode::Sweep) || (style_ku && p.mode == MotionMode::Random) => p.level_follow,
+        None if p.mode == style_mode => p.level_follow,
         None => Params::default_level_follow(p.mode),
     };
-    if earclean && !lufs_set {
-        lufs = crate::dsp::params::EARCLEAN_LUFS;
-    }
     let duo_on = duo_ms > 0.0;
     if duo_on && mix_on {
         return Err("--duo（一个音频当成左右两个人）不能和 --mix 一起用".into());
@@ -823,19 +830,10 @@ fn run_convert(args: &[String]) -> Result<(), String> {
 ///                    [--style ku100] [--mode …] [--pause-motion x] [--denoise [dB]] [--no-level]
 ///                    [--manual "秒:方位角,距离,高度;…;秒:auto"] [-o 输出.wav]
 fn run_rt_sim(args: &[String]) -> Result<(), String> {
-    let mut p = Params::default();
-    if let Some(i) = args.iter().position(|a| a == "--style") {
-        match args.get(i + 1).map(|s| s.as_str()) {
-            Some("ku100") => p = p.style_ku100(),
-            Some("earclean") => p = p.style_earclean(),
-            _ => {}
-        }
-    }
+    let (mut p, _) = style_from_args(args)?;
     let get = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
     let getf = |name: &str| get(name).and_then(|v| v.parse::<f32>().ok());
-    if args.iter().any(|a| a == "--static-ambience") {
-        p.static_ambience = parse_static_ambience(get("--static-ambience"))?;
-    }
+    realtime_breath_options(&mut p, args)?;
     let input = PathBuf::from(args.first().ok_or("缺少输入文件")?);
     let mut opts = ConvertOptions::new(input);
     opts.duration = getf("--duration").map(|v| v as f64);

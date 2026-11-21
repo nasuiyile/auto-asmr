@@ -75,8 +75,8 @@ import java.io.File
  *
  * 也可以用 adb 驱动（tools/hook_test.sh）：
  *   am start -n io.github.nasuiyile.autoasmr/.MainActivity --es url <网址>
- * 其它参数（都作用于当前标签页）：--ei mode 0-3（调试：直通 / ASMR / 左右互换 / 静音）；--ei style 0-2；
- * --es action <按钮>（style_ear / style_ku100 / style_earclean / reset / bg_rain_night / bg_off）；
+ * 其它参数（都作用于当前标签页）：--ei mode 0-3（调试：直通 / ASMR / 左右互换 / 静音）；--ei style 0-3；
+ * --es action <按钮>（style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off）；
  * --es params '<RON>'；--ei rec <秒>（录下处理前后的声音）；--es ua desktop|mobile；--es mute 1|0；
  * --es import <文件名> / --es export <文件名>（在 /sdcard/Android/data/<包名>/files/ 里，导入 / 导出配置）。
  */
@@ -112,9 +112,8 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent) {
         val tab = browser.current ?: return
         intent.getIntExtra("mode", -1).takeIf { it in 0..3 }?.let { NativeHook.setMode(it) }
-        intent.getIntExtra("style", -1).takeIf { it in 0..2 }?.let {
-            Settings.action(listOf("style_ear", "style_ku100", "style_earclean")[it])
-        }
+        listOf("style_ear", "style_ku100", "style_earclean", "style_breath")
+            .getOrNull(intent.getIntExtra("style", -1))?.let { Settings.action(it) }
         intent.getStringExtra("params")?.let { Settings.setRon(it) }
         intent.getStringExtra("action")?.let { Settings.action(it) }
         intent.getStringExtra("ua")?.let { browser.setDesktop(tab, it == "desktop") }

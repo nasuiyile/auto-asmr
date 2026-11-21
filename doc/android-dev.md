@@ -12,7 +12,7 @@
   - **效果**：效果面板。
   - **⋮**：新标签页、桌面版网站、只放一个标签页的声音、首页、测试页、导入配置、导出配置、录 20 秒处理前后的声音（调试用）。
 - **效果面板**（从上到下，和电脑版右侧的参数一致）：
-  - 风格：**贴耳加强 / KU100 实录 / 掏耳 / 恢复默认**，和电脑版的按钮是同一个函数，改的参数一样。
+  - 风格：**贴耳加强 / KU100 实录 / 掏耳 / 呼吸音 / 恢复默认**，和电脑版的按钮是同一个函数，改的参数一样。
   - 位置图：俯视，上 = 正前方，刻度和电脑版一样。红点是声源此刻的位置（播放中才有），右边竖条是高度。左右双人时是两个点：1 号橙色、2 号蓝色（颜色同电脑版），下面一行写两个声音各在哪。
   - **手动摆位**：和电脑版一样，打开后自动移动全停，声源停在你摆的位置（播放中打开时停在此刻的位置）；在位置图里点 / 拖改方位和距离，在竖条上拖改高度，双击竖条回到与耳朵齐平。关掉后回到原来的移动方式。
   - 降噪：0 = 关闭（网页里的声音一般很干净，不用开）。
@@ -30,6 +30,8 @@
 和电脑版**通用，同一个格式**（读写代码在共用库 `auto-asmr/src/config.rs` 里，两边是同一份）：
 
 - 电脑版「导出配置」的 `.ron`、电脑版运行目录里自动保存的 `auto-asmr.ron`，都可以在安卓版「导入配置」；安卓版「导出配置」的文件也能在电脑版导入。
+- 「贴耳感」里的「呼吸去闷」设置 100–300 Hz 能量堆积时的最大衰减量（0–12 dB），随配置导入和导出。
+- 同栏的「薄声补偿」写入配置字段 `breath_tone`（0–1）。穿梭模式下的「换气时换边」写入 `breath_pause_switch`，开启时在达到停留时间后等待换气间隙再移动。两项都随配置导入、导出。
 - 在「KU100 临场感」中可以切换「固定原声底噪」，让网页里持续的录音底声保持在固定位置。选择「KU100 实录」自动开启，勾选状态随配置一同保存。
 - 安卓版用得上的是全部效果参数、「输出效果 / 监听原声」和左右双人（延迟、排布、自动平衡）。电脑版独有的设置（音频设备、缓冲、文件转换、多音频合成、语言、3D 视图）安卓版不显示、不改，但会原样保留，导出后带回电脑照样能用。
 - 安卓版自己的设置也存成这个格式（App 私有目录的 `files/auto-asmr.ron`），改动后 1 秒自动保存，下次打开时读回。
@@ -149,13 +151,13 @@ adb push target/aarch64-linux-android/release/examples/bench /data/local/tmp/asm
 |---|---|
 | `--es url <网址>` | 打开网址；测试页加 `?auto=webaudio`（或 `element`、`element44`、`mp4`、`hls`、`hlsjs`）自动开始播放 |
 | `--ei mode 0…3` | 调试模式：直通 / ASMR / 左右互换 / 静音（界面上的开关只有 ASMR / 原声） |
-| `--ei style 0…2` | 贴耳加强 / KU100 实录 / 掏耳 |
+| `--ei style 0…3` | 贴耳加强 / KU100 实录 / 掏耳 / 呼吸音 |
 | `--es params '<RON>'` | 整段换参数（RON 格式的 `Params`，缺的项用默认值） |
 | `--ei rec <秒>` | 录音，同菜单里的录音 |
 | `--es ua desktop` / `mobile` | 桌面版 / 手机 UA |
 | `--es mute 1` / `0` | 静音 / 取消静音这个 WebView |
 | `--es import <文件名>` / `--es export <文件名>` | 从 / 往 `/sdcard/Android/data/io.github.nasuiyile.autoasmr/files/` 导入 / 导出配置 |
-| `--es action <按钮>` | 效果面板上的按钮：`style_ear`、`style_ku100`、`style_earclean`、`reset`、`bg_rain_night`、`bg_off` |
+| `--es action <按钮>` | 效果面板上的按钮：`style_ear`、`style_ku100`、`style_earclean`、`style_breath`、`reset`、`bg_rain_night`、`bg_off` |
 
 ```bash
 adb shell am start -n io.github.nasuiyile.autoasmr/.MainActivity --es url "'https://appassets.androidplatform.net/assets/test.html?auto=hls'" --ei style 1

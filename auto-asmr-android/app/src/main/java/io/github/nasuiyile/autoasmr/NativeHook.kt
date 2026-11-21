@@ -37,10 +37,10 @@ object NativeHook {
     /** 输出效果（false）/ 监听原声（true）：存进配置（和电脑版共用），同时切换处理。 */
     @JvmStatic external fun setDry(dry: Boolean)
 
-    /** 风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳。 */
+    /** 风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音。 */
     @JvmStatic external fun setStyle(style: Int): Int
 
-    /** 按钮：style_ear / style_ku100 / style_earclean / reset / bg_rain_night / bg_off。返回 0 = 成功。 */
+    /** 按钮：style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off。返回 0 = 成功。 */
     @JvmStatic external fun action(name: String): Int
 
     /** 改一个参数：字段名或虚拟字段（ear_cm、manual_cm、moves_per_min、denoise_slider），值是 JSON。 */

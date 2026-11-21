@@ -241,7 +241,7 @@ pub extern "C" fn asmr_doc_ui() -> i32 {
 
 /// 改一项设置。`key` 是参数名（同配置文件里 `params` 的字段名），`value` 是 JSON。另有几个特殊的名字：
 /// - `dry`：true = 监听原声，false = 输出效果
-/// - `style`：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳（同桌面版的风格按钮，只改风格相关的参数）
+/// - `style`：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音（同桌面版的风格按钮，只改风格相关的参数）
 /// - `bg_preset`：`"rain_night"` = 雨夜，`"off"` = 关掉背景音
 /// - `ear_cm`、`manual_cm`、`moves_per_min`、`denoise`：界面上的换算值（见 `asmr_doc_ui`）
 /// - `mode`：换左右移动的方式，「响度随位置变化」跟着换成这个方式的默认值（同桌面版）
@@ -277,7 +277,8 @@ fn set_field(doc: &mut Saved, key: &str, v: serde_json::Value) -> Result<(), Str
                 Some(0) => p.clone().style_ear(),
                 Some(1) => p.clone().style_ku100(),
                 Some(2) => p.clone().style_earclean(),
-                _ => return Err("style 只能是 0、1、2".into()),
+                Some(3) => p.clone().style_breath(),
+                _ => return Err("style 只能是 0、1、2、3".into()),
             }
         }
         "bg_preset" => match v.as_str() {
@@ -542,11 +543,17 @@ mod tests {
         assert_eq!(ui()["params"]["puff"], 2.5);
         assert_eq!(set("dry", "true"), 0);
         assert_eq!(set("static_ambience", "true"), 0);
+        assert_eq!(set("breath_deboom_db", "4.5"), 0);
+        assert_eq!(set("breath_tone", "0.65"), 0);
+        assert_eq!(set("breath_pause_switch", "true"), 0);
         assert_eq!(set("seed", "7"), 0);
         assert_eq!(set("pinna", "\"B\""), 0);
         assert!(asmr_doc_text() > 0);
         let back = config::parse(&out()).unwrap();
         assert!(back.params.static_ambience);
+        assert_eq!(back.params.breath_deboom_db, 4.5);
+        assert_eq!(back.params.breath_tone, 0.65);
+        assert!(back.params.breath_pause_switch);
         assert!(back.dry && back.params.seed == 7 && back.params.pinna == "B" && back.params.puff == 2.5);
         assert!(back.buffer == 512 && back.input.as_deref() == Some("Mic") && back.jobs == 3);
 
@@ -596,6 +603,9 @@ mod tests {
 
         assert_eq!(set("style", "2"), 0);
         assert_eq!(ui()["params"]["inear_cm"].as_f64().unwrap() as f32, Params::default().style_earclean().inear_cm);
+        let expected = with(|st| st.doc.params.clone().style_breath());
+        assert_eq!(set("style", "3"), 0);
+        assert_eq!(with(|st| st.doc.params.clone()), expected);
         assert_eq!(set("style", "5"), -1);
         assert_eq!(set("bg_preset", "\"rain_night\""), 0);
         assert!(ui()["derived"]["bg_db"].as_f64().is_some());

@@ -151,6 +151,8 @@ pub struct Motion {
     k: u32,
     at_ear: bool,
     mode: Option<MotionMode>,
+    pause_switch: bool,
+    last_breath: Option<f64>,
     last_ear_dist: f32,
     orbit_t0: f64,
     // 自然晃动：X / Y 各 4 条慢速正弦
@@ -234,6 +236,8 @@ impl Motion {
             k: 0,
             at_ear: true,
             mode: None,
+            pause_switch: false,
+            last_breath: None,
             last_ear_dist: 0.105,
             orbit_t0: 0.0,
             micro,
@@ -312,6 +316,8 @@ impl Motion {
 
     fn reset_plan(&mut self, p: &Params, tm: f64) {
         self.segs.clear();
+        self.pause_switch = p.mode == MotionMode::Sweep && p.breath_pause_switch;
+        self.last_breath = None;
         self.plan_az = self.az;
         self.plan_r = self.r;
         self.k = 0;
@@ -629,6 +635,11 @@ impl Motion {
     /// 推进到说话时钟 `tm`（秒），返回这个边界上的位置。
     /// `amp`：晃动幅度倍数（随音量）；`follow_db`：说话音量包络（dB，相对中位）。
     pub fn step(&mut self, p: &Params, tm: f64, amp: f32, follow_db: f32) -> Pose {
+        self.step_with_activity(p, tm, amp, follow_db, 1.0)
+    }
+
+    /// `activity` 是与输出对齐的输入活动度。一起移动时传入音源共同的活动度。
+    pub fn step_with_activity(&mut self, p: &Params, tm: f64, amp: f32, follow_db: f32, activity: f32) -> Pose {
         if p.mode == MotionMode::Manual {
             return self.step_manual(p);
         }
@@ -640,7 +651,7 @@ impl Motion {
             self.az = p.manual_az.rem_euclid(360.0);
             self.r = p.manual_dist.clamp(R_MIN, R_MAX);
         }
-        if self.mode != Some(p.mode) {
+        if self.mode != Some(p.mode) || self.pause_switch != (p.mode == MotionMode::Sweep && p.breath_pause_switch) {
             self.reset_plan(p, tm);
         }
         // 贴耳距离被拖动时，停在耳边的声源跟着挪过去
@@ -658,9 +669,29 @@ impl Motion {
         }
         match p.mode {
             MotionMode::Sweep => {
-                while self.segs.is_empty() && tm >= self.next_t {
-                    self.plan_sweep(p);
-                    self.n_moves += 1;
+                if self.segs.is_empty() {
+                    if self.pause_switch && activity > 0.35 {
+                        if self.last_breath.is_none() {
+                            // 从这一侧第一口可听的气息起算，前导静音不占停留时间。
+                            self.next_t = self.next_t.max(tm + f64::from(p.hold_s));
+                        }
+                        self.last_breath = Some(tm);
+                    }
+                    // 在新停顿刚被确认时开始。若最短停留时间在长静音中间才到，
+                    // 继续等下一次气息落下，不在下一口开始前的未知时刻起步。
+                    let ready = !self.pause_switch || self.last_breath.is_some_and(|last| {
+                        let gap_start = last + 0.10;
+                        gap_start >= self.next_t && tm >= gap_start
+                    });
+                    if ready && tm >= self.next_t {
+                        if self.pause_switch {
+                            // 可能已等过预定时刻，此刻从原位置起步，以完整的时长走完。
+                            self.next_t = tm;
+                            self.last_breath = None;
+                        }
+                        self.plan_sweep(p);
+                        self.n_moves += 1;
+                    }
                 }
             }
             MotionMode::Random => {
@@ -816,6 +847,31 @@ mod tests {
         assert!((arc_delta(260.0, 100.0, Some(true)) - 200.0).abs() < 1e-3);
         assert!((arc_delta(260.0, 100.0, Some(false)) + 160.0).abs() < 1e-3);
         assert!((arc_delta(350.0, 10.0, Some(false)) - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn breath_sweep_waits_for_a_gap_then_finishes_the_crossing() {
+        let p = Params { hold_s: 0.6, move_s: 0.6, randomness: 0.0, micro: 0.0, ..Params::default().style_breath() };
+        let mut m = Motion::new(1);
+        let mut previous = 360.0 - p.ear_angle;
+        for i in 0..(8.0 / CTRL_DT) as usize {
+            let t = i as f32 * CTRL_DT;
+            // 一口长气中有 50 ms 的凹口。下一侧停很久才有第一口短气。
+            let sounding = ((1.0..2.5).contains(&t) && !(1.9..1.95).contains(&t))
+                || (5.0..5.3).contains(&t) || (6.2..6.6).contains(&t);
+            let pose = m.step_with_activity(&p, f64::from(t), 1.0, 0.0, if sounding { 1.0 } else { 0.0 });
+            assert!(arc_delta(previous, pose.az, None).abs() < 1.0, "换边跳变 {t}");
+            if t < 2.59 {
+                assert_eq!(m.n_moves, 0, "长元音或短暂气息起伏触发换边 {t}");
+            } else if (3.3..6.69).contains(&t) {
+                assert_eq!(m.n_moves, 1, "右侧没有新的一组气息仍在换边 {t}");
+                assert!((pose.az - p.ear_angle).abs() < 1e-3);
+            } else if t > 7.4 {
+                assert_eq!(m.n_moves, 2);
+                assert!((pose.az - (360.0 - p.ear_angle)).abs() < 1e-3);
+            }
+            previous = pose.az;
+        }
     }
 
     #[test]

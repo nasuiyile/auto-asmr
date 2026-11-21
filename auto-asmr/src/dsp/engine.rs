@@ -12,7 +12,7 @@ use super::pinna::pinnas;
 use super::rain::{Rain, RainSetup};
 use super::room::{conv_energy, Room};
 use super::tables::{tables, Hrir, Tables};
-use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathFx, CanalComb, ContactFx, DeEsser, Denoiser, Gate, SharpSoftener, DENOISE_DELAY, EAR_EQ_TAPS};
+use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathDeBoom, BreathFx, BreathTone, CanalComb, ContactFx, DeEsser, Denoiser, Gate, SharpSoftener, DENOISE_DELAY, EAR_EQ_TAPS};
 use super::{db_to_lin, lin_to_db, smoothstep, C, CANAL_L0, CTRL, CTRL_DT, EAR_R, FS, NTAP, R_MAX, R_MIN};
 use std::sync::Arc;
 
@@ -302,6 +302,8 @@ pub struct Engine {
     denoiser: Denoiser,
     deess: DeEsser,
     sharp_softener: SharpSoftener,
+    breath_deboom: BreathDeBoom,
+    breath_tone: BreathTone,
     soft: Option<Fir>,
     soft_src: Option<Arc<Vec<f32>>>,
     softn: Option<Fir>,
@@ -383,6 +385,8 @@ impl Engine {
             denoiser: Denoiser::new(),
             deess: DeEsser::new(),
             sharp_softener: SharpSoftener::new(),
+            breath_deboom: BreathDeBoom::new(),
+            breath_tone: BreathTone::new(),
             soft: None,
             soft_src: None,
             softn: None,
@@ -539,7 +543,7 @@ impl Engine {
         if self.n_blocks > pre_blocks {
             self.tm += step;
         }
-        let mut pose = self.motion.step(p, self.tm, amp, f.follow_db);
+        let mut pose = self.motion.step_with_activity(p, self.tm, amp, f.follow_db, self.clock_act.unwrap_or(f.act));
         if self.az_offset != 0.0 {
             // 整个位置绕竖直轴转过去（刚体旋转，贴耳、上下的几何关系都不变）
             pose.az = (pose.az + self.az_offset).rem_euclid(360.0);
@@ -740,7 +744,11 @@ impl Engine {
         let la = self.la_buf.len();
         let dn_mix = p.denoise_mix();
         let sharp_mix = 1.0 - db_to_lin(-p.sharp_soften_db.clamp(0.0, 8.0));
+        let deboom_mix = 1.0 - db_to_lin(-p.breath_deboom_db.clamp(0.0, 12.0));
         let breath_on = p.breath_db > 0.0 || p.puff > 0.0;
+        let tone = p.breath_tone.clamp(0.0, 1.0);
+        // 薄声缺气流时最多补至原气流旋钮约 4 倍档，旋钮关掉后仍然没有气流。
+        let puff_boost = (4.0 / p.puff.max(0.25) - 1.0).max(0.0);
         let rumble_on = p.inear_cm > 0.0 && p.rumble > 0.0;
         let mut bed = [0.0; CTRL];
         for i in 0..m {
@@ -770,6 +778,8 @@ impl Engine {
                 o
             };
             let a = self.sharp_softener.process(a, sharp_mix);
+            let a = self.breath_deboom.process(a, deboom_mix);
+            let (a, thin) = self.breath_tone.process(a, tone);
             self.xa[i] = a;
             // 房间声的输入和直达声一样多延后几个样本（分数延时插值器的固定时延），两者的相对时间与 Python 版一致
             self.xr[i] = self.room_dl[self.room_dl_pos];
@@ -787,7 +797,7 @@ impl Engine {
             self.xd[i] = if breath_on {
                 // 只作用于直达声；房间声仍用原来的人声
                 let (ab, pf) = self.breath.process(a, wp);
-                ab + gb * self.warm_lp.process(ab) + pf
+                ab + gb * self.warm_lp.process(ab) + pf * (1.0 + puff_boost * thin)
             } else {
                 a + gb * self.warm_lp.process(a)
             };
@@ -998,6 +1008,37 @@ mod tests {
             })
             .sum();
         10.0 * (e / x.len() as f64 + 1e-30).log10() as f32
+    }
+
+    /// 两口同频谱的呼吸相差 12 dB，间隔足以让房间尾音衰减。
+    #[test]
+    fn breath_style_preserves_side_pauses_and_dynamics() {
+        let fs = FS as usize;
+        let first = fs / 4;
+        let second = first + 2 * fs;
+        let mut rng = crate::dsp::rng::Rng::new(431);
+        let mut filter = Biquad::bandpass(1400.0, 0.7);
+        let mut x = vec![0.0; 4 * fs];
+        for i in 0..fs {
+            let envelope = (std::f32::consts::PI * i as f32 / FS).sin().powi(2);
+            let breath = 0.035 * envelope * filter.process(rng.uniform(-1.0, 1.0));
+            x[first + i] = breath;
+            x[second + i] = 4.0 * breath;
+        }
+        let (l, r) = render(Params::default().style_breath(), &x);
+        assert!(l[..first].iter().chain(&r[..first]).all(|&s| s == 0.0));
+        let levels = |ear: &[f32], start| band_db(&ear[start + fs / 4..start + 3 * fs / 4], 200.0, 6000.0);
+        let (l1, r1) = (levels(&l, first), levels(&r, first));
+        let (l2, r2) = (levels(&l, second), levels(&r, second));
+        for ild in [l1 - r1, l2 - r2] {
+            assert!((5.0..32.0).contains(&ild.abs()), "近耳呼吸的双耳声级差 {ild:.1} dB");
+        }
+        let dynamics = l2.max(r2) - l1.max(r1);
+        assert!((8.0..16.0).contains(&dynamics), "两口呼吸在近耳相差 {dynamics:.1} dB");
+        for ear in [&l, &r] {
+            let pause = band_db(&ear[7 * fs / 4..2 * fs], 200.0, 6000.0);
+            assert!(pause < l1.max(r1) - 60.0, "呼吸间的停顿仍有 {pause:.1} dB");
+        }
     }
 
     /// 掏耳预设：声音只在一只耳朵里（另一只低 40 dB 以上），带很强的耳内低频；输入里并没有低频。

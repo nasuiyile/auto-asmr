@@ -157,19 +157,20 @@ pub unsafe extern "C" fn asmr_get_params_ron(buf: *mut c_char, cap: usize) -> c_
     write_c(&s, buf, cap)
 }
 
-/// 三个风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳。和桌面版一样，只改风格相关的那些参数。
+/// 风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音。和桌面版一样，只改风格相关的那些参数。
 #[no_mangle]
 pub extern "C" fn asmr_set_style(style: c_int) -> c_int {
     let name = match style {
         0 => "style_ear",
         1 => "style_ku100",
         2 => "style_earclean",
+        3 => "style_breath",
         _ => return -1,
     };
     report(catch_unwind(|| update_params(|p| settings::action(p, name))))
 }
 
-/// 按钮：`style_ear` / `style_ku100` / `style_earclean` / `reset` / `bg_rain_night` / `bg_off`。返回 0 = 成功。
+/// 按钮：`style_ear` / `style_ku100` / `style_earclean` / `style_breath` / `reset` / `bg_rain_night` / `bg_off`。返回 0 = 成功。
 ///
 /// # Safety
 /// `name` 是 NUL 结尾的 UTF-8 字符串。

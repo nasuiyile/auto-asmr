@@ -19,10 +19,10 @@ int asmr_init(void);
 // 参数（RON 格式的 Params）；返回 0 = 成功
 int asmr_set_params_ron(const char *ron);
 int asmr_get_params_ron(char *buf, size_t cap);
-// 风格：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳
+// 风格：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音
 int asmr_set_style(int style);
 int asmr_last_error(char *buf, size_t cap);
-// 按钮：style_ear / style_ku100 / style_earclean / reset / bg_rain_night / bg_off
+// 按钮：style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off
 int asmr_action(const char *name);
 // 改一个参数（字段名或虚拟字段，值是 JSON）；读全部参数（JSON）
 int asmr_set_field(const char *key, const char *value_json);

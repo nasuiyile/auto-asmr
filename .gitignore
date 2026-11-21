@@ -2,3 +2,6 @@
 hrtf/
 .tools/
 .idea/
+# 本机下载的呼吸音参考与试听
+/references/breath/*.flac
+/references/breath/*.wav

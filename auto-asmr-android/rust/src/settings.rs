@@ -132,6 +132,8 @@ pub fn describe_config(text: &str) -> Result<String, ConfigError> {
     // 风格按钮只改风格相关的参数：按一下没有变化，就是这个风格
     let style = if p.clone().style_earclean() == *p {
         "掏耳"
+    } else if p.clone().style_breath() == *p {
+        "呼吸音"
     } else if p.clone().style_ku100() == *p {
         "KU100 实录"
     } else if p.clone().style_ear() == *p {
@@ -244,12 +246,13 @@ pub fn set_field(p: &mut Params, key: &str, v: Value) -> Result<(), String> {
     Ok(())
 }
 
-/// 按钮：风格（同桌面版三个风格按钮）、恢复默认、雨夜、关雨声。
+/// 按钮：风格（同桌面版）、恢复默认、雨夜、关雨声。
 pub fn action(p: &mut Params, name: &str) -> Result<(), String> {
     *p = match name {
         "style_ear" => p.clone().style_ear(),
         "style_ku100" => p.clone().style_ku100(),
         "style_earclean" => p.clone().style_earclean(),
+        "style_breath" => p.clone().style_breath(),
         "reset" => Params::default(),
         "bg_rain_night" => p.clone().bg_rain_night(),
         "bg_off" => Params { bg_level: 0.0, ..p.clone() },
@@ -406,6 +409,9 @@ mod tests {
         // 风格按钮和桌面版是同一个函数
         action(&mut p, "style_ku100").unwrap();
         assert_eq!(p, before.clone().style_ku100());
+        let expected = p.clone().style_breath();
+        action(&mut p, "style_breath").unwrap();
+        assert_eq!(p, expected);
         action(&mut p, "bg_rain_night").unwrap();
         assert!(p.bg_level > 0.0);
         action(&mut p, "bg_off").unwrap();
@@ -423,10 +429,16 @@ mod tests {
         load_config(&config::to_text(&desk).unwrap()).unwrap();
         update_params(|p| set_field(p, "presence_db", json!(5.0))).unwrap();
         update_params(|p| set_field(p, "static_ambience", json!(true))).unwrap();
+        update_params(|p| set_field(p, "breath_deboom_db", json!(4.5))).unwrap();
+        update_params(|p| set_field(p, "breath_tone", json!(0.65))).unwrap();
+        update_params(|p| set_field(p, "breath_pause_switch", json!(true))).unwrap();
         set_dry(true);
         let back = config::parse(&export_config().unwrap()).unwrap();
         assert!(back.buffer == 512 && back.input.as_deref() == Some("Mic") && back.dry);
         assert!(back.params.static_ambience);
+        assert_eq!(back.params.breath_deboom_db, 4.5);
+        assert_eq!(back.params.breath_tone, 0.65);
+        assert!(back.params.breath_pause_switch);
         assert_eq!((back.params.puff, back.params.presence_db), (2.5, 5.0));
         assert!(load_config("not ron").is_err());
     }
@@ -442,6 +454,8 @@ mod tests {
         assert!(d.contains("风格：KU100 实录") && d.contains("随机走位") && d.contains("真实房间") && d.contains("比人声低 18 dB") && d.contains("原声"), "{d}");
         let d = describe_config(&config::to_text(&Saved { params: Params::default().style_earclean(), ..Saved::default() }).unwrap()).unwrap();
         assert!(d.contains("风格：掏耳") && d.contains("入耳"), "{d}");
+        let d = describe_config(&config::to_text(&Saved { params: Params::default().style_breath(), ..Saved::default() }).unwrap()).unwrap();
+        assert!(d.contains("风格：呼吸音"), "{d}");
         let d = describe_config(&config::to_text(&Saved { params: Params { presence_db: 7.0, ..Params::default() }, ..Saved::default() }).unwrap()).unwrap();
         assert!(d.contains("风格：自定义"), "{d}");
         // 桌面版的窗口状态文件（没有设置）、别的程序的键值文件、普通文本：都认不出来

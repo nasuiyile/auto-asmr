@@ -2162,13 +2162,13 @@ impl App {
     /// 右侧第一栏：风格、贴耳感、左右移动。`mix`：多音频合成中时是 Some(是否一起移动)——各自固定时左右移动不起作用，
     /// 一起移动时几个音频按这里的方式一起走。
     ///
-    /// 返回值：按了风格按钮、文件转换的目标响度也该跟着换时，是新的目标响度（掏耳 −20 LUFS，其余 −16）。
+    /// 按下风格按钮时，返回需同步的文件转换目标响度。
     fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<f32> {
         let mut file_lufs = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(t("风格", "Style")).strong());
             // 从掏耳切回人声的风格：文件转换的目标响度也恢复成 −16
-            let back = (p.inear_cm > 0.0).then_some(Params::default().target_lufs);
+            let back = (p.inear_cm > 0.0 || p.target_lufs == crate::dsp::params::BREATH_LUFS).then_some(Params::default().target_lufs);
             if ui.button(t("贴耳加强", "Close to ear")).on_hover_text(t("嘴离耳约 1.7 cm，另一只耳朵几乎听不到，不加房间，左右耳慢慢穿梭", "Mouth ≈1.7 cm from the ear, far ear almost silent, no room, slow sweeps between the ears")).clicked() {
                 *p = p.clone().style_ear();
                 file_lufs = back;
@@ -2176,6 +2176,10 @@ impl App {
             if ui.button(t("KU100 实录", "KU100 natural")).on_hover_text(t("模拟 KU100 近耳轻语。贴近时带出原声里细微的呼吸，控制响齿音和低频气流。声源在耳边和身前随机停留，远耳保留实测房间声。", "Models close whispers on a KU100. Brings out quiet breath as the voice draws near, with controlled sibilance and low-frequency air pulses. The voice pauses near either ear or in front, with measured room sound in the far ear.")).clicked() {
                 *p = p.clone().style_ku100();
                 file_lufs = back;
+            }
+            if ui.button(t("呼吸音", "Breathing")).on_hover_text(t("处理录音中的吸气和呼气。用带自然停顿的单声道呼吸录音试听。", "Use a recording of breathing with its natural pauses.")).clicked() {
+                *p = p.clone().style_breath();
+                file_lufs = Some(crate::dsp::params::BREATH_LUFS);
             }
             if ui.button(t("掏耳", "Ear cleaning")).on_hover_text(t("给棉签、挖耳勺、刮擦这类触发音用（不是给人声用的）：声源伸进耳道进进出出，带耳道共鸣、耳内低频和堵耳的闷感，另一只耳朵基本听不到，每只耳朵约 40 秒才换边。按两段 KU100 掏耳实录标定。降噪会把这类声音当噪声压掉，请把降噪关掉或调低", "For trigger sounds such as cotton swabs, ear picks and scratching (not for voice): the source moves in and out of the ear canal with canal resonance, in-ear rumble and an occluded tone; the other ear is almost silent and the ear changes about every 40 s. Calibrated to two KU100 ear-cleaning recordings. Denoise treats such sounds as noise: turn it off or down")).clicked() {
                 *p = p.clone().style_earclean();
@@ -2201,6 +2205,8 @@ impl App {
                 row(ui, t("气声增强", "Breath lift"), t("贴耳时把嗓音里轻的送气声 / 气息提上来（最多这么多），响的齿音不提；只用嗓音自己的气声，不加噪声。0 = 关闭", "Lifts the soft breathy part of the voice when close (by at most this much); loud sibilants are left alone. No noise is added. 0 = off"), egui::Slider::new(&mut p.breath_db, 0.0..=12.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("近处气声范围", "Breath lift around the head"), t("把部分气声增强延伸到身前等近处方位。数值越大，面前轻声越清楚。到头中心 20 cm 内最强，65 cm 处淡出。0 = 只在贴耳时增强；气流扑耳单独调节。", "Extends a fraction of the breath lift to nearby positions, including in front. Full reach within 20 cm of the head center, fading out by 65 cm. At 0, lift applies only near the ear. Breath puff has its own control."), egui::Slider::new(&mut p.breath_reach, 0.0..=1.0).fixed_decimals(2));
                 row(ui, t("气流扑耳", "Breath puff"), t("送气时气流扑到耳朵上的低频脉冲（耳朵痒的感觉），由嗓音自己的送气声导出。0 = 关闭，1 倍 = 标准；滑块到 8 倍，手输可更高", "Low-frequency pulses of breath hitting the ear, derived from the voice's own aspiration. 0 = off, 1x = standard; slider up to 8x, type for higher values"), egui::Slider::new(&mut p.puff, 0.0..=8.0).suffix(t(" 倍", "x")).fixed_decimals(2));
+                row(ui, t("呼吸去闷", "Breath de-boom"), t("100–300 Hz 比呼吸的中频突出时，动态收低 180 Hz 附近。这里调最大衰减。", "Maximum cut around 180 Hz when low mids dominate the breath."), egui::Slider::new(&mut p.breath_deboom_db, 0.0..=12.0).suffix(" dB"));
+                row(ui, t("薄声补偿", "Thin breath compensation"), t("呼吸低频偏少时补气流，3 kHz 以上过亮时柔化。0 = 关闭。", "Fills in missing low-frequency airflow and softens excess brightness above 3 kHz. 0 = off."), egui::Slider::new(&mut p.breath_tone, 0.0..=1.0).fixed_decimals(2));
                 row(ui, t("耳甲共鸣", "Concha resonance"), t("贴耳时近耳 4.3 kHz 的耳甲腔共振（KU100 贴耳实录的共有特征）。0 = 关闭", "4.3 kHz concha resonance at the near ear when close. 0 = off"), egui::Slider::new(&mut p.concha_db, 0.0..=8.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("贴耳轻声", "Soft when close"), t("凑到耳边时把嗓音均衡成「放轻声音」，退开时恢复（只做均衡）。0 = 关闭", "EQ towards a lowered voice when at the ear, back to normal when away (EQ only). 0 = off"), egui::Slider::new(&mut p.soft_near, 0.0..=1.5).fixed_decimals(2));
                 row(ui, t("嘴的大小", "Mouth size"), t("嘴是一个开口而不是一个点：贴耳时耳廓的窄谷被平均变浅，离远了没有区别。0 = 点声源", "The mouth is an opening, not a point: narrow pinna notches smooth out when close. 0 = point source"), egui::Slider::new(&mut p.mouth_cm, 0.0..=5.0).suffix(" cm").fixed_decimals(1));
@@ -2259,6 +2265,10 @@ impl App {
                     p.level_follow = Params::default_level_follow(p.mode);
                 }
             });
+            if p.mode == MotionMode::Sweep {
+                ui.checkbox(&mut p.breath_pause_switch, t("换气时换边", "Switch ears between breaths"))
+                    .on_hover_text(t("在一侧停够设定时间后，等换气间隙再移动。", "After the hold time has elapsed, wait for a gap between breaths to move."));
+            }
             egui::Grid::new("g2").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 match p.mode {
                     MotionMode::Sweep | MotionMode::Random => {

@@ -12,7 +12,17 @@ KU100 实录风格下，`--breath` 控制原声里轻微送气的最大提升量
 
 `--static-ambience on|off` 控制录音里的持续底噪是否留在固定位置。选择 `--style ku100` 时自动开启；例如 `auto-asmr convert 输入.wav --style ku100 --static-ambience off -o 对照.wav` 可听关闭效果。实时模拟 `rt-sim` 使用同一选项。房间反射用 `--room` 调节，输入降噪用 `--denoise` 调节，合成雨声仍用 `--bg` 调节。
 
-`--style` 有三个内置预设：`ear`（贴耳加强，默认）、`ku100`（像真实 KU100 轻语实录）、`earclean`（掏耳，给棉签 / 挖耳勺 / 刮擦这类触发音用）。风格先生效，后面写的参数再覆盖它。掏耳的目标响度默认是 −20 LUFS，入耳的几项可以单独调（`--inear` 入耳深度、`--canal` 耳道共鸣、`--rumble` 耳内低频、`--muffle` 堵耳闷感，见 `--help`）：
+`--style` 有四个内置预设：`ear`（贴耳加强，默认）、`ku100`（近耳轻语）、`breath`（呼吸音）和 `earclean`（掏耳）。风格先生效，显式参数可覆盖预设。处理单声道呼吸录音、保留原来的吸气和呼气节奏：
+
+```bash
+auto-asmr convert 呼吸干声.wav --style breath -o 枕边呼吸.wav
+```
+
+`--breath-tone 0..1` 调整薄声补偿强度，低频偏弱时补气流，3 kHz 以上过亮时柔化。设为 0 可关闭。`--puff` 单独调气流触感。呼吸去闷 `--breath-deboom 0..12` 限制 180 Hz 附近的最大动态衰减，呼吸音预设取 6 dB。
+
+呼吸音预设开启 `--breath-pause-switch on`，在穿梭模式下达到 `--hold-time` 后等待换气间隙再换边，`--move-time` 调移动时间。设为 `off` 恢复定时穿梭。文件目标响度默认 −26 LUFS，可以用 `--lufs` 覆盖。参考片段和频带测量见[呼吸音预设](effects.md#呼吸音预设)。
+
+掏耳的目标响度默认是 −20 LUFS，入耳的几项可以单独调（`--inear` 入耳深度、`--canal` 耳道共鸣、`--rumble` 耳内低频、`--muffle` 堵耳闷感，见 `--help`）：
 
 ```bash
 auto-asmr convert 棉签.wav -o 掏耳.wav --style earclean --hold-time 60 --rumble 0.8

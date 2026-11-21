@@ -12,6 +12,8 @@ pub const EARCLEAN_LUFS: f32 = -20.0;
 /// 掏耳预设实时 / 试听的目标响度：实时的自动响度按"有声音时的平均"来拉，一下一下的摩擦声实际会比目标高 3–5 LU，
 /// 所以定得再低一些，实际落在 −19 LUFS 上下，限制器不用压太多。
 pub const EARCLEAN_LIVE_LUFS: f32 = -23.0;
+/// 三份枕边呼吸参考整轨响度中位约 −26 LUFS。
+pub const BREATH_LUFS: f32 = -26.0;
 
 /// 左右移动的方式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +76,10 @@ pub struct Params {
     pub breath_reach: f32,
     /// 气流扑耳：送气时气流扑到贴着的那只耳朵上的低频脉冲（50–130 Hz，由嗓音自己的送气声导出）。0 = 关闭，1 = 标准。
     pub puff: f32,
+    /// 呼吸去闷：低中频相对中频突出时，最多压低 180 Hz 附近多少 dB。
+    pub breath_deboom_db: f32,
+    /// 薄声补偿，0–1。按非周期性活动声的频谱补充气流、柔化过亮的气声。
+    pub breath_tone: f32,
     /// 耳甲共鸣：贴耳时近耳 4.3 kHz 的耳甲腔共振，dB。0 = 关闭。
     pub concha_db: f32,
     /// 嘴的大小（厘米）：嘴是约 2 cm 宽的开口而不是一个点，贴耳时耳廓的窄谷被平均变浅。0 = 点声源。
@@ -141,6 +147,8 @@ pub struct Params {
     pub sway_level: f32,
     /// 停顿时动作的速度（相对说话时）；1 = 一直在动。
     pub pause_motion: f32,
+    /// 穿梭时等待一组呼吸后的低电平间隙再换边。
+    pub breath_pause_switch: bool,
     /// 自然晃动幅度倍数（1 约 1.2 cm）。
     pub micro: f32,
 
@@ -228,6 +236,8 @@ impl Default for Params {
             breath_db: 6.0,
             breath_reach: 0.0,
             puff: 1.0,
+            breath_deboom_db: 0.0,
+            breath_tone: 0.0,
             concha_db: 4.0,
             mouth_cm: 2.0,
             far_shadow_db: 5.0,
@@ -261,6 +271,7 @@ impl Default for Params {
             sway_follow: 1.0,
             sway_level: 0.45,
             pause_motion: 0.13,
+            breath_pause_switch: false,
             micro: 1.0,
             height: 0.0,
             updown: 25.0,
@@ -298,13 +309,16 @@ impl Default for Params {
 impl Params {
     /// 把"风格"管的那些参数恢复成默认值（= 贴耳加强）：贴耳感、入耳、左右移动的方式和节奏、忽远忽近、上下、
     /// 房间与回放、去齿音 / 轻声化、目标响度。其余的——降噪、响应阈值、耳廓、自动响度开关、输出增益、峰值上限、
-    /// 随机种子、环绕 / 固定 / 手动模式的位置——保持不变。三个风格都先做这一步，所以按哪个按钮结果都是确定的，
+    /// 随机种子、环绕 / 固定 / 手动模式的位置——保持不变。各风格都先做这一步，所以按哪个按钮结果都是确定的，
     /// 从"掏耳"切回人声的风格时不会留下"伸进耳道、每只耳朵停 40 秒"之类的设置。
     fn style_base(mut self) -> Self {
         let d = Params::default();
         (self.ear_dist, self.isolation_db, self.presence_db, self.ku100_eq, self.dark_db) = (d.ear_dist, d.isolation_db, d.presence_db, d.ku100_eq, d.dark_db);
         (self.warmth_db, self.ear_warmth_db, self.far_lf_cut_db, self.breath_db, self.puff) = (d.warmth_db, d.ear_warmth_db, d.far_lf_cut_db, d.breath_db, d.puff);
         self.breath_reach = d.breath_reach;
+        self.breath_pause_switch = d.breath_pause_switch;
+        self.breath_deboom_db = d.breath_deboom_db;
+        self.breath_tone = d.breath_tone;
         (self.concha_db, self.mouth_cm, self.far_shadow_db, self.soft_near) = (d.concha_db, d.mouth_cm, d.far_shadow_db, d.soft_near);
         (self.inear_cm, self.inear_period, self.inear_random, self.canal_db, self.rumble, self.muffle_db) = (d.inear_cm, d.inear_period, d.inear_random, d.canal_db, d.rumble, d.muffle_db);
         (self.mode, self.hold_s, self.move_s, self.randomness, self.approach, self.front) = (d.mode, d.hold_s, d.move_s, d.randomness, d.approach, d.front);
@@ -349,6 +363,38 @@ impl Params {
         p.randomness = 0.5;
         p.sway = 0.85;
         p.sway_follow = 0.85;
+        p
+    }
+
+    /// 呼吸音：侧耳长停，保留原录音的换气和静默。气流脉冲取自呼吸本身的包络。
+    pub fn style_breath(self) -> Self {
+        let mut p = self.style_base();
+        p.playback = Playback::Native;
+        p.room = true;
+        p.ear_dist = 0.15;
+        p.ear_angle = 80.0;
+        p.isolation_db = 0.0;
+        p.far_lf_cut_db = 0.0;
+        p.breath_db = 0.0;
+        p.puff = 0.25;
+        p.warmth_db = 0.0;
+        p.ear_warmth_db = 0.0;
+        p.breath_deboom_db = 6.0;
+        p.breath_tone = 0.85;
+        p.target_lufs = BREATH_LUFS;
+        p.ku100_eq = true;
+        p.presence_db = 0.0;
+        p.concha_db = 0.0;
+        p.dark_db = 5.0;
+        p.breath_pause_switch = true;
+        p.hold_s = 5.0;
+        p.move_s = 0.8;
+        p.pause_motion = 1.0;
+        p.approach = 0.0;
+        p.sway = 0.0;
+        p.sway_follow = 0.0;
+        p.micro = 0.15;
+        p.updown = 0.0;
         p
     }
 
@@ -495,6 +541,10 @@ mod tests {
         assert_eq!(d.clone().style_ear(), d);
         assert_eq!(d.clone().style_earclean().style_ear(), d);
         assert_eq!(d.clone().style_ku100().style_ear(), d);
+        let breath = d.clone().style_breath();
+        assert_eq!(d.clone().style_earclean().style_breath(), breath);
+        assert_eq!(breath.clone().style_ear(), d);
+        assert_eq!(breath.style_ku100(), d.clone().style_ku100());
         // 先按哪个按钮都一样
         assert_eq!(d.clone().style_earclean().style_ku100(), d.clone().style_ku100());
         assert_eq!(d.clone().style_ku100().style_earclean(), d.clone().style_earclean());
@@ -508,7 +558,7 @@ mod tests {
         assert!(!e.room && e.target_lufs == EARCLEAN_LIVE_LUFS && EARCLEAN_LUFS < d.target_lufs);
         // 风格不管的设置保持不变：降噪、响应阈值、耳廓、输出、随机种子、各模式的位置
         let mine = Params { denoise: true, denoise_db: 12.0, gate_db: -50.0, pinna: "B".to_string(), out_gain_db: -3.0, ceiling_db: -2.0, auto_level: false, seed: 9, static_az: 45.0, orbit_radius: 0.5, manual_az: 10.0, ..d.clone() };
-        for q in [mine.clone().style_ear(), mine.clone().style_ku100(), mine.clone().style_earclean()] {
+        for q in [mine.clone().style_ear(), mine.clone().style_ku100(), mine.clone().style_breath(), mine.clone().style_earclean()] {
             assert!(q.denoise && q.denoise_db == 12.0 && q.gate_db == -50.0 && q.pinna == "B");
             assert!(q.out_gain_db == -3.0 && q.ceiling_db == -2.0 && !q.auto_level && q.seed == 9);
             assert!(q.static_az == 45.0 && q.orbit_radius == 0.5 && q.manual_az == 10.0);

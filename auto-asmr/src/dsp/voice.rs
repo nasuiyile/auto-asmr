@@ -172,6 +172,134 @@ impl SharpSoftener {
     }
 }
 
+/// 近讲呼吸在约 100–300 Hz 堆积时收低这一带。用同一口气的中频作参照，
+/// 使轻声和大声有相同的动作门限。直流和高频的滤波增益始终为 1。
+pub struct BreathDeBoom {
+    body: Biquad,
+    mid: Biquad,
+    body_power: f32,
+    mid_power: f32,
+    mix: f32,
+}
+
+impl BreathDeBoom {
+    pub fn new() -> Self {
+        Self { body: Biquad::bandpass(180.0, 0.95), mid: Biquad::bandpass(560.0, 0.9),
+            body_power: 0.0, mid_power: 0.0, mix: 0.0 }
+    }
+
+    #[inline]
+    pub fn process(&mut self, x: f32, max_mix: f32) -> f32 {
+        if max_mix == 0.0 && self.mix < 1e-5 {
+            if self.body_power > 0.0 || self.mid_power > 0.0 {
+                *self = Self::new();
+            }
+            return x;
+        }
+        let body = self.body.process(x);
+        let mid = self.mid.process(x);
+        let follow = ema_coef(0.045, DT);
+        self.body_power += follow * (body * body - self.body_power);
+        self.mid_power += follow * (mid * mid - self.mid_power);
+        // 两个检测带等功率时不动作，低中频高 6 dB 时达到用户设定的最大衰减。
+        let amount = ((self.body_power / self.mid_power.max(1e-16) - 1.0) / 3.0).clamp(0.0, 1.0);
+        self.mix += ema_coef(0.018, DT) * (amount * max_mix - self.mix);
+        x - self.mix * body
+    }
+}
+
+/// 根据当前的频谱缺口调节气流和亮度。用中频的周期性和背景电平保护持续音与底噪。
+pub struct BreathTone {
+    low: Biquad,
+    mid: Biquad,
+    high: [Biquad; 2],
+    soften: Biquad,
+    power: [f32; 3],
+    floor: f32,
+    // 4 kHz 的中频历史。每 16 ms 用最近 20 ms 在 80–400 Hz 寻找重复波形。
+    history: [f32; 192],
+    pos: usize,
+    samples: usize,
+    decim_sum: f32,
+    target: [f32; 2],
+    mix: [f32; 2],
+    active: bool,
+}
+
+impl BreathTone {
+    pub fn new() -> Self {
+        Self {
+            low: Biquad::lowpass(170.0, BUTTER_Q), mid: Biquad::bandpass(700.0, 0.85),
+            high: [Biquad::highpass(3000.0, BUTTER_Q); 2], soften: Biquad::peaking(4250.0, 0.65, -20.0),
+            power: [0.0; 3], floor: 0.0, history: [0.0; 192], pos: 0, samples: 0, decim_sum: 0.0,
+            target: [0.0; 2], mix: [0.0; 2], active: false,
+        }
+    }
+
+    fn update(&mut self) {
+        let [low, mid, high] = self.power;
+        self.power = [0.0; 3];
+        let total = mid + high;
+        // 缓升快降的声底。功率持续接近声底时不把麦克风底噪加工成扑耳声。
+        self.floor += (if total > self.floor { 0.05 } else { 0.55 }) * (total - self.floor);
+        let rise = ((total / self.floor.max(1e-12) - 1.5) / 2.5).clamp(0.0, 1.0);
+        if rise == 0.0 || mid < 1e-12 {
+            self.target = [0.0; 2];
+            return;
+        }
+        let mut periodicity = 0.0f32;
+        for lag in 10..=50 {
+            let (mut dot, mut aa, mut bb) = (0.0, 0.0, 0.0);
+            for j in 0..80 {
+                let i = self.pos + self.history.len() - 80 + j;
+                let a = self.history[i % self.history.len()];
+                let b = self.history[(i - lag) % self.history.len()];
+                dot += a * b;
+                aa += a * a;
+                bb += b * b;
+            }
+            // 平方相关系数避免逐个延迟求平方根。
+            periodicity = periodicity.max(dot.max(0.0).powi(2) / (aa * bb).max(1e-24));
+        }
+        let air = rise * ((0.60 - periodicity) / 0.35).clamp(0.0, 1.0);
+        self.target[0] = air * ((0.42 - low / mid) / 0.35).clamp(0.0, 1.0);
+        self.target[1] = air * ((high / mid - 0.004) / 0.034).clamp(0.0, 1.0);
+    }
+
+    /// 返回处理后的原声和额外气流的权重。补偿关掉时逐样本旁通。
+    #[inline]
+    pub fn process(&mut self, x: f32, strength: f32) -> (f32, f32) {
+        if strength == 0.0 && self.mix[0].max(self.mix[1]) < 1e-5 {
+            if self.active { *self = Self::new(); }
+            return (x, 0.0);
+        }
+        self.active = true;
+        let low = self.low.process(x);
+        let mid = self.mid.process(x);
+        let high = self.high[0].process(x);
+        let high = self.high[1].process(high);
+        self.power[0] += low * low;
+        self.power[1] += mid * mid;
+        self.power[2] += high * high;
+        self.decim_sum += mid;
+        self.samples += 1;
+        if self.samples % 12 == 0 {
+            self.history[self.pos] = self.decim_sum / 12.0;
+            self.decim_sum = 0.0;
+            self.pos = (self.pos + 1) % self.history.len();
+            if self.samples == 768 {
+                self.update();
+                self.samples = 0;
+            }
+        }
+        for (mix, target) in self.mix.iter_mut().zip(self.target) {
+            *mix += ema_coef(0.012, DT) * (strength * target - *mix);
+        }
+        let dark = self.soften.process(x);
+        (x + self.mix[1] * (dark - x), self.mix[0])
+    }
+}
+
 // ANSI S3.5-1997 表 3：不同说话力度的标准语音频谱（1/3 倍频程，dB）
 const ANSI_F: [f32; 18] = [160., 200., 250., 315., 400., 500., 630., 800., 1000., 1250., 1600., 2000., 2500., 3150., 4000., 5000., 6300., 8000.];
 const ANSI_NORMAL: [f32; 18] = [32.41, 34.48, 34.75, 33.98, 34.59, 34.27, 32.06, 28.3, 25.01, 23.0, 20.15, 17.32, 13.18, 11.55, 9.33, 5.31, 2.59, 1.13];
@@ -664,6 +792,60 @@ mod tests {
         assert_eq!(frontal(0.65, 0.75).0, g_away);
         assert_eq!(frontal(0.2, 0.0).0, g_away);
         assert_eq!(run_breath(&soft, 1.0, 6.0, 0.0, half, Some((0.11, 0.75))).0, g_soft);
+    }
+
+    #[test]
+    fn breath_deboom_attenuates_a_dominant_low_mid_and_bypasses_cleanly() {
+        let mut fx = BreathDeBoom::new();
+        let mix = 1.0 - db_to_lin(-6.0);
+        let gain_db = |fx: &mut BreathDeBoom, hz: f32, amp: f32| {
+            let mut energy = [0.0f64; 2];
+            for i in 0..48000 {
+                let x = amp * (std::f32::consts::TAU * hz * i as f32 / FS).sin();
+                let y = fx.process(x, mix);
+                if i > 24000 {
+                    energy[0] += f64::from(x).powi(2);
+                    energy[1] += f64::from(y).powi(2);
+                }
+            }
+            10.0 * (energy[1] / energy[0]).log10()
+        };
+        for amp in [0.01, 0.25] {
+            assert!((gain_db(&mut fx, 180.0, amp) + 6.0).abs() < 0.2);
+        }
+        assert!(gain_db(&mut fx, 55.0, 0.1).abs() < 1.0);
+        assert!(gain_db(&mut fx, 560.0, 0.1).abs() < 0.1);
+        for _ in 0..24000 { fx.process(0.1, 0.0); }
+        assert_eq!(fx.process(-0.25, 0.0), -0.25);
+    }
+
+    #[test]
+    fn breath_tone_checks_activity_periodicity_and_the_input_spectrum() {
+        let fs = FS as usize;
+        let mut rng = crate::dsp::rng::Rng::new(91);
+        let mut hp = [Biquad::highpass(650.0, BUTTER_Q); 2];
+        let mut fx = BreathTone::new();
+        // 同一频谱分别持续、起伏、富含低频、带音高；检查实际用于气流的权重。
+        let mut peaks = [0.0f32; 4];
+        for i in 0..8 * fs {
+            let t = i as f32 / FS;
+            let stage = i / (2 * fs);
+            let pos = i % (2 * fs);
+            let phase = std::f32::consts::TAU * 160.0 * t;
+            let white = hp[0].process(rng.uniform(-1.0, 1.0));
+            let white = hp[1].process(white);
+            let env = if stage == 0 { 1.0 } else { (std::f32::consts::TAU * 1.25 * t).sin().max(0.0) };
+            let x = 0.02 * env * match stage {
+                2 => white + 2.0 * (0.5 * phase).sin(),
+                3 => (4.0 * phase).sin() + 0.6 * (5.0 * phase).sin() + 0.3 * (19.0 * phase).sin(),
+                _ => white,
+            };
+            let (_, wind) = fx.process(x, 0.85);
+            if pos > fs { peaks[stage] = peaks[stage].max(wind); }
+        }
+        assert!(peaks[0] < 0.08 && peaks[1] > 0.35 && peaks[2] < 0.1 && peaks[3] < 0.1, "{peaks:?}");
+        for _ in 0..fs { fx.process(0.0, 0.0); }
+        assert_eq!(fx.process(0.25, 0.0), (0.25, 0.0));
     }
 
     /// 气流扑耳：能量集中在 50–130 Hz，强度随 puff 线性变化，离开耳边时为 0。

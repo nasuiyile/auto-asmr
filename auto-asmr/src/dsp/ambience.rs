@@ -10,8 +10,8 @@ const BINS: usize = N / 2 + 1;
 // 六段共约 1.54 秒。保存每段的最低平滑功率，乐句中间短暂的气息不会立即变成背景。
 const SECTION_HOPS: usize = 96;
 const SECTIONS: usize = 6;
-// 开场缺少噪声样本：用最初约 1.5 s 的声学证据填好整个最小统计量窗口。
-const STARTUP_HOPS: usize = SECTIONS * SECTION_HOPS;
+// 没有底噪谱时，只在开场约 0.2 秒用频谱形状辅助估计。
+const STARTUP_HOPS: usize = 80;
 type Plans = (Arc<dyn RealToComplex<f32>>, Arc<dyn ComplexToReal<f32>>);
 static PLANS: OnceLock<Plans> = OnceLock::new();
 
@@ -49,8 +49,6 @@ pub struct AmbienceSeparator {
     silent_hops: usize,
     onset_power: f32,
     startup_rejection: f32,
-    room_power: f32,
-    room_observations: usize,
 }
 
 impl AmbienceSeparator {
@@ -66,14 +64,14 @@ impl AmbienceSeparator {
         let mut start = 0;
         while start < BINS {
             // 低频保留窄带分辨率，高频合并约 1/6 倍频程，降低随机噪声造成的掩模抖动。
-            let end = (start + (start / 8).max(2)).min(BINS);
+            let end = (start + (start / 8).max(1)).min(BINS);
             bands.push(NoiseBand::new(start, end));
             start = end;
         }
         Self {
             forward, inverse, window, input: vec![0.0; N], overlap: vec![0.0; N], time: vec![0.0; N],
             spectrum: vec![Complex32::default(); BINS], scratch: vec![Complex32::default(); scratch_len],
-            bands, head: 0, hops: 0, section: 0, silent_hops: 0, onset_power: 0.0, startup_rejection: 0.0, room_power: 0.0, room_observations: 0,
+            bands, head: 0, hops: 0, section: 0, silent_hops: 0, onset_power: 0.0, startup_rejection: 0.0,
         }
     }
 
@@ -91,8 +89,6 @@ impl AmbienceSeparator {
         self.silent_hops = 0;
         self.onset_power = 0.0;
         self.startup_rejection = 0.0;
-        self.room_power = 0.0;
-        self.room_observations = 0;
         for band in &mut self.bands {
             *band = NoiseBand::new(band.start, band.end);
         }
@@ -121,9 +117,6 @@ impl AmbienceSeparator {
 
         let mut frame_power = 0.0;
         let mut strongest_bin = 0.0f32;
-        let mut total = 0.0;
-        let mut stable = 0.0;
-        let mut largest = 0.0f32;
         for band in &mut self.bands {
             let bins = &self.spectrum[band.start..band.end];
             let mut energy_now = 0.0;
@@ -140,10 +133,6 @@ impl AmbienceSeparator {
             // 慢起的低包络与慢落的高包络若相近，频带在近几百毫秒内都比较稳定。
             band.quiet = band.smooth.min(band.quiet + 0.012 * (band.smooth - band.quiet));
             band.loud = band.smooth.max(band.loud * 0.993);
-            let energy = band.smooth * bins.len() as f32;
-            total += energy;
-            largest = largest.max(energy);
-            if band.quiet > 0.6 * band.loud { stable += energy; }
         }
         // 跳过无信号的帧。静音不能作为房间的功率估计，重新开始播放也要重新判断开场。
         if frame_power < 1e-15 {
@@ -167,78 +156,84 @@ impl AmbienceSeparator {
         let top_energy: f32 = self.spectrum[64..].iter().map(|z| z.norm_sqr()).sum();
         let body_share = self.spectrum[..24].iter().map(|z| z.norm_sqr()).sum::<f32>() / frame_power;
         let high_share = top_energy / frame_power;
-        // 从编解码器的极小前导 / 数字静音渐入时，相对增幅也很大；
-        // 至少已有可用的噪声标尺，或确实出现强起音，才按突发音处理。
-        let established = self.room_power > 0.001 || frame_power > 0.01;
-        if established && ((attack && frame_power > 6.0 * self.room_power) || (rise && high_share > 0.4)) {
+        // 极弱编码前导的相对增幅也很大，只有可听的强起音才作为突发音。
+        if frame_power > 0.01 && (attack || (rise && high_share > 0.4)) {
             self.startup_rejection = 1.0;
         } else {
             self.startup_rejection *= 0.982;
         }
-        // 窄频、缓慢变大的持续低频（如空调声）也常伴随可见的宽带声底。
         let tonal = ((peak_share - 0.24) / 0.29).clamp(0.0, 1.0);
-        let low_hum = self.spectrum[..2].iter().map(|z| z.norm_sqr()).sum::<f32>() > 0.95 * frame_power;
+        // 机箱、风扇或电源嗡声可以有几条相邻的低频谱线。留出窗函数主瓣的宽度。
+        let low_hum = self.spectrum[..5].iter().map(|z| z.norm_sqr()).sum::<f32>() > 0.97 * frame_power;
         let air_is_voice = high_share > 0.88 || (body_share < 0.025 && high_share < 0.55);
         let voiced = high_share < 0.015 && !low_hum;
-        let evidence = if air_is_voice || voiced { 0.0 } else if low_hum { 1.0 } else { 1.0 - tonal };
-        if self.hops < STARTUP_HOPS && evidence > 0.7 && self.startup_rejection < 0.5 {
-            self.room_observations += 1;
-            if self.room_observations > 5 {
-                self.room_power = self.room_power.max(self.onset_power);
-            }
-        }
-        if self.room_power > self.onset_power {
-            self.room_power += 0.002 * (self.onset_power - self.room_power);
-        }
-        let room_match = ((6.0 - frame_power / self.room_power.max(1e-20)) / 3.0).clamp(0.0, 1.0);
-        let onset_room = if self.hops < STARTUP_HOPS { evidence } else { 0.0 };
-        let close_to_room = if self.startup_rejection > 0.15 || air_is_voice || voiced { 0.0 } else { room_match * (1.0 - tonal.powi(4)) };
-        let background = onset_room.max(close_to_room) * (1.0 - self.startup_rejection);
+        let evidence = if air_is_voice || voiced { 0.0 } else { 1.0 - tonal };
+        let opening = self.hops < STARTUP_HOPS;
+        let background = if opening { evidence * (1.0 - self.startup_rejection) } else { 0.0 };
         let broad_shape = ((high_share - 0.035) / 0.035).clamp(0.0, 1.0)
             * ((body_share - 0.10) / 0.15).clamp(0.0, 1.0);
-        // 数字静音或接近静音之后，新出现且持续的宽带底响可重新建立噪声底。
-        // 若能量集中在单个谐波或各带都在起伏，仍需等待长期最低功率作为证据。
-        let steady_broadband = total > 1e-12 && stable > 0.75 * total && largest < 0.35 * total;
+        // 淡入或话筒增益改变会使许多频带一起升高。用功率比的下四分位估计共同增幅，
+        // 这样少数新出现的谐波抬不起整个底噪谱。复用两次 FFT 之间空闲的时域缓冲。
+        let mut count = 0;
+        if !opening && evidence > 0.5 && self.startup_rejection < 0.15 {
+            for band in &self.bands {
+                if band.floor > (1e-7 * frame_power).max(1e-18) {
+                    self.time[count] = band.smooth / band.floor;
+                    count += 1;
+                }
+            }
+        }
+        let common_rise = if count >= 8 {
+            let (_, ratio, _) = self.time[..count].select_nth_unstable_by(count / 4, f32::total_cmp);
+            ratio.clamp(1.0, 1.06)
+        } else { 1.0 };
         {
-            let threshold = if steady_broadband { 3.0 } else { 1.6 };
             for i in 0..self.bands.len() {
                 // 启动时没有纯底噪样本。用相邻频带限制初始估计，防止开头的稳定元音被当成底噪。
                 let lower = self.bands[i.saturating_sub(2)..i].iter();
                 let upper = self.bands[(i + 1)..(i + 3).min(self.bands.len())].iter();
                 let shoulder = lower.chain(upper).map(|b| b.smooth).fold(f32::INFINITY, f32::min);
                 let band = &mut self.bands[i];
+                band.floor *= common_rise;
                 band.minima[self.section] = band.minima[self.section].min(band.smooth);
                 // 窄带的随机波动较大，给它的最小统计量补偿也稍大。
                 let bias = 1.15 + 0.9 / (band.end - band.start) as f32;
                 let observed = band.minima.iter().copied().fold(f32::INFINITY, f32::min) * bias;
-                let stable_floor = if steady_broadband { band.quiet.min(2.0 * shoulder) } else { 0.0 };
+                let smoothness = (8.0 * shoulder / band.smooth.max(1e-24)).clamp(0.0, 1.0);
+                let startup = if opening && low_hum && band.start < 5 {
+                    1.0
+                } else { background * smoothness.max(broad_shape) };
+                // 用本频带约几百毫秒的低包络验证新的底噪。高频嘶声必须经过这段观察，
+                // 低频嗡声则只允许低频带走捷径，避免把同时出现的轻声也写进底噪谱。
+                let stable = band.quiet > 0.52 * band.loud && !opening;
+                let harmonic = voiced && band.smooth > 2.0 * shoulder;
+                let stable_floor = if stable && !harmonic { band.quiet } else { 0.0 };
                 let target_floor = observed.max(stable_floor);
                 if self.hops == 0 || band.floor <= 1e-16 {
                     band.floor = target_floor.min(0.5 * shoulder);
-                } else if target_floor < band.floor {
-                    band.floor += 0.10 * (target_floor - band.floor);
+                } else if band.smooth < band.floor {
+                    band.floor += 0.10 * (band.smooth - band.floor);
                 } else if stable_floor > band.floor {
                     band.floor += 0.035 * (stable_floor - band.floor);
-                } else {
+                } else if !harmonic && target_floor > band.floor {
                     // 安静录音的底噪可以重新学习。强且窄的谐波处每秒最多上升约 1 dB。
                     let cap = if observed > 1.5 * shoulder { 1.0006 } else { 1.008 };
                     band.floor = target_floor.min(band.floor * cap);
                 }
-                let smoothness = (8.0 * shoulder / band.smooth.max(1e-24)).clamp(0.0, 1.0);
-                let startup = background * if low_hum { 1.0 } else { smoothness.max(close_to_room).max(broad_shape) };
                 // 用可信的宽带开场跨过从静音到房间声的淡入。只有持续的分量才能写入噪声底。
                 if startup > 0.65 {
                     band.floor = band.floor.max(startup * band.smooth);
-                    band.minima[self.section] = band.minima[self.section].max(startup * band.quiet);
                 }
-                let excess = band.fast / band.floor.max(1e-18);
+                let excess = (0.6 * band.fast + 0.4 * band.smooth) / band.floor.max(1e-18);
                 // 背景占主导时整带留在房间。新出现的能量高于噪声底后迅速交还人声支路。
-                let gain = if air_is_voice {
-                    0.0
-                } else {
-                    let harmonic_limit = if voiced { smoothness.powi(2) } else { 1.0 };
-                    ((threshold / excess.max(threshold)).powi(2) * harmonic_limit).max(startup)
+                // 短时功率在窄带噪声中波动较大。慢功率仍贴近噪声谱时允许这种波动，
+                // 只要慢功率也升高，就恢复对新音节的灵敏度。
+                let near_floor = (2.5 - band.smooth / band.floor.max(1e-18)).clamp(0.0, 1.0);
+                let threshold = 1.7 + near_floor;
+                let tracked = if opening && (air_is_voice || voiced) { 0.0 } else {
+                    (threshold / excess.max(threshold)).powi(2)
                 };
+                let gain = tracked.max(startup);
                 let follow = if self.hops < 4 { 1.0 } else if gain < band.gain { 0.7 } else { 0.15 + 0.7 * startup };
                 band.gain += follow * (gain - band.gain);
             }
@@ -411,5 +406,100 @@ mod tests {
             bed_energy += bed * bed;
         }
         assert!(bed_energy < 0.03 * input_energy, "开头持续元音泄漏 {}", bed_energy / input_energy);
+    }
+
+    // 先量单独底噪在移动支路的残留，再用混合段与已知干净前景的投影量前景增益。
+    // 从移动支路减去干净前景，剩下的背景泄漏和前景失真都计入误差。
+    fn measure_mixed_stems(noise: &[f32], target: &[f32], active: std::ops::Range<usize>) -> (f64, f64, f64) {
+        let mut separator = AmbienceSeparator::new();
+        let (mut quiet_noise, mut quiet_leak) = (0.0, 0.0);
+        let (mut mixed_noise, mut mixed_error, mut target_power, mut correlation) = (0.0, 0.0, 0.0, 0.0);
+        for i in 0..noise.len() {
+            let (moving, _) = separator.process(noise[i] + target[i]);
+            if i < N { continue; }
+            let j = i - N;
+            let noise = f64::from(noise[j]);
+            let target = f64::from(target[j]);
+            let moving = f64::from(moving);
+            if (48000..active.start).contains(&j) {
+                quiet_noise += noise * noise;
+                quiet_leak += moving * moving;
+            } else if active.contains(&j) {
+                mixed_noise += noise * noise;
+                mixed_error += (moving - target).powi(2);
+                target_power += target * target;
+                correlation += moving * target;
+            }
+        }
+        (quiet_leak / quiet_noise, mixed_error / mixed_noise, correlation / target_power)
+    }
+
+    #[test]
+    fn sustained_high_hiss_stays_fixed_under_a_short_breath() {
+        let mut rng = Rng::new(931);
+        let mut breath_band = crate::dsp::filters::Biquad::bandpass(4200.0, 1.6);
+        let (mut prev, mut older) = (0.0, 0.0);
+        let mut noise = vec![0.0; 3 * 48000];
+        let mut breath = vec![0.0; noise.len()];
+        let active = 96000..108000;
+        for i in 0..noise.len() {
+            let white = rng.uniform(-1.0, 1.0);
+            noise[i] = 0.015 * (white - 2.0 * prev + older);
+            older = prev;
+            prev = white;
+            let air = breath_band.process(rng.uniform(-1.0, 1.0));
+            if active.contains(&i) {
+                let phase = (i - active.start) as f32 / active.len() as f32;
+                breath[i] = 0.09 * (std::f32::consts::PI * phase).sin().powi(2) * air;
+            }
+        }
+        let (quiet, mixed, gain) = measure_mixed_stems(&noise, &breath, active);
+        assert!(quiet < 0.12 && mixed < 0.30 && gain > 0.65,
+            "持续嘶声残留 {quiet:.3}，气声段误差/底噪 {mixed:.3}，气声振幅保留 {gain:.3}");
+    }
+
+    #[test]
+    fn low_motor_harmonics_stay_fixed_as_the_level_rises() {
+        let mut splitter = AmbienceSeparator::new();
+        let mut rng = Rng::new(240);
+        let mut phase = 0.0f32;
+        let mut energy = [[0.0; 2]; 2];
+        for i in 0..3 * 48000 {
+            let t = i as f32 / 48000.0;
+            phase += std::f32::consts::TAU * (48.0 + 0.2 * t.sin()) / 48000.0;
+            let level = 0.025 * (1.0 + (t - 1.0).clamp(0.0, 1.0));
+            let motor = 0.15 * phase.sin() + 0.42 * (3.0 * phase).sin() + (5.0 * phase).sin();
+            let (moving, fixed) = splitter.process(level * (motor + rng.uniform(-0.02, 0.02)));
+            let window = if i < 12000 { Some(0) } else if i >= 48000 { Some(1) } else { None };
+            if let Some(k) = window {
+                energy[k][0] += moving * moving;
+                energy[k][1] += (moving + fixed).powi(2);
+            }
+        }
+        for [leak, input] in energy {
+            assert!(leak < 0.05 * input, "电机嗡声留在移动路的功率比例 {}", leak / input);
+        }
+    }
+
+    #[test]
+    fn weak_modulated_voice_stays_in_front_of_loud_fan_noise() {
+        let mut rng = Rng::new(125);
+        let mut low = 0.0;
+        let mut noise = vec![0.0; 5 * 48000];
+        let mut voice = vec![0.0; noise.len()];
+        let active = 96000..204000;
+        for i in 0..noise.len() {
+            low += 0.035 * (rng.uniform(-1.0, 1.0) - low);
+            noise[i] = 0.14 * low;
+            if active.contains(&i) {
+                let t = (i - active.start) as f32 / 48000.0;
+                let phase = std::f32::consts::TAU * (190.0 * t + 0.8 * (std::f32::consts::TAU * 1.4 * t).sin());
+                let syllable = (std::f32::consts::TAU * 2.0 * t).sin().max(0.0);
+                voice[i] = 0.018 * syllable * (phase.sin() + 0.4 * (3.0 * phase).sin() + 0.2 * (5.0 * phase).sin());
+            }
+        }
+        let (quiet, mixed, gain) = measure_mixed_stems(&noise, &voice, active);
+        assert!(quiet < 0.12 && mixed < 0.35 && gain > 0.50,
+            "风声残留 {quiet:.3}，发声段误差/底噪 {mixed:.3}，弱人声振幅保留 {gain:.3}");
     }
 }

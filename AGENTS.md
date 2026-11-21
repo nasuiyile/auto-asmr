@@ -17,3 +17,13 @@
 - 新增主题时在 `doc/` 新建文件，并加进 `doc/README.md`；文档之间用相对链接。
 - 文档用中文。
 - 发布工作流（`.github/workflows/release.yml`）会把 `auto-asmr/README.md` 和 `doc/` 一起打进压缩包；移动或改名文档时同步检查它。
+
+## 版本对齐
+
+- 新增或调整音频预设（风格、背景音预设）、新增 / 改名 / 删除效果参数、改参数的范围 / 默认值 / 标签时，所有版本都要对齐：桌面版界面和命令行、安卓版、浏览器插件、global-asmr、Python 版（做不到的写进文档）。
+- 要改哪些文件、怎么检查、跑哪些测试，见 `.claude/skills/align-versions/SKILL.md`；对齐检查脚本：`python3 .claude/skills/align-versions/scripts/check_alignment.py`。
+
+## 收尾
+
+- 每次结束任务前看一下 `git status`（暂存区和未跟踪的文件）：构建产物（`build/`、`target/`、`.cxx/`、`.gradle/`、APK、wasm 产物）、本机配置（`local.properties` 等）、下载的数据和试听文件不该出现在里面。新目录在提交前用 `git add -n <目录>` 预览一遍会加进哪些文件。
+- 发现该忽略却没忽略的，补进对应目录的 `.gitignore`（或根目录的），不要提交它们；已经被跟踪的要提醒用户。

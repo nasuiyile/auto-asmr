@@ -10,7 +10,7 @@ uv run asmr_binaural.py 输入.m4a -o 输出.wav --mode wander  # 在你身边�
 
 第一次运行时，uv 会安装 numpy / scipy / h5py；如果 `hrtf/` 里没有数据，会从 Zenodo 下载约 16 MB 的 HRIR，然后生成预处理缓存（约半分钟）。之后处理 1 分钟音频大约 2 秒，62 分钟音频约 2.5 分钟。
 
-各项效果的做法和依据见[效果与依据](effects.md)。Python 版的 `--style` 只有 `ear` 和 `ku100`：掏耳预设只有 Rust 版有，Rust 版的 `ku100` 后来也重新标定过，与这里的不再相同（见[两版的关系](python-vs-rust.md)）。
+各项效果的做法和依据见[效果与依据](effects.md)。Python 版的 `--style` 只有 `ear` 和 `ku100`：掏耳、呼吸音预设只有 Rust 版有，Rust 版的 `ku100` 后来也重新标定过，与这里的不再相同（见[两版的关系](python-vs-rust.md)）。
 
 ## 运动模式 `--mode`
 

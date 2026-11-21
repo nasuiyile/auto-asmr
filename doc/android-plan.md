@@ -103,6 +103,8 @@
 | E. GeckoView（Firefox 内核） | Mozilla 官方的可嵌入库 | 不是 Chromium；没有音频输出接口，截声音同样只能 hook 或自己编译 Gecko | 不推荐 |
 | F. 系统音效 AudioEffect | 给 WebView 的音频会话挂效果 | 自定义效果要写进系统配置（需要 root），自带的只有均衡、低音、虚拟环绕、动态处理，做不了双耳空间化 | 不可用 |
 
+以上都只处理本 App 的声音。处理**任意 App** 的声音（需要 Shizuku 或 root）是另一个原型，见[全局拦截版](shizuku.md)。
+
 ## 推荐方案的细节
 
 ### 结构

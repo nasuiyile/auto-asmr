@@ -1,8 +1,10 @@
-# 全局拦截版 global-asmr（Shizuku / root，原型）
+# 安卓版的全局模式（Shizuku / root，原型）
 
-`auto-asmr-shizuku/` 是一个单独的安卓 App，名字叫 **global-asmr**：把**任意 App** 播放的声音截下来，交给和安卓版同一份 Rust 引擎处理，再从耳机放出来。原声不会再进耳机，听到的只有处理后的声音。不需要 root，但需要 [Shizuku](https://shizuku.rikka.app/)（或者 root）。界面、参数、配置文件和[安卓版](android-dev.md)（auto-asmr）一致，所有参数在一页里改。
+[安卓版](android-dev.md)（auto-asmr）有两种模式：没有 Shizuku 时用**网页模式**，在内嵌浏览器里听网页；有 [Shizuku](https://shizuku.rikka.app/)（或者 root）时可以用**全局模式**，把**任意 App** 播放的声音截下来，交给同一份 Rust 引擎处理，再从耳机放出来。原声不会再进耳机，听到的只有处理后的声音。两种模式在同一个 App 里，共用一份配置（参数、左右双人、原声开关）。
 
-目前是原型。0.2.0 在 Android 16 模拟器上验证通过（见[实测结果](#实测结果模拟器android-16)）：常驻服务进程（App 被杀后声音照常处理）、悬浮球、参数面板。真机上第一次试（荣耀 AAP-AN00，Android 17）在开始录音时报错，已经针对性修改（见[厂商系统的兼容处理](#厂商系统的兼容处理)），**还要在这台手机上复测**；其它真机没测过，「用 root 启动」（Magisk / KernelSU 的 su）也还没跑过（见[还没验证的](#还没验证的)）。
+全局模式原先是一个单独的 App（global-asmr，目录 `auto-asmr-shizuku/`），已经合并进安卓版：代码在 `auto-asmr-android/app/src/main/java/io/github/nasuiyile/autoasmr/global/`，随安卓版一起构建、发布。
+
+目前是原型：在 Android 16 模拟器上验证通过（见[实测结果](#实测结果模拟器android-16)）。真机上第一次试（荣耀 AAP-AN00，Android 17）在开始录音时报错，已经针对性修改（见[厂商系统的兼容处理](#厂商系统的兼容处理)），**还要在这台手机上复测**；其它真机没测过，「用 root 启动」（Magisk / KernelSU 的 su）也还没跑过（见[还没验证的](#还没验证的)）。
 
 ## 原理
 
@@ -28,16 +30,16 @@ App 禁止被录，是因为不想被录音。所以这个 App 只做实时处�
 
 一共两个进程：
 
-- **App 进程**（界面、通知栏、悬浮球）：也加载一份 Rust 引擎，但只用来管参数，和安卓版的 `Settings` 完全一样（生成界面、改参数、导入导出、自动保存到 `files/auto-asmr.ron`）。参数一变，就把整份参数（RON）和原声开关推给服务进程。
-- **服务进程**（shell 或 root 身份）：注册音频策略、截声音、用引擎处理、放出来，背景雨声也在这里放。它不存配置，参数都来自 App。
+- **App 进程**（界面、通知栏、悬浮球，也是网页模式的浏览器）：参数由 `Settings` 管（和网页模式同一份，引擎在 `libasmrhook.so` 里，经 `NativeHook` 调用；自动保存到 `files/auto-asmr.ron`）。配置一变，就把**整份配置文件**推给服务进程：左右双人的延迟、排布、自动平衡存在配置文件里 `params` 之外，原声开关也在里面，所以推整份，两种模式才用得上同一份配置。
+- **服务进程**（shell 或 root 身份）：注册音频策略、截声音、用引擎处理、放出来，背景雨声也在这里放。它加载 `libasmrglobal.so`（同一个 Rust 静态库，不带 hook），不存配置，配置都来自 App。
 
-服务进程有三种起法，核心代码相同（`server/EngineCore.kt`），只是入口和命令的通道不同：
+服务进程有三种起法，核心代码相同（`global/server/EngineCore.kt`），只是入口和命令的通道不同：
 
 | 方式 | 身份 | 入口和通道 | App 进程被杀时 |
 |---|---|---|---|
-| Shizuku（推荐） | Shizuku 的身份：adb 模式是 shell（2000），root 模式是 root | Shizuku 的 UserService：Shizuku 用 app_process 加载本 APK 里的 `server/EngineService.kt`（一个 Binder），交给 App；命令经 binder 传。用 daemon 模式绑定 | **继续跑**，声音照常处理；App 再启动时连回同一个进程 |
-| root | root（0） | `su -c` 起 `server/ServerMain.kt`，命令经标准输入 / 输出 | 管道断开，服务进程停止拦截并退出 |
-| adb（调试） | shell（2000） | 电脑上跑 `tools/server.sh`，同 root 那种通道 | 不涉及 |
+| Shizuku（推荐） | Shizuku 的身份：adb 模式是 shell（2000），root 模式是 root | Shizuku 的 UserService：Shizuku 用 app_process 加载本 APK 里的 `global/server/EngineService.kt`（一个 Binder），交给 App；命令经 binder 传。用 daemon 模式绑定，进程名 `io.github.nasuiyile.autoasmr:engine` | **继续跑**，声音照常处理；App 再启动时连回同一个进程 |
+| root | root（0） | `su -c` 起 `global/server/ServerMain.kt`，命令经标准输入 / 输出 | 管道断开，服务进程停止拦截并退出 |
+| adb（调试） | shell（2000） | 电脑上跑 `auto-asmr-android/tools/global_server.sh`，同 root 那种通道 | 不涉及 |
 
 第一次点「用 Shizuku 启动」会弹 Shizuku 的授权框。UserService 的版本号用 APK 的安装时间：更新或重装 App 后版本号变了，Shizuku 会结束还在跑旧代码的服务进程，用新 APK 重新起一个。
 
@@ -46,37 +48,45 @@ App 禁止被录，是因为不想被录音。所以这个 App 只做实时处�
 ## 防止被杀后台
 
 1. **引擎在常驻进程里**（Shizuku 方式，不用设置）：服务进程是 shell / root 身份的进程，不归系统的 App 后台管理。App 进程被清掉后声音照常处理，参数保持最后一次的。这是最主要的一条。
-2. **前台服务自动拉起**：连着服务进程时 App 开着一个前台服务（通知栏可以暂停 / 继续拦截、切效果 / 原声、退出）。它被系统杀掉后会被重新拉起，新的 App 进程收到 Shizuku 的 binder 后用 `peekUserService` 连回还在跑的服务进程（不会新开一个），通知和悬浮球随之恢复；10 秒内没连上就自己关掉。
+2. **前台服务自动拉起**：连着服务进程时 App 开着一个前台服务（`global/InterceptService.kt`，和网页模式的播放通知分开；通知栏可以暂停 / 继续拦截、切效果 / 原声、退出）。它被系统杀掉后会被重新拉起，新的 App 进程收到 Shizuku 的 binder 后用 `peekUserService` 连回还在跑的服务进程（不会新开一个），通知和悬浮球随之恢复；10 秒内没连上就自己关掉。
 3. **悬浮球**（要「显示在其他应用上层」的权限）：点一下切换效果 / 原声，长按打开 App，拖动后贴到屏幕左边或右边。颜色表示状态：紫 = 效果，灰 = 原声，浅灰 = 暂停拦截，红 = 没连上；外圈亮起表示此刻在处理声音。App 有一个看得见的窗口时，系统把它当作"用户看得见的"进程，很少回收。
 4. **忽略电池优化**：界面上一键申请，系统省电时不再限制 App。
-5. **厂商的后台管理**：只能由用户在系统设置里改，界面上按厂商给出说明和「应用设置」入口。荣耀 / 华为：应用启动管理里把 global-asmr 改成手动管理，打开「允许自启动」「允许后台活动」。
+5. **厂商的后台管理**：只能由用户在系统设置里改，界面上按厂商给出说明和「应用设置」入口。荣耀 / 华为：应用启动管理里把 auto-asmr 改成手动管理，打开「允许自启动」「允许后台活动」。
 
 root 方式没有第 1、2 条：服务进程跟着 App 进程走。想要常驻，可以先用 root 启动 Shizuku，再走 Shizuku 方式。
 
 ## 使用
 
 1. 装好 Shizuku 并启动它（无线调试或 adb），或者手机已 root。
-2. 打开 global-asmr，点「用 Shizuku 启动」或「用 root 启动」。服务进程加载完引擎后自动开始拦截（上次暂停过的话保持暂停）。
-3. 去别的 App 放声音，戴耳机听。
+2. 打开 auto-asmr。两个页面最上面都有「网页模式 | 全局模式（Shizuku）」切换条。第一次打开时，Shizuku 在运行就直接进**全局模式**，否则进**网页模式**；之后记住上次用的页面。
+3. 在全局页点「用 Shizuku 启动」（第一次会弹 Shizuku 授权）或「用 root 启动」。服务进程加载完引擎后自动开始拦截（上次暂停过的话保持暂停）。
+4. 去别的 App 放声音，戴耳机听。
 
-主界面一页从上到下：
+全局页一页从上到下（切换条下面）：
 
 - **服务进程**：Shizuku 状态、服务进程的版本和身份、「拦截其他 App 的声音」开关（暂停 / 继续）、输入 / 输出峰值、断流次数、「退出服务」。
 - **后台运行（防止被杀）**：悬浮球开关、忽略电池优化、厂商后台管理的说明和入口。
-- **ASMR 效果**：和安卓版同一个面板（`EffectPanel.kt`、`PositionMap.kt`、`SpecUi.kt` 从安卓版拷来）：效果 / 原声开关、风格按钮、位置图和手动摆位、降噪、各组参数、导入 / 导出配置。状态一行显示是否在处理、链路延迟、处理占用。
+- **ASMR 效果**：和网页模式同一个效果面板（`EffectPanel.kt`）：效果 / 原声开关、风格按钮、位置图和手动摆位、降噪、各组参数（含**左右双人**）、导入 / 导出配置。状态一行显示是否在处理、链路延迟、处理占用。
 - **日志**：App 和服务进程的日志（点开才显示）。
-
-别的 App 里对 `.ron` 文件选「用其他应用打开 → global-asmr」也能导入，和安卓版一样先检查再确认。
 
 只拦**媒体、游戏、未知**这三种用途的播放。通话、闹钟、通知、导航语音、系统提示音照常播出，不处理。
 
+## 和网页模式的关系
+
+- **同一份配置**：参数、风格、左右双人、原声开关在两个页面上改的是同一份（`files/auto-asmr.ron`），改了立刻推给服务进程。导入的配置文件、别的 App 用「用其他应用打开」传来的 `.ron` 也一样。
+- **左右双人**：全局模式里也有：其他 App 的声音变成一左一右两个人（第 2 个晚滑条上的毫秒数），位置图上是两个点。做法和网页模式相同（共用库的 `LiveMix`），因为服务进程拿到的是整份配置。
+- **不会处理两遍**：App 自己的 UID 不在拦截范围里。全局模式开着时在内嵌浏览器里放网页，网页的声音照常由网页模式的 hook 处理，不会再被服务进程截一次。
+- **雨声只响一份**：拦截中由服务进程放雨声，App 自己的雨声关掉；暂停拦截或退出服务后，按网页模式的规则改回 App 自己放（交接时淡入淡出）。
+- **位置图**：网页没在出声、全局模式在处理其他 App 的声音时，网页页面的状态和位置图显示全局模式的。
+- **通知**：网页在出声时是网页模式的播放通知，全局模式连着服务进程时是全局模式的通知，两种模式同时用时两条都有。
+
 ## 控制协议
 
-命令一行一条，每条有一个回复（`server/EngineCore.kt`）。Shizuku 方式经 binder 传（调用号 `FIRST_CALL_TRANSACTION`，参数和回复各一个字符串）；root / adb 方式经标准输入 / 输出：
+命令一行一条，每条有一个回复（`global/server/EngineCore.kt`）。Shizuku 方式经 binder 传（调用号 `FIRST_CALL_TRANSACTION`，参数和回复各一个字符串）；root / adb 方式经标准输入 / 输出：
 
 ```
-CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.shizuku.server.ServerMain \
-    --apk <apk> [--lib <libasmrshizuku.so>] [--client-uid <App 的 UID>] [--start] [--seconds N] [--onset]
+CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.ServerMain \
+    --apk <apk> [--lib <libasmrglobal.so>] [--client-uid <App 的 UID>] [--start] [--seconds N] [--onset]
 ```
 
 - `--start`：引擎加载完马上开始拦截。`--seconds N`：不读标准输入，跑 N 秒后退出（调试用）。`--onset`：测延迟时用，每个声音的开头放出来时发一行 `onset`。
@@ -84,10 +94,10 @@ CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.shizuku.ser
 - 命令：
   - `hello`：版本（`ver=`）、身份、系统版本、机型
   - `start`、`start only=UID,UID`（只拦这些 App）、`stop`：回复 `ok` 或 `error …`
-  - `params <base64 的 RON>`：换参数（和配置文件里 params 那一段同一格式）；`dry 0|1`：原声（不经过引擎，同安卓版是直接切换）/ 效果
-  - `poll`：JSON，是否在拦截、原声、雨声，`tele`（和安卓版 `NativeHook.telemetry()` 同一排列的 16 个数），峰值、延迟各段、断流、日志序号
+  - `config <base64 的 .ron>`：换整份配置（App 用这个，见[进程和启动方式](#进程和启动方式)）；原声开关取配置里的 `dry`（原声时不经过引擎，同网页模式是直接切换）
+  - `poll`：JSON，是否在拦截、原声、雨声，`tele`（和网页模式 `NativeHook.telemetry()` 同一排列的 16 个数，含左右双人的两个位置），峰值、延迟各段、断流、日志序号
   - `logs <序号>`：这个序号之后的日志
-  - 调试用：`config <base64 的 .ron>`、`style 0..3`、`action <名字>`、`status`、`exit`
+  - 调试用：`params <base64 的 RON>`（只换 params 那一段）、`dry 0|1`、`style 0..3`、`action <名字>`、`status`、`exit`
 - 标准输出另外还有：`hello …`、`log …`、`warn …`、`error …`、`state …`、拦截中每秒一行 `stat …`、`onset …`、`bye`。
 
 `stat` 各项：`in` / `out` 输入 / 输出峰值；`gated` 为真时表示连续 2 秒全是静音，输出流暂停；`lag_in` 是录音端读到的数据离被录下过了多久（毫秒）；`lag_out` 是输出流里还没放出去的量（毫秒）；`engine` 是引擎本身的延迟；`cpu` 是处理占单核的百分比；`underruns` 是输出断流次数；`out_buf` 是输出缓冲的上限（从 30 ms 开始，一断流就加 5 ms）。
@@ -118,13 +128,26 @@ AudioRecord.startRecording:1573 ← AudioRouter.start:110 ← ServerMain.handle:
 
 **Shizuku UserService 里的身份**：Shizuku 的 UserService 启动器在进程里放的是本 App 包名的 Context。音频系统按"UID 2000 + 本 App 包名"建流，两者对不上，建输出流失败（`UnsupportedOperationException: Cannot create AudioTrack`）。所以 `ProcessEnv` 对包名和 Application 一律换成 shell / root 身份的（日志里显示「Application（替换）」），ActivityThread 等已有的照用。
 
-第一次复测的截图里仍是旧包：日志没有 `log 进程环境：…` 这一行，调用栈的行号（`ServerMain.main:89`、`handle:112`）也是改之前的。为了一眼分清跑的是哪一版，从 0.1.1-prototype 起，界面上和服务进程的 `hello` 行都会显示版本号（`hello ver=0.1.1-prototype uid=…`）。每次发新包给别人测，都要在 `app/build.gradle.kts` 里把 `versionCode` 加一，并改 `versionName`。
+第一次复测的截图里仍是旧包：日志没有 `log 进程环境：…` 这一行，调用栈的行号（`ServerMain.main:89`、`handle:112`）也是改之前的。为了一眼分清跑的是哪一版，从 0.1.1-prototype 起，界面上和服务进程的 `hello` 行都会显示版本号（`hello ver=0.1.1-prototype uid=…`）。合并进安卓版之后，版本号由环境变量 `ASMR_VERSION_NAME` / `ASMR_VERSION_CODE` 给（发布时是 tag 名和运行序号，见[安卓版 · 发布](android-dev.md#发布)）；本机打包发给别人测时也设上它们，`hello` 行和全局页上就是这个版本号。
 
 ## 实测结果（模拟器，Android 16）
 
-模拟器：AVD `asmr36`（Pixel 7，Android 16，Apple Silicon），Shizuku 13.6.0（adb 模式）。测试音：Chrome 打开电脑上用 HTTP 提供的 WAV（440 Hz，幅度 0.2），或 `server/LatencyProbe.kt` 以 root 身份放的短音（幅度 0.3）。路由情况看 `dumpsys media.audio_flinger`：每个输出线程上挂着哪个 UID 的播放轨。
+模拟器：AVD `asmr36`（Pixel 7，Android 16，Apple Silicon），Shizuku 13.6.0（adb 模式）。测试音：Chrome 打开电脑上用 HTTP 提供的 WAV（440 Hz，幅度 0.2），或 `global/server/LatencyProbe.kt` 以 root 身份放的短音（幅度 0.3）。路由情况看 `dumpsys media.audio_flinger`：每个输出线程上挂着哪个 UID 的播放轨。
 
-### 0.2.0（常驻服务进程、悬浮球、参数面板）
+### 合并进安卓版之后
+
+| 检查 | 结果 |
+|---|---|
+| 打开 App（Shizuku 在运行、没选过页面） | 直接进全局页 |
+| 「用 Shizuku 启动」 | 弹出「Allow auto-asmr to access Shizuku?」，允许后服务进程 `io.github.nasuiyile.autoasmr:engine`（UID 2000）加载 `libasmrglobal.so`，引擎加载 86 ms，自动开始拦截，排除 UID 2000 和 App 自己的 UID |
+| 左右双人 | 导入一份 `duo_ms: 80` 的配置（经 App，推整份配置给服务进程）后，探针的声音变成两个：位置图上 1 号在左（方位约 260°）、2 号在右（约 98°） |
+| 雨声交接 | 拦截中开「雨夜」：只有服务进程在放；暂停拦截：App 自己的雨声流打开、服务进程的淡出；继续拦截：服务进程的雨声开始、App 的关掉；「关」：服务进程的停下 |
+| 网页模式（`tools/hook_test.sh`，Web Audio 用例，全局模式同时开着） | hook 照常截到网页的流；左右互换模式下左右电平对调；ASMR 模式下左右来回（−48 / −10 dB），方位 99° |
+| `kill -9` App 进程 | 服务进程（PID 不变）继续处理；约 1 秒后前台服务被拉起，新的 App 进程连回同一个服务进程 |
+| 「退出服务」 | 服务进程退出，全局模式的前台服务停下 |
+| release 包（R8 精简） | 19.9 MB（两种架构，各两份引擎 .so）；全局模式在 release 包上照常启动、拦截、退出；`NativeHook` 和 `global/server` 的类没被改名 |
+
+### 0.2.0（单独的 App 时：常驻服务进程、悬浮球、参数面板）
 
 | 检查 | 结果 |
 |---|---|
@@ -136,7 +159,7 @@ AudioRecord.startRecording:1573 ← AudioRouter.start:110 ← ServerMain.handle:
 | 重装 App | 版本号（安装时间）变了，下次启动时换成新 APK 的服务进程 |
 | 界面 | 一页里：服务进程、后台运行、和安卓版相同的效果面板（全部参数组）、日志 |
 | release 包（R8 精简） | 15.5 MB（debug 包 47 MB，主要是没精简的 Compose）；以上流程在 release 包上重跑一遍，照常 |
-| root / adb 通道（`tools/server.sh`） | 照常；延迟对照多出 98.6 ms，和之前一致 |
+| root / adb 通道（当时的 `tools/server.sh`，现在是 `auto-asmr-android/tools/global_server.sh`） | 照常；延迟对照多出 98.6 ms，和之前一致 |
 
 0.2.0 之前的版本没有真正切到原声：`dry` 只记进了配置，引擎照样在处理。现在原声时服务进程不调用引擎（和安卓版 hook 层的做法一样）。
 
@@ -169,9 +192,9 @@ AudioRecord.startRecording:1573 ← AudioRouter.start:110 ← ServerMain.handle:
 
 多出来的部分大致是：服务进程的输出缓冲 40 ms + 引擎 2.4 ms，剩下约 50 ms 在 remote submix 的管道和录音缓冲里。模拟器本身的播放延迟就很高（正常也要 130 ms），真机上两边都会小一些，要实测。
 
-复现：装好 App 后用 `tools/server.sh --start --onset`。延迟对照要让探针以另一个身份跑，例如服务进程用 shell，探针用 `adb shell "su 0 sh -c 'CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.shizuku.server.LatencyProbe 12'"`。
+复现：装好 App 后用 `auto-asmr-android/tools/global_server.sh --start --onset`。延迟对照要让探针以另一个身份跑，例如服务进程用 shell，探针用 `adb shell "su 0 sh -c 'CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.LatencyProbe 12'"`。
 
-模拟器上测 Shizuku：装官方 APK（GitHub Release），用 `adb shell <Shizuku 的安装目录>/lib/arm64/libshizuku.so` 启动它（安装目录用 `adb shell pm path moe.shizuku.privileged.api` 查），再在本 App 里点「用 Shizuku 启动」，或者 `adb shell am start -n io.github.nasuiyile.autoasmr.shizuku/.MainActivity --es launch shizuku`（其它测试参数见 `MainActivity.kt` 的类注释）。悬浮窗权限可以用 `adb shell appops set io.github.nasuiyile.autoasmr.shizuku SYSTEM_ALERT_WINDOW allow` 直接给。
+模拟器上测 Shizuku：装官方 APK（GitHub Release），用 `adb shell <Shizuku 的安装目录>/lib/arm64/libshizuku.so` 启动它（安装目录用 `adb shell pm path moe.shizuku.privileged.api` 查），再在 App 的全局页点「用 Shizuku 启动」，或者 `adb shell am start -n io.github.nasuiyile.autoasmr/.MainActivity --es page global --es launch shizuku`（其它测试参数见 `MainActivity.kt` 的类注释）。悬浮窗权限可以用 `adb shell appops set io.github.nasuiyile.autoasmr SYSTEM_ALERT_WINDOW allow` 直接给。
 
 ## 还没验证的
 
@@ -185,47 +208,44 @@ AudioRecord.startRecording:1573 ← AudioRouter.start:110 ← ServerMain.handle:
 
 ## 构建
 
-和安卓版同一套环境（JDK、Android SDK / NDK、Rust 安卓目标），见[安卓版](android-dev.md#环境)：
+随安卓版一起构建（环境见[安卓版](android-dev.md#环境)）：
 
 ```bash
-cd auto-asmr-shizuku && ./gradlew assembleRelease
+cd auto-asmr-android && ./gradlew assembleRelease
 ```
 
-生成 `app/build/outputs/apk/release/app-release.apk`（R8 精简，约 15 MB；原型阶段用调试密钥签名，和 debug 包可以互相覆盖安装）。`assembleDebug` 是不精简的 debug 包（约 47 MB）。服务进程按名字加载的类和 JNI 在 `app/proguard-rules.pro` 里保留。
-
-Rust 引擎直接用安卓版的 Rust 层（`auto-asmr-android/rust`，C 接口 `asmr_core.h`），共用它的 `target` 目录。界面用 Compose，版本和安卓版相同。原型只编 arm64，不在发布工作流里。每次发新包给别人测，都要在 `app/build.gradle.kts` 里把 `versionCode` 加一、改 `versionName`。
+- `app/src/main/cpp/CMakeLists.txt` 把同一个 Rust 静态库链成两个 .so：`libasmrhook.so`（App 进程：网页模式的 hook、参数和界面）和 `libasmrglobal.so`（全局模式的服务进程，`global_jni.c`，不带 hook）。两种架构（arm64、32 位）都编。
+- 服务进程是 shell / root 身份的 app_process，按路径 `System.load` 引擎，所以 `useLegacyPackaging = true`：安装时把 .so 解压到 `/data/app/…/lib/<架构>/`。
+- 服务进程按名字加载的类（`ServerMain`、`EngineService`、`Engine`、`LatencyProbe`）和 JNI 在 `app/proguard-rules.pro` 里保留（整个 `global.server` 包）。
+- 推送 tag 时，发布工作流的安卓任务把它和网页模式一起打进 `auto-asmr-android.apk`，没有单独的包。
 
 ## 代码结构
 
 ```
-auto-asmr-shizuku/
+auto-asmr-android/
   app/src/main/cpp/
-    asmr_jni.c            JNI：把 asmr_core.h 的函数转给 server/Engine.kt（两个进程都用）
-    CMakeLists.txt        调 cargo 编安卓版的 Rust 层，链进 libasmrshizuku.so
-  app/src/main/java/io/github/nasuiyile/autoasmr/shizuku/
-    AsmrApp.kt            App 进程启动：加载引擎、读配置、初始化 Controller
-    MainActivity.kt       主界面（一页）：服务进程、后台运行、效果面板、日志；adb 测试参数
-    EffectPanel.kt        效果面板（从安卓版拷来，加了页头 / 页脚）
-    PositionMap.kt        位置图（从安卓版拷来）
-    SpecUi.kt             参数表小工具（从安卓版拷来）
-    Settings.kt           参数（同安卓版），改了就推给服务进程
-    SharedImport.kt       别的 App 传来的 .ron（从安卓版拷来）
-    Controller.kt         起服务进程（Shizuku UserService / su）、连上、推参数、定时读状态
-    Links.kt              到服务进程的连接：binder（Shizuku）、管道（root）
-    InterceptService.kt   前台服务：通知栏控制、挂悬浮球、被杀后拉起再连回去
-    FloatingBall.kt       悬浮球
-    KeepAlive.kt          悬浮窗权限、电池优化、厂商后台管理的说明
-    server/               服务进程（shell / root 身份）
-      EngineCore.kt       核心：引擎、拦截、雨声、命令处理、统计、日志
-      EngineService.kt    Shizuku UserService 入口（binder）
-      ServerMain.kt       app_process 入口（标准输入 / 输出，root、adb 用）
-      AudioRouter.kt      注册策略、录音端 → 引擎 → 输出流
-      RainPlayer.kt       背景雨声的输出流
-      ProcessEnv.kt       给服务进程补上 ActivityThread / Application / 包名（厂商框架、身份要用）
-      HiddenAudio.kt      音频策略系统接口的反射封装、开始 / 停止录音（必要时绕开厂商代码）、服务进程的 Context
-      Engine.kt           Rust 引擎的 JNI 声明，服务进程加载 .so 和 APK 里的数据文件
-      LatencyProbe.kt     测延迟用的短音播放器
-  tools/server.sh         用 adb 直接跑服务进程（调试）
+    global_jni.c          JNI：把 asmr_core.h 的函数转给 global/server/Engine.kt，编成 libasmrglobal.so
+  app/src/main/java/io/github/nasuiyile/autoasmr/
+    MainActivity.kt       两个页面（网页 / 全局）的切换、共用的导入导出和提示；adb 测试参数
+    Settings.kt           参数（两种模式共用），连着服务进程时把整份配置推过去；雨声由谁放
+    global/
+      GlobalScreen.kt     全局页：服务进程、后台运行、效果面板、日志
+      Controller.kt       起服务进程（Shizuku UserService / su）、连上、推配置、定时读状态
+      Links.kt            到服务进程的连接：binder（Shizuku）、管道（root）
+      InterceptService.kt 全局模式的前台服务：通知栏控制、挂悬浮球、被杀后拉起再连回去
+      FloatingBall.kt     悬浮球
+      KeepAlive.kt        悬浮窗权限、电池优化、厂商后台管理的说明
+      server/             服务进程（shell / root 身份）
+        EngineCore.kt     核心：引擎、拦截、雨声、命令处理、统计、日志
+        EngineService.kt  Shizuku UserService 入口（binder）
+        ServerMain.kt     app_process 入口（标准输入 / 输出，root、adb 用）
+        AudioRouter.kt    注册策略、录音端 → 引擎 → 输出流
+        RainPlayer.kt     背景雨声的输出流
+        ProcessEnv.kt     给服务进程补上 ActivityThread / Application / 包名（厂商框架、身份要用）
+        HiddenAudio.kt    音频策略系统接口的反射封装、开始 / 停止录音（必要时绕开厂商代码）、服务进程的 Context
+        Engine.kt         Rust 引擎的 JNI 声明，加载 .so 和 APK 里的数据文件
+        LatencyProbe.kt   测延迟用的短音播放器
+  tools/global_server.sh  用 adb 直接跑服务进程（调试）
 ```
 
 ## 参考

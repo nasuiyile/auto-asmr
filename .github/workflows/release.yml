@@ -181,6 +181,25 @@ jobs:
           ASMR_VERSION_CODE: ${{ github.run_number }}
         run: ./gradlew assembleRelease --no-daemon
 
+      # 两种架构都要有网页模式的 libasmrhook.so 和全局模式服务进程的 libasmrglobal.so；
+      # 按名字加载 / JNI 找的类（NativeHook、global.server 包）不能被 R8 改名
+      - name: Check APK
+        run: |
+          python3 - app/build/outputs/apk/release/app-release.apk <<'EOF'
+          import sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          names = set(z.namelist())
+          libs = [f"lib/{abi}/{lib}" for abi in ("arm64-v8a", "armeabi-v7a") for lib in ("libasmrhook.so", "libasmrglobal.so")]
+          missing = [n for n in libs + ["assets/ku100.bin", "assets/pinna.bin"] if n not in names]
+          assert not missing, f"包里缺少：{missing}"
+          dex = b"".join(z.read(n) for n in names if n.startswith("classes") and n.endswith(".dex"))
+          classes = ["io/github/nasuiyile/autoasmr/NativeHook"] + [
+              f"io/github/nasuiyile/autoasmr/global/server/{c}" for c in ("EngineService", "ServerMain", "Engine", "LatencyProbe")]
+          lost = [c for c in classes if f"L{c};".encode() not in dex]
+          assert not lost, f"这些类被 R8 改名或删掉了（见 app/proguard-rules.pro）：{lost}"
+          print(f"{len(names)} 个文件，两种架构的引擎 .so 和按名字加载的类都在")
+          EOF
+
       - name: Package release
         run: |
           mkdir -p ../dist

@@ -56,6 +56,8 @@ android {
     buildFeatures {
         prefab = true
         compose = true
+        // 全局模式的服务进程在 hello 里报版本号
+        buildConfig = true
     }
 
     externalNativeBuild {
@@ -68,6 +70,8 @@ android {
     packaging {
         jniLibs {
             pickFirsts += "**/libbytehook.so"
+            // 把 .so 解压到 /data/app/…/lib/<架构>/：全局模式的服务进程（shell / root 身份）按路径 System.load libasmrglobal.so
+            useLegacyPackaging = true
         }
     }
 
@@ -85,4 +89,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.13.0")
+    // 全局模式：Shizuku 的 API 和把 binder 交给本 App 的 provider
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

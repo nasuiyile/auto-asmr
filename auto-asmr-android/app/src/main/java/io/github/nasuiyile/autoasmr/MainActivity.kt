@@ -48,6 +48,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,6 +58,11 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import io.github.nasuiyile.autoasmr.global.Controller
+import io.github.nasuiyile.autoasmr.global.GlobalScreen
+import io.github.nasuiyile.autoasmr.global.GlobalUi
+import io.github.nasuiyile.autoasmr.global.InterceptService
+import io.github.nasuiyile.autoasmr.global.KeepAlive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -71,7 +79,11 @@ import kotlinx.coroutines.delay
 import java.io.File
 
 /**
- * 主界面：浏览器（地址栏、标签页）+ 底栏（ASMR 开关、处理状态、标签页、效果面板、菜单）。
+ * 主界面，两个页面：
+ * - **网页**：浏览器（地址栏、标签页）+ 底栏（ASMR 开关、处理状态、标签页、效果面板、菜单）。没有 Shizuku 时用它听效果。
+ * - **全局**（global/GlobalScreen.kt）：有 Shizuku 或 root 时处理任意 App 的声音。
+ * 两个页面共用一份参数（[Settings]），顶上都有「网页模式 | 全局模式」切换条（[ModeSwitch]）。
+ * 第一次打开时，有 Shizuku 就进全局页，否则进网页；之后记住用户上次选的页面。
  *
  * 也可以用 adb 驱动（tools/hook_test.sh）：
  *   am start -n io.github.nasuiyile.autoasmr/.MainActivity --es url <网址>
@@ -79,6 +91,7 @@ import java.io.File
  * --es action <按钮>（style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off）；
  * --es params '<RON>'；--ei rec <秒>（录下处理前后的声音）；--es ua desktop|mobile；--es mute 1|0；
  * --es import <文件名> / --es export <文件名>（在 /sdcard/Android/data/<包名>/files/ 里，导入 / 导出配置）。
+ * 全局模式：--es page global|web；--es launch shizuku|root；--es intercept 1|0；--es dry 1|0；--es ball 1|0；--es exit 1。
  */
 class MainActivity : ComponentActivity() {
     private lateinit var browser: Browser
@@ -95,7 +108,7 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null && SharedImport.isOpenFile(intent)) SharedImport.handle(this, intent)
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                Surface(Modifier.fillMaxSize()) { Screen(browser, ::record) }
+                Surface(Modifier.fillMaxSize()) { Root(browser, ::record) }
             }
         }
     }
@@ -108,8 +121,37 @@ class MainActivity : ComponentActivity() {
         handle(intent)
     }
 
-    /** adb 驱动的参数（见类注释）。 */
+    override fun onResume() {
+        super.onResume()
+        Controller.uiVisible = true
+        GlobalUi.resumed++ // 从系统设置回来：重新看悬浮窗权限、电池优化
+        InterceptService.instance?.refreshBall()
+    }
+
+    override fun onPause() {
+        Controller.uiVisible = false
+        super.onPause()
+    }
+
+    /** adb 驱动的参数（见类注释）；通知栏、悬浮球打开 App 时带 page=global。 */
     private fun handle(intent: Intent) {
+        when (intent.getStringExtra("page")) {
+            "global" -> setPage(this, Page.GLOBAL)
+            "web" -> setPage(this, Page.WEB)
+        }
+        // 带网址打开的（adb、别的入口）：要看网页，切到网页页面
+        if (intent.getStringExtra("url") != null) setPage(this, Page.WEB)
+        when (intent.getStringExtra("launch")) {
+            "shizuku" -> Controller.startShizuku()
+            "root" -> Controller.startRoot()
+        }
+        intent.getStringExtra("intercept")?.let { Controller.setIntercept(it == "1") }
+        intent.getStringExtra("dry")?.let { Settings.setDry(it == "1") }
+        intent.getStringExtra("ball")?.let {
+            KeepAlive.setBallWanted(this, it == "1")
+            InterceptService.instance?.refreshBall()
+        }
+        if (intent.getStringExtra("exit") == "1") Controller.exit()
         val tab = browser.current ?: return
         intent.getIntExtra("mode", -1).takeIf { it in 0..3 }?.let { NativeHook.setMode(it) }
         listOf("style_ear", "style_ku100", "style_earclean", "style_breath")
@@ -145,29 +187,58 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun Screen(b: Browser, record: (Int) -> Unit) {
-    val ctx = LocalContext.current
-    val tab = b.current ?: return
-    var showEffects by remember { mutableStateOf(false) }
-    var showTabs by remember { mutableStateOf(false) }
-    var menu by remember { mutableStateOf(false) }
-    var tele by remember { mutableStateOf(FloatArray(0)) }
-    // 首页（App 自带的页面）不在地址栏里显示内部网址
-    var address by remember(tab.id, tab.url) { mutableStateOf(if (tab.url.startsWith("https://appassets.androidplatform.net/assets/home")) "" else tab.url) }
+enum class Page { WEB, GLOBAL }
 
-    // 引擎状态：每 0.1 秒读一次（JNI，很快）
+/** 当前页面；用户选过就记在 ui 偏好里（键 page），没选过时按有没有 Shizuku 决定（见 [Root]）。 */
+var currentPage by mutableStateOf(Page.WEB)
+    private set
+
+fun setPage(ctx: android.content.Context, p: Page) {
+    currentPage = p
+    ctx.getSharedPreferences("ui", 0).edit().putString("page", p.name).apply()
+}
+
+/** 两个页面顶上的切换条：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）。 */
+@Composable
+fun ModeSwitch(modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    SingleChoiceSegmentedButtonRow(modifier.fillMaxWidth()) {
+        val pages = listOf(Page.WEB to "网页模式", Page.GLOBAL to "全局模式（Shizuku）")
+        pages.forEachIndexed { i, (p, label) ->
+            SegmentedButton(
+                selected = currentPage == p,
+                onClick = { setPage(ctx, p) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = pages.size),
+                label = { Text(label, maxLines = 1) },
+            )
+        }
+    }
+}
+
+/** 两个页面共用的部分：配置文件的导入导出、提示、别的 App 传来的 .ron；按 [currentPage] 显示网页或全局页面。 */
+@Composable
+private fun Root(b: Browser, record: (Int) -> Unit) {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("ui", 0) }
+    // 用户没选过页面：有 Shizuku（或服务进程已经在跑）就进全局页，否则进网页
     LaunchedEffect(Unit) {
-        while (true) {
-            tele = NativeHook.telemetry()
-            delay(100)
+        prefs.getString("page", null)?.let { runCatching { Page.valueOf(it) }.getOrNull() }?.let { currentPage = it }
+    }
+    LaunchedEffect(Controller.shizukuUp, Controller.phase) {
+        if (prefs.getString("page", null) == null && (Controller.shizukuUp || Controller.phase != Controller.Phase.IDLE)) {
+            currentPage = Page.GLOBAL
         }
     }
     LaunchedEffect(Settings.message) {
         Settings.message?.let {
             Toast.makeText(ctx, it, Toast.LENGTH_SHORT).show()
             Settings.message = null
+        }
+    }
+    LaunchedEffect(Controller.message) {
+        Controller.message?.let {
+            Toast.makeText(ctx, it, Toast.LENGTH_LONG).show()
+            Controller.message = null
         }
     }
     // 配置文件：系统的文件选择器（和电脑版的 .ron 通用）
@@ -184,6 +255,62 @@ private fun Screen(b: Browser, record: (Int) -> Unit) {
             if (text == null) Settings.message = "读不了这个文件" else Settings.importText(text) {}
         }
     }
+    val onImport = { importLauncher.launch(arrayOf("*/*")) }
+    val onExport = { exportLauncher.launch("auto-asmr-export.ron") }
+
+    when (currentPage) {
+        Page.WEB -> Screen(b, record, onImport, onExport)
+        Page.GLOBAL -> {
+            BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
+            GlobalScreen(onImport = onImport, onExport = onExport)
+        }
+    }
+
+    // 别的 App 传来的 .ron 文件：确认后导入
+    SharedImport.pending?.let { f ->
+        if (f.ok) {
+            AlertDialog(
+                onDismissRequest = { SharedImport.pending = null },
+                title = { Text("导入 auto-asmr 配置？") },
+                text = {
+                    Text("「${f.name}」\n\n${f.info}\n\n导入后，当前的效果设置会换成这个文件里的（和菜单里的「导入配置」一样，电脑版导出的文件也行）。")
+                },
+                confirmButton = { TextButton(onClick = { SharedImport.confirm() }) { Text("导入") } },
+                dismissButton = { TextButton(onClick = { SharedImport.pending = null }) { Text("取消") } },
+            )
+        } else {
+            AlertDialog(
+                onDismissRequest = { SharedImport.pending = null },
+                title = { Text("不是 auto-asmr 的配置文件") },
+                text = { Text("「${f.name}」\n\n${f.info}") },
+                confirmButton = { TextButton(onClick = { SharedImport.pending = null }) { Text("知道了") } },
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun Screen(b: Browser, record: (Int) -> Unit, onImport: () -> Unit, onExport: () -> Unit) {
+    val ctx = LocalContext.current
+    val tab = b.current ?: return
+    var showEffects by remember { mutableStateOf(false) }
+    var showTabs by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var tele by remember { mutableStateOf(FloatArray(0)) }
+    // 首页（App 自带的页面）不在地址栏里显示内部网址
+    var address by remember(tab.id, tab.url) { mutableStateOf(if (tab.url.startsWith("https://appassets.androidplatform.net/assets/home")) "" else tab.url) }
+
+    // 引擎状态：每 0.1 秒读一次（JNI，很快）
+    LaunchedEffect(Unit) {
+        while (true) {
+            tele = NativeHook.telemetry()
+            delay(100)
+        }
+    }
+    // 网页没在出声、全局模式在处理其他 App 的声音时，位置图和状态显示全局模式的
+    val shown = if ((tele.isEmpty() || tele[0] <= 0f) && Controller.intercepting) Controller.poll.tele else tele
+    val shownTitle = if (shown === tele) b.audibleTab?.let { it.title.ifEmpty { it.url } } else null
 
     // 第一次有声音时请求通知权限（Android 13 起）：后台播放的通知栏控制要用；拒绝了也照常播放
     val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -207,6 +334,7 @@ private fun Screen(b: Browser, record: (Int) -> Unit) {
     }
 
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        ModeSwitch(Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
             TextButton(onClick = { tab.web.goBack() }, enabled = tab.canBack) { Text("‹", style = MaterialTheme.typography.titleLarge) }
             TextButton(onClick = { tab.web.goForward() }, enabled = tab.canForward) { Text("›", style = MaterialTheme.typography.titleLarge) }
@@ -252,7 +380,7 @@ private fun Screen(b: Browser, record: (Int) -> Unit) {
             Column(Modifier.weight(1f).padding(start = 8.dp).clickable { showEffects = true }) {
                 Text(if (dry) "原声" else "ASMR 效果", style = MaterialTheme.typography.labelLarge)
                 Text(
-                    if (Playback.pausedByUser) "已暂停（在通知栏里继续）" else statusLine(tele, b.audibleTab?.let { it.title.ifEmpty { it.url } }, Settings.rainOn),
+                    if (Playback.pausedByUser) "已暂停（在通知栏里继续）" else statusLine(shown, shownTitle, Settings.rainOn),
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -269,8 +397,8 @@ private fun Screen(b: Browser, record: (Int) -> Unit) {
                     DropdownMenuItem(text = { Text((if (b.onlyOne) "✓ " else "") + "只放一个标签页的声音") }, onClick = { menu = false; b.changeOnlyOne(!b.onlyOne) })
                     DropdownMenuItem(text = { Text("首页") }, onClick = { menu = false; b.open(tab, Browser.HOME) })
                     DropdownMenuItem(text = { Text("测试页") }, onClick = { menu = false; b.open(tab, Browser.TEST_URL) })
-                    DropdownMenuItem(text = { Text("导入配置") }, onClick = { menu = false; importLauncher.launch(arrayOf("*/*")) })
-                    DropdownMenuItem(text = { Text("导出配置") }, onClick = { menu = false; exportLauncher.launch("auto-asmr-export.ron") })
+                    DropdownMenuItem(text = { Text("导入配置") }, onClick = { menu = false; onImport() })
+                    DropdownMenuItem(text = { Text("导出配置") }, onClick = { menu = false; onExport() })
                     DropdownMenuItem(text = { Text("录 20 秒处理前后的声音") }, onClick = { menu = false; record(20) })
                 }
             }
@@ -280,10 +408,10 @@ private fun Screen(b: Browser, record: (Int) -> Unit) {
     if (showEffects) {
         ModalBottomSheet(onDismissRequest = { showEffects = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             EffectPanel(
-                tele = tele,
-                audibleTitle = b.audibleTab?.let { it.title.ifEmpty { it.url } },
-                onImport = { importLauncher.launch(arrayOf("*/*")) },
-                onExport = { exportLauncher.launch("auto-asmr-export.ron") },
+                tele = shown,
+                status = statusLine(shown, shownTitle, Settings.rainOn),
+                onImport = onImport,
+                onExport = onExport,
             )
         }
     }
@@ -292,28 +420,6 @@ private fun Screen(b: Browser, record: (Int) -> Unit) {
             TabList(b, onPick = { showTabs = false })
         }
     }
-    // 别的 App 传来的 .ron 文件：确认后导入
-    SharedImport.pending?.let { f ->
-        if (f.ok) {
-            AlertDialog(
-                onDismissRequest = { SharedImport.pending = null },
-                title = { Text("导入 auto-asmr 配置？") },
-                text = {
-                    Text("「${f.name}」\n\n${f.info}\n\n导入后，当前的效果设置会换成这个文件里的（和菜单里的「导入配置」一样，电脑版导出的文件也行）。")
-                },
-                confirmButton = { TextButton(onClick = { SharedImport.confirm() }) { Text("导入") } },
-                dismissButton = { TextButton(onClick = { SharedImport.pending = null }) { Text("取消") } },
-            )
-        } else {
-            AlertDialog(
-                onDismissRequest = { SharedImport.pending = null },
-                title = { Text("不是 auto-asmr 的配置文件") },
-                text = { Text("「${f.name}」\n\n${f.info}") },
-                confirmButton = { TextButton(onClick = { SharedImport.pending = null }) { Text("知道了") } },
-            )
-        }
-    }
-
     // 网页里的视频全屏：盖住整个界面，隐藏系统栏
     val window = (ctx as? ComponentActivity)?.window
     val full = b.fullscreen

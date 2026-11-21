@@ -162,7 +162,7 @@ fun PositionMap(p: JSONObject, tele: FloatArray, manual: Boolean) {
             String.format(Locale.ROOT, "方位 %.0f° · 离头 %.1f cm · %s", tele[1], cm, if (kotlin.math.abs(el) < 1f) "与耳齐平" else if (el > 0) "上 %.0f°".format(Locale.ROOT, el) else "下 %.0f°".format(Locale.ROOT, -el))
         } else if (manual) {
             String.format(Locale.ROOT, "摆好的位置：方位 %.0f° · 离头 %.1f cm · 高度 %.0f°", mAz, (mDist - Radar.HEAD_A) * 100f, mTilt)
-        } else "没有正在出声的网页"
+        } else "没有正在处理的声音"
         Row(horizontalArrangement = Arrangement.Center) {
             Text(read, style = MaterialTheme.typography.bodySmall, color = text)
         }

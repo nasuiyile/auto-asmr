@@ -6,8 +6,7 @@
 
 - **Rust 版（[`auto-asmr/`](auto-asmr/)，推荐）**：带图形界面，同时支持实时（主播用，算法延迟 2.4 ms）和文件转换，Windows / macOS / Linux 通用。
 - **Python 命令行版（`asmr_binaural.py`）**：只做文件转换，额外有几种运动模式和合成房间。
-- **安卓版（[`auto-asmr-android/`](auto-asmr-android/)，开发中）**：内嵌浏览器，把网页里的声音实时做成双耳效果，参数和配置文件与 Rust 版通用。下载 GitHub Release 里的 `auto-asmr-android.apk`。
-- **全局拦截版 global-asmr（[`auto-asmr-shizuku/`](auto-asmr-shizuku/)，原型）**：安卓 App，借 Shizuku 或 root 把任意 App 的声音截下来处理后重新输出，详见[全局拦截版](doc/shizuku.md)。
+- **安卓版（[`auto-asmr-android/`](auto-asmr-android/)，开发中）**：内嵌浏览器，把网页里的声音实时做成双耳效果；有 Shizuku 或 root 时还能处理任意 App 的声音（[全局模式](doc/shizuku.md)，原型）。参数和配置文件与 Rust 版通用。下载 GitHub Release 里的 `auto-asmr-android.apk`。
 - **浏览器插件（[`auto-asmr-chromium/`](auto-asmr-chromium/)）**：Chrome / Edge 插件，把标签页里的声音实时做成双耳效果。下载 GitHub Release 里的 `auto-asmr-chromium.zip`，解压后在扩展页「加载已解压的扩展程序」，详见[浏览器插件](doc/chromium.md)。
 
 ## 快速开始
@@ -32,7 +31,7 @@ uv run asmr_binaural.py 输入.wav
 
 - [界面使用说明](doc/app-usage.md) · [命令行](doc/app-cli.md) · [构建、发布与开发](doc/development.md)
 - [Python 命令行版](doc/python-cli.md) · [效果与依据](doc/effects.md) · [两版的关系](doc/python-vs-rust.md)
-- [安卓版](doc/android-dev.md) · [安卓版技术方案](doc/android-plan.md) · [全局拦截版](doc/shizuku.md)
+- [安卓版](doc/android-dev.md) · [安卓版技术方案](doc/android-plan.md) · [安卓版全局模式](doc/shizuku.md)
 - [数据与许可](doc/data-license.md)
 
 ## 许可

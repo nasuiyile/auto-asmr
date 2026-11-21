@@ -3,6 +3,7 @@ package io.github.nasuiyile.autoasmr
 import android.app.Application
 import android.util.Log
 import com.bytedance.android.bytehook.ByteHook
+import io.github.nasuiyile.autoasmr.global.Controller
 
 class AsmrApp : Application() {
     override fun onCreate() {
@@ -24,6 +25,8 @@ class AsmrApp : Application() {
         // 数据文件从 APK 资源读进来交给引擎，再读上次保存的配置（和电脑版同一格式），都在后台线程。
         // 加载完之前打开的流不处理（直通）
         Thread({ Settings.load(this) }, "asmr-init").start()
+        // 全局模式：收到 Shizuku 的 binder 后，连回还在跑的服务进程（App 被杀后它继续处理声音）
+        Controller.init(this)
     }
 
     companion object {

@@ -7,6 +7,7 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import io.github.nasuiyile.autoasmr.global.Controller
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -19,6 +20,8 @@ import java.util.concurrent.TimeUnit
  * - 改参数在后台单线程里调用 Rust（生成引擎配置要几毫秒），同一个参数连续改只送最新的值；改完把全部参数读回来
  *   （有些改动会连带改别的参数，比如换移动方式会改「响度随位置变化」，和电脑版一样）。
  * - 每次改动后 1 秒自动保存到 `files/auto-asmr.ron`，格式和电脑版的配置文件相同，可以直接拷过去用。
+ * - 全局模式（[Controller]）连着服务进程时，每次改动后把整份配置（和保存的文件一样，含左右双人、原声开关）推给它；
+ *   服务进程里的引擎用它处理其他 App 的声音。
  * - 手动摆位的开关逻辑照搬电脑版：打开时记下原来的移动方式和「响度随位置变化」，播放中打开时声源停在此刻的位置；
  *   关掉时恢复。
  */
@@ -165,12 +168,29 @@ object Settings {
         val p = NativeHook.getParamsJson()?.let { JSONObject(it) } ?: return
         syncRain(p)
         main.post { setParams(p) }
+        push(p)
         scheduleSave()
     }
 
-    /** 雨声单独一条输出流：背景音音量 > 0、而且不是原声时打开（和电脑版一样，监听原声时没有效果也没有雨声）。 */
+    /** 把整份配置推给全局模式的服务进程（没连着时什么也不做）。 */
+    @Suppress("UNUSED_PARAMETER")
+    private fun push(p: JSONObject) {
+        if (!Controller.connected) return
+        NativeHook.exportConfig()?.let { Controller.pushConfig(it) }
+    }
+
+    /** 全局模式刚连上服务进程时用：整份配置（等启动时的加载做完；在调用方的线程里读）。 */
+    fun snapshot(): String? {
+        loaded.await(15, TimeUnit.SECONDS)
+        return NativeHook.exportConfig()
+    }
+
+    /**
+     * 雨声单独一条输出流：背景音音量 > 0、而且不是原声时打开（和电脑版一样，监听原声时没有效果也没有雨声）。
+     * 全局模式在拦截时雨声由服务进程放，这里关掉，免得响两份。
+     */
     private fun syncRain(p: JSONObject) {
-        val want = p.optDouble("bg_level", 0.0) > 0 && !p.optBoolean("dry") && !Playback.pausedByUser
+        val want = p.optDouble("bg_level", 0.0) > 0 && !p.optBoolean("dry") && !Playback.pausedByUser && !Controller.intercepting
         if (want != rainSent) {
             rainSent = want
             NativeHook.setRain(want)
@@ -211,6 +231,7 @@ object Settings {
             if (ok && p != null) {
                 NativeHook.setDry(p.optBoolean("dry", false))
                 syncRain(p)
+                push(p)
             }
             main.post {
                 if (ok && p != null) setParams(p, initial = true)

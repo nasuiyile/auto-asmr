@@ -6,7 +6,7 @@
 
 以 Rust 共用库 `auto-asmr/src/dsp/params.rs` 为准（`Params` 的字段、`style_*` / `bg_*` 预设方法），逐个核对：
   桌面版界面（gui.rs）和命令行（cli.rs）、安卓版 Rust 层（settings.rs、lib.rs、ui_spec.json）、
-  浏览器插件（wasm/src/lib.rs、schema.js、popup.html、options.html）、安卓版和 global-asmr 的 adb 风格列表、
+  浏览器插件（wasm/src/lib.rs、schema.js、popup.html、options.html）、安卓版的 adb 风格列表、
   Python 版的 STYLES。
 另外比对安卓参数表（ui_spec.json）和插件参数表（schema.js）的标签、滑条范围，以及标签在桌面版界面里能不能找到。
 
@@ -71,7 +71,6 @@ schema_js = read("auto-asmr-chromium/extension/schema.js")
 popup = read("auto-asmr-chromium/extension/popup.html")
 options = read("auto-asmr-chromium/extension/options.html")
 android_main = read("auto-asmr-android/app/src/main/java/io/github/nasuiyile/autoasmr/MainActivity.kt")
-global_main = read("auto-asmr-shizuku/app/src/main/java/io/github/nasuiyile/autoasmr/shizuku/MainActivity.kt")
 python = read("asmr_binaural.py")
 
 spec = json.loads(spec_text) if spec_text else {}
@@ -104,7 +103,6 @@ for p in PRESETS:
     if p in STYLES:
         where["安卓 lib.rs（asmr_set_style 编号）"] = f'"{p}"' in android_lib
         where["安卓 MainActivity（adb 风格列表）"] = f'"{p}"' in android_main
-        where["global-asmr MainActivity（adb 风格列表）"] = f'"{p}"' in global_main
     for k, ok in where.items():
         if not ok:
             problems.append(f"预设 {p}：{k} 里没有")
@@ -173,7 +171,7 @@ for f in FIELDS:
     if not re.search(rf"\.{f}\b", gui):
         problems.append(f"参数 {f}：桌面版界面 gui.rs 里没用到（没有控件？）")
     if not covered(f, spec_items):
-        problems.append(f"参数 {f}：安卓参数表 ui_spec.json 里没有（global-asmr 用同一份，也跟着缺）")
+        problems.append(f"参数 {f}：安卓参数表 ui_spec.json 里没有（网页模式和全局模式都用这一份）")
     if not covered(f, schema_rows):
         problems.append(f"参数 {f}：插件参数表 schema.js 里没有")
     if not re.search(rf"\.{f}\b", cli):

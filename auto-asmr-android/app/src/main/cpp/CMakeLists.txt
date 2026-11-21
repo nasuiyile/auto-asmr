@@ -35,3 +35,11 @@ target_compile_options(asmrhook PRIVATE -Wall -Wextra -O2)
 target_link_libraries(asmrhook bytehook::bytehook shadowhook::shadowhook asmr_core aaudio log m dl)
 # Google Play 要求 16 KB 页对齐（NDK r28 起默认就是，这里写明）；去掉没用到的 Rust 代码
 target_link_options(asmrhook PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--gc-sections")
+
+# ---- 全局模式的服务进程（global/server/Engine.kt）用的 JNI 层：同一个 Rust 静态库，不带 hook。
+# 服务进程是 app_process 起的（shell / root 身份），按路径单独加载它
+add_library(asmrglobal SHARED global_jni.c)
+add_dependencies(asmrglobal rust_core)
+target_compile_options(asmrglobal PRIVATE -Wall -Wextra -O2)
+target_link_libraries(asmrglobal asmr_core log m dl)
+target_link_options(asmrglobal PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--gc-sections")

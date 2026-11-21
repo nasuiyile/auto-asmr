@@ -35,31 +35,43 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.lazy.LazyListScope
 import org.json.JSONObject
 import java.util.Locale
 
 /**
- * 效果面板：按参数表（和电脑版界面同样的分组、标签、范围、说明）生成。
- * 从上到下：输出效果 / 监听原声、风格按钮、位置图和手动摆位、降噪、各组参数、导入 / 导出配置。
+ * 效果面板：按参数表（和电脑版界面同样的分组、标签、范围、说明）生成。网页模式（底部抽屉）和全局模式（整页）共用。
+ * 从上到下：[header]（全局模式的服务和保活卡片）、输出效果 / 监听原声、风格按钮、位置图和手动摆位、降噪、各组参数、
+ * 导入 / 导出配置、[footer]（全局模式的日志）。[status] 是标题下面那一行状态。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun EffectPanel(tele: FloatArray, audibleTitle: String?, onImport: () -> Unit, onExport: () -> Unit) {
+fun EffectPanel(
+    tele: FloatArray,
+    status: String,
+    onImport: () -> Unit,
+    onExport: () -> Unit,
+    modifier: Modifier = Modifier,
+    header: LazyListScope.() -> Unit = {},
+    footer: LazyListScope.() -> Unit = {},
+) {
     val spec = Settings.spec
     val p = Settings.params
-    if (!Settings.ready || spec == null) {
-        Text("正在加载 KU100 数据…", Modifier.padding(24.dp))
-        return
-    }
-    val groups = SpecUi.items(spec.optJSONArray("groups"))
+    val groups = if (spec != null) SpecUi.items(spec.optJSONArray("groups")) else emptyList()
     val manual = p.optString("mode") == "Manual"
-    LazyColumn(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+    LazyColumn(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        header()
+        if (!Settings.ready || spec == null) {
+            item { Text("正在加载 KU100 数据…", Modifier.padding(24.dp)) }
+            footer()
+            return@LazyColumn
+        }
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("ASMR 效果", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        statusLine(tele, audibleTitle, Settings.rainOn),
+                        status,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -102,8 +114,10 @@ fun EffectPanel(tele: FloatArray, audibleTitle: String?, onImport: () -> Unit, o
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(vertical = 8.dp),
             )
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(8.dp))
         }
+        footer()
+        item { Spacer(Modifier.height(32.dp)) }
     }
 }
 

@@ -1,9 +1,13 @@
 # 安卓版（开发中）
 
-方案和各步的验证结果见[安卓版技术方案](android-plan.md)。安卓版是一个内嵌浏览器：网页里正在出声的那个标签页的声音，实时交给和桌面版同一份的 Rust 引擎处理，再播放出来。
+方案和各步的验证结果见[安卓版技术方案](android-plan.md)。安卓版有两种模式，在同一个 App 里，共用一份配置（参数、左右双人、原声开关）：
+
+- **网页模式**（下面大部分内容）：一个内嵌浏览器，网页里正在出声的那个标签页的声音，实时交给和桌面版同一份的 Rust 引擎处理，再播放出来。不需要任何权限，没有 Shizuku 时用它。
+- **全局模式**：有 Shizuku 或 root 时，把任意 App 的声音截下来处理后重新输出，见[全局模式](shizuku.md)。
 
 ## 界面和操作
 
+- **两个页面**：网页模式、全局模式，两个页面最上面都有「网页模式 | 全局模式（Shizuku）」切换条，随时切换。第一次打开时 Shizuku 在运行就进全局页，否则进网页；之后记住上次用的页面。全局页的内容见[全局模式 · 使用](shizuku.md#使用)。
 - **顶栏**：后退、前进、地址栏（网址直接打开，其它文字用必应搜索）、刷新 / 停止。
 - **底栏**：
   - 开关：**ASMR 效果 / 原声**，就是电脑版的「输出效果 / 监听原声」，存在同一个配置项里。本身就是双耳录音的视频（很多 ASMR 视频是 KU100 录的）切到原声听。
@@ -16,7 +20,7 @@
   - 位置图：俯视，上 = 正前方，刻度和电脑版一样。红点是声源此刻的位置（播放中才有），右边竖条是高度。左右双人时是两个点：1 号橙色、2 号蓝色（颜色同电脑版），下面一行写两个声音各在哪。
   - **手动摆位**：和电脑版一样，打开后自动移动全停，声源停在你摆的位置（播放中打开时停在此刻的位置）；在位置图里点 / 拖改方位和距离，在竖条上拖改高度，双击竖条回到与耳朵齐平。关掉后回到原来的移动方式。
   - 降噪：0 = 关闭（网页里的声音一般很干净，不用开）。
-  - **左右双人**（各组参数的第一组，关着时折叠）：和电脑版「文件转换」页的[左右双人](app-usage.md#左右双人一个音频当成两个人)是同一个设置（电脑版实时页的延迟另外记）——网页里的声音变成一左一右两个人，第 2 个晚滑条上的毫秒数（0–300，0 = 关；50–120 ms 最像两个人）。打开后下面是**排布**（各自固定：1 号固定在左耳、2 号在右耳；一起移动：按「左右移动」一起走，始终在头的两侧相对）和**自动平衡**（0–100 %，让两个声音每一段时间差不多一样响；网页没有"整段"，响度边听边算）。两个声音的位置固定在左耳、右耳（电脑版的默认位置），不能单独拖。动作严格跟着说话走（同电脑版试听）；只有第 2 个声音晚，延迟不变。开 / 关、换排布的那一下会重新开始；改延迟时 20 ms 里淡过去。处理量约是平时的两倍。
+  - **左右双人**（各组参数的第一组，关着时折叠）：和电脑版「文件转换」页的[左右双人](app-usage.md#左右双人一个音频当成两个人)是同一个设置（电脑版实时页的延迟另外记）——网页里的声音变成一左一右两个人，第 2 个晚滑条上的毫秒数（0–300，0 = 关；50–120 ms 最像两个人）。打开后下面是**排布**（各自固定：1 号固定在左耳、2 号在右耳；一起移动：按「左右移动」一起走，始终在头的两侧相对）和**自动平衡**（0–100 %，让两个声音每一段时间差不多一样响；网页没有"整段"，响度边听边算）。两个声音的位置固定在左耳、右耳（电脑版的默认位置），不能单独拖。动作严格跟着说话走（同电脑版试听）；只有第 2 个声音晚，延迟不变。开 / 关、换排布的那一下会重新开始；改延迟时 20 ms 里淡过去。处理量约是平时的两倍。全局模式里同样有效（处理其他 App 的声音），用的是同一个设置。
   - 各组参数：贴耳感、入耳（掏耳）、左右移动、背景音（雨声，带「雨夜」「关」按钮）、忽远忽近、上下、KU100 临场感（耳廓、回放补偿）、人声处理、输出。标签、范围、单位、说明（点标签旁的 ⓘ 展开）都和电脑版相同；只在某种移动方式下才有用的参数只在那时显示，手动摆位时忽远忽近、上下两组变灰——都和电脑版一样。
   - 导入配置 / 导出配置。
 - **后台播放**：有声音时通知栏里有一条播放通知（第一次出声时会请求通知权限），切到后台、锁屏后网页接着放、接着处理；通知栏、锁屏和耳机按键可以**暂停 / 继续**，通知栏还能**切效果 / 原声**。没声音 30 秒后通知消失；从通知栏暂停的留 10 分钟。只有正在出声的那个标签页在后台继续，别的标签页照常暂停。
@@ -87,7 +91,8 @@ cd auto-asmr-android && ./gradlew assembleDebug
 
 - CPU 架构：`arm64-v8a` 和 `armeabi-v7a`（少数 32 位低端机）。Apple Silicon 上的模拟器是 arm64；32 位只编译过，没有设备实测。
 - KU100 / 耳廓数据（`auto-asmr/assets/ku100.bin`、`pinna.bin`，共 15.7 MB）作为 APK 资源，两种架构共用一份，App 启动时读进引擎。共用库为此打开了 `external-data`（数据不编进 .so）；`libasmrhook.so` 约 3.2 MB（arm64）/ 2.2 MB（32 位）。
-- Rust 部分不用单独编：`app/src/main/cpp/CMakeLists.txt` 每次构建都会按架构调用 `cargo build --release --target …`（在 `rust/` 下，没改动时很快），把静态库链进 `libasmrhook.so`。引擎一律按 release 编译，debug 版的 App 也一样。
+- Rust 部分不用单独编：`app/src/main/cpp/CMakeLists.txt` 每次构建都会按架构调用 `cargo build --release --target …`（在 `rust/` 下，没改动时很快），把静态库链进 `libasmrhook.so`，再链一份进全局模式服务进程用的 `libasmrglobal.so`（大小相近）。引擎一律按 release 编译，debug 版的 App 也一样。
+- 全局模式的服务进程按路径加载 .so，所以 .so 在安装时解压出来（`useLegacyPackaging = true`），见[全局模式 · 构建](shizuku.md#构建)。
 
 Rust 层自己的测试在电脑上跑：
 
@@ -117,7 +122,7 @@ adb push target/aarch64-linux-android/release/examples/bench /data/local/tmp/asm
 
 ## 发布
 
-推送 tag 时，`.github/workflows/release.yml` 的 Android 任务会装好 SDK 组件、Rust 最新稳定版和两个安卓目标，跑 Rust 测试，用 `assembleRelease` 打 APK（版本名 = tag 名，版本号 = Actions 的运行序号），和其它版本一起放进 GitHub Release（`auto-asmr-android.apk`）。
+推送 tag 时，`.github/workflows/release.yml` 的 Android 任务会装好 SDK 组件、Rust 最新稳定版和两个安卓目标，跑 Rust 测试，用 `assembleRelease` 打 APK（版本名 = tag 名，版本号 = Actions 的运行序号），检查包里两种架构都有 `libasmrhook.so` 和全局模式的 `libasmrglobal.so`、按名字加载的类没被 R8 改名，和其它版本一起放进 GitHub Release（`auto-asmr-android.apk`）。
 
 **签名密钥**：安卓只允许用同一把密钥签名的新版本覆盖安装旧版本，所以要准备一把固定的密钥，放进仓库的 Secrets。只需要做一次：
 
@@ -197,11 +202,12 @@ cd auto-asmr-android && tools/hook_test.sh
 
 | 路径 | 内容 |
 |---|---|
-| `app/src/main/java/…/MainActivity.kt` | 主界面（Compose）：顶栏、WebView、底栏、标签页列表、菜单、视频全屏、文件选择器导入导出；adb 参数 |
+| `app/src/main/java/…/MainActivity.kt` | 主界面（Compose）：网页 / 全局两个页面的切换，网页页面的顶栏、WebView、底栏、标签页列表、菜单、视频全屏，两个页面共用的文件选择器导入导出和提示；adb 参数 |
+| `app/src/main/java/…/global/` | 全局模式（Shizuku / root）：全局页、起服务进程和连接、前台服务、悬浮球，以及 `server/`（服务进程），见[全局模式 · 代码结构](shizuku.md#代码结构) |
 | `app/src/main/java/…/Browser.kt` | 标签页和 WebView：UA、拦截唤起 App 的跳转、B 站用桌面版、发声检测和暂停 / 继续的脚本（文档开始时注入，经 WebMessageListener 收发）、只放一个标签页的声音（`setAudioMuted`）、固定标签页、正在出声的标签页在后台仍对 Chromium 报告可见、重开音频流 |
 | `app/src/main/java/…/EffectPanel.kt` | 效果面板：按参数表生成分组、滑条、勾选、选项、种子 |
 | `app/src/main/java/…/PositionMap.kt` | 位置图和高度竖条（刻度和电脑版相同），手动摆位时点 / 拖 |
-| `app/src/main/java/…/Settings.kt` | 设置：后台线程里调用 Rust 改参数（同一个参数连续改只送最新值）、读回全部参数、1 秒后自动保存、导入导出、手动摆位开关的逻辑 |
+| `app/src/main/java/…/Settings.kt` | 设置（两种模式共用）：后台线程里调用 Rust 改参数（同一个参数连续改只送最新值）、读回全部参数、1 秒后自动保存、导入导出、手动摆位开关的逻辑；全局模式连着时把整份配置推给服务进程；雨声由谁放 |
 | `app/src/main/java/…/SharedImport.kt` | 别的 App「用其他应用打开」传来的 `.ron` 文件：读出、只检查不导入、弹窗确认后导入 |
 | `app/src/main/java/…/SpecUi.kt` | 参数表的小工具：数值显示格式、显示 / 可用条件、对数滑条 |
 | `app/src/main/java/…/Playback.kt` | 播放的总控（每秒一次，不依赖界面）：什么时候开 / 关前台服务、暂停 / 继续、截取自检和换备用 hook |
@@ -211,14 +217,16 @@ cd auto-asmr-android && tools/hook_test.sh
 | `app/src/main/assets/home.html`、`test.html` | 首页、测试页 |
 | `app/src/main/cpp/aaudio_hook.c` | hook 层：换掉 `AAudioStreamBuilder_setDataCallback` / `AAudioStreamBuilder_openStream` / `AAudioStream_close`——默认用 ByteHook 的 PLT hook（只截 WebView 等调用方），备用 ShadowHook 的 inline hook（改 libaaudio 本身），两种共用一套逻辑、防重入、不截自己的流；流打开时给立体声 float 流建 Rust 处理器，在 Chromium 的数据回调之后原地处理；背景雨声的输出流（开、淡出后停、断开重开）；给界面的实时状态；调试录音；JNI 接口。回调里不分配内存、不加锁、不打日志 |
 | `app/src/main/cpp/asmr_core.h` | Rust 层导出的 C 接口 |
-| `app/src/main/cpp/CMakeLists.txt` | 按架构调用 cargo 编 Rust 静态库，和 hook 层一起编成 `libasmrhook.so`，链接 ByteHook、ShadowHook（prefab）、libaaudio；16 KB 页对齐 |
-| `app/proguard-rules.pro` | 发布版 R8 的保留规则（JNI 类名、方法名不能改） |
+| `app/src/main/cpp/CMakeLists.txt` | 按架构调用 cargo 编 Rust 静态库，和 hook 层一起编成 `libasmrhook.so`，链接 ByteHook、ShadowHook（prefab）、libaaudio；同一个静态库再和 `global_jni.c` 编成全局模式服务进程用的 `libasmrglobal.so`；16 KB 页对齐 |
+| `app/src/main/cpp/global_jni.c` | 全局模式服务进程的 JNI 层（`global/server/Engine.kt`） |
+| `app/proguard-rules.pro` | 发布版 R8 的保留规则（JNI 类名、方法名不能改；全局模式服务进程按名字加载的 `global.server` 包） |
 | `app/src/main/res/` | 图标（启动图标、通知栏小图标） |
 | `rust/src/lib.rs` | Rust 层的 C 接口和每个流的处理器（下混 → 必要时重采样到 48 kHz → `Engine::process`，左右双人时是共用库的 `LiveMix` → 转回原采样率）；导出函数都 `catch_unwind`，出错的流改成直通 |
 | `rust/src/settings.rs` | 全局设置：整份桌面版格式的配置（`Saved`）、两份引擎配置（完整的给雨声，去掉背景音的给网页声音）、左右双人的合成配置、按字段读写参数（含界面换算的虚拟字段和左右双人那几项）、按钮、导入导出、参数表 |
 | `rust/src/rain.rs` | 背景雨声单独输出：和桌面版引擎同样的 `sync_rain` + `Rain::render` + 限制器，关掉时淡出 |
 | `rust/src/ui_spec.json` | 参数表：分组、标签、说明、范围、单位，取自桌面版界面；耳廓和耳机型号的选项运行时填 |
 | `rust/examples/bench.rs` | 性能基准 |
-| `tools/hook_test.sh` | 自动验证 |
+| `tools/hook_test.sh` | 自动验证（网页模式） |
+| `tools/global_server.sh` | 用 adb 直接跑全局模式的服务进程（调试） |
 
 引擎和设置文件格式在 `auto-asmr/src/`（桌面版的库：`dsp/`、`config.rs`，见[构建、发布与开发](development.md#代码结构)）。参数表里的标签和说明是从桌面版 `gui.rs` 抄过来的：改了桌面版的参数界面时，同步改 `ui_spec.json`（`cargo test` 会查出参数表里不存在的参数）。

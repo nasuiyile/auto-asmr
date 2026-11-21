@@ -541,15 +541,18 @@ mod tests {
         assert_eq!(load(&config::to_text(&desktop).unwrap()), 0);
         assert_eq!(ui()["params"]["puff"], 2.5);
         assert_eq!(set("dry", "true"), 0);
+        assert_eq!(set("static_ambience", "true"), 0);
         assert_eq!(set("seed", "7"), 0);
         assert_eq!(set("pinna", "\"B\""), 0);
         assert!(asmr_doc_text() > 0);
         let back = config::parse(&out()).unwrap();
+        assert!(back.params.static_ambience);
         assert!(back.dry && back.params.seed == 7 && back.params.pinna == "B" && back.params.puff == 2.5);
         assert!(back.buffer == 512 && back.input.as_deref() == Some("Mic") && back.jobs == 3);
 
         // 只写了参数的文件也能读；不是 auto-asmr 的、读不懂的报错且文档不变
         assert_eq!(load("(params: (seed: 3))"), 0);
+        assert_eq!(ui()["params"]["static_ambience"], Params::default().static_ambience);
         assert_eq!(ui()["params"]["seed"], 3);
         assert_eq!(load("{\"other\": \"()\"}"), -1);
         assert!(error().contains("没有 auto-asmr"));

@@ -6,6 +6,12 @@
 auto-asmr convert 输入.m4a -o 输出.wav --style ku100 --duration 60
 ```
 
+KU100 实录风格下，`--breath` 控制原声里轻微送气的最大提升量（dB）。`--breath-reach` 取 0–1，控制声源在身前等近处方位时保留的增强比例，离头中心 20 cm 内权重最大，至 65 cm 淡出。设为 0 时只在贴耳时提升。低频的扑耳触感由 `--puff` 单独控制。参数标定和前后对照见[效果与依据](effects.md#ku100-实录风格---style-ku100)。
+
+`--sharp-soften` 控制强辅音在 5 kHz 附近的最大衰减，范围为 0–8 dB，0 为关闭。较大的值适合个别字音偏尖的录音。需要整体控制宽带齿音时可另调 `--deess`。
+
+`--static-ambience on|off` 控制录音里的持续底噪是否留在固定位置。选择 `--style ku100` 时自动开启；例如 `auto-asmr convert 输入.wav --style ku100 --static-ambience off -o 对照.wav` 可听关闭效果。实时模拟 `rt-sim` 使用同一选项。房间反射用 `--room` 调节，输入降噪用 `--denoise` 调节，合成雨声仍用 `--bg` 调节。
+
 `--style` 有三个内置预设：`ear`（贴耳加强，默认）、`ku100`（像真实 KU100 轻语实录）、`earclean`（掏耳，给棉签 / 挖耳勺 / 刮擦这类触发音用）。风格先生效，后面写的参数再覆盖它。掏耳的目标响度默认是 −20 LUFS，入耳的几项可以单独调（`--inear` 入耳深度、`--canal` 耳道共鸣、`--rumble` 耳内低频、`--muffle` 堵耳闷感，见 `--help`）：
 
 ```bash

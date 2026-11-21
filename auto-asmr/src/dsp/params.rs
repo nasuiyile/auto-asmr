@@ -70,6 +70,8 @@ pub struct Params {
     pub far_lf_cut_db: f32,
     /// 气声增强：贴耳时嗓音里轻的送气声 / 气息（2.5 kHz 以上）最多提高多少 dB；响的齿音不提。0 = 关闭。
     pub breath_db: f32,
+    /// 近距离正面、侧前方也保留的气声增强比例（0–1）。从头中心 20 cm 到 65 cm 逐渐退去；0 = 只在贴耳时增强。
+    pub breath_reach: f32,
     /// 气流扑耳：送气时气流扑到贴着的那只耳朵上的低频脉冲（50–130 Hz，由嗓音自己的送气声导出）。0 = 关闭，1 = 标准。
     pub puff: f32,
     /// 耳甲共鸣：贴耳时近耳 4.3 kHz 的耳甲腔共振，dB。0 = 关闭。
@@ -159,6 +161,8 @@ pub struct Params {
     pub room: bool,
     /// 房间声电平偏移，dB。
     pub wet_db: f32,
+    /// 让原录音持续的环境底声留在固定双耳声场，人声仍按设定走位。
+    pub static_ambience: bool,
     pub playback: Playback,
 
     // ---- 人声处理
@@ -171,6 +175,8 @@ pub struct Params {
     pub gate_db: f32,
     /// 去齿音最多压低多少 dB（0 = 关闭）。
     pub deess_db: f32,
+    /// 强辅音柔化：只在约 5 kHz 的频带突出且较响时局部衰减，dB；0 = 关闭。
+    pub sharp_soften_db: f32,
     /// 轻声化（ANSI S3.5 说话力度均衡），0 = 关闭。
     pub soft_voice: f32,
 
@@ -220,6 +226,7 @@ impl Default for Params {
             ear_warmth_db: 5.0,
             far_lf_cut_db: 12.0,
             breath_db: 6.0,
+            breath_reach: 0.0,
             puff: 1.0,
             concha_db: 4.0,
             mouth_cm: 2.0,
@@ -262,11 +269,13 @@ impl Default for Params {
             over_top: 0.0,
             room: false,
             wet_db: -3.0,
+            static_ambience: false,
             playback: Playback::Diffuse,
             denoise: false,
             denoise_db: DENOISE_MAX_DB,
             gate_db: -90.0,
             deess_db: 0.0,
+            sharp_soften_db: 0.0,
             soft_voice: 0.0,
             auto_level: true,
             target_lufs: -16.0,
@@ -295,6 +304,7 @@ impl Params {
         let d = Params::default();
         (self.ear_dist, self.isolation_db, self.presence_db, self.ku100_eq, self.dark_db) = (d.ear_dist, d.isolation_db, d.presence_db, d.ku100_eq, d.dark_db);
         (self.warmth_db, self.ear_warmth_db, self.far_lf_cut_db, self.breath_db, self.puff) = (d.warmth_db, d.ear_warmth_db, d.far_lf_cut_db, d.breath_db, d.puff);
+        self.breath_reach = d.breath_reach;
         (self.concha_db, self.mouth_cm, self.far_shadow_db, self.soft_near) = (d.concha_db, d.mouth_cm, d.far_shadow_db, d.soft_near);
         (self.inear_cm, self.inear_period, self.inear_random, self.canal_db, self.rumble, self.muffle_db) = (d.inear_cm, d.inear_period, d.inear_random, d.canal_db, d.rumble, d.muffle_db);
         (self.mode, self.hold_s, self.move_s, self.randomness, self.approach, self.front) = (d.mode, d.hold_s, d.move_s, d.randomness, d.approach, d.front);
@@ -302,7 +312,9 @@ impl Params {
         (self.sway, self.sway_period, self.sway_random, self.sway_follow, self.sway_level, self.pause_motion, self.micro) = (d.sway, d.sway_period, d.sway_random, d.sway_follow, d.sway_level, d.pause_motion, d.micro);
         (self.height, self.updown, self.updown_period, self.updown_random, self.over_top) = (d.height, d.updown, d.updown_period, d.updown_random, d.over_top);
         (self.room, self.wet_db, self.playback) = (d.room, d.wet_db, d.playback);
+        self.static_ambience = d.static_ambience;
         (self.deess_db, self.soft_voice, self.target_lufs) = (d.deess_db, d.soft_voice, d.target_lufs);
+        self.sharp_soften_db = d.sharp_soften_db;
         self
     }
 
@@ -311,25 +323,32 @@ impl Params {
         self.style_base()
     }
 
-    /// KU100 实录风格：按 KU100 轻语实录标定——远耳听得到（不额外压低）、真实房间、KU100 原机音色；
-    /// 走位像真人：随机地停在耳边（离耳约 2–4 cm）、侧前、侧后，约三分之一的停留在正面说话，停多久也不固定；
-    /// 贴耳与正面之间的响度差收小，贴耳时气流扑耳更明显，齿音和 5 kHz 附近收一点（更柔、更耐听）。
+    /// KU100 实录：用原机音色和实测房间，保留远耳。近处各方向都带出轻微气息，
+    /// 低频气流集中在耳侧。距离、走位与人声参数的整轨对照见 doc/effects.md。
     pub fn style_ku100(self) -> Self {
         let mut p = self.style_base();
-        p.ear_dist = 0.11;
+        p.static_ambience = true;
+        p.ear_dist = 0.115;
         p.isolation_db = 0.0;
         p.far_lf_cut_db = 0.0;
+        p.breath_db = 12.0;
+        p.breath_reach = 0.9;
+        p.presence_db = 4.0;
+        p.warmth_db = 5.0;
+        p.ear_warmth_db = 4.0;
+        p.dark_db = 2.0;
+        p.deess_db = 4.0;
+        p.sharp_soften_db = 4.0;
         p.room = true;
         p.playback = Playback::Native;
         p.mode = MotionMode::Random;
         p.level_follow = 0.2;
-        p.front = 0.35;
-        p.hold_s = 3.0;
+        p.front = 0.36;
+        p.hold_s = 3.5;
         p.move_s = 2.5;
         p.randomness = 0.5;
-        p.puff = 1.5;
-        p.dark_db = 2.0;
-        p.deess_db = 5.0;
+        p.sway = 0.85;
+        p.sway_follow = 0.85;
         p
     }
 
@@ -482,6 +501,7 @@ mod tests {
         // 默认和 KU100 实录不进耳道；掏耳进耳道、每只耳朵停得久、人声用的几项关掉
         assert_eq!(d.inear_cm, 0.0);
         assert_eq!(d.clone().style_ku100().inear_cm, 0.0);
+        assert!(d.clone().style_ku100().static_ambience);
         let e = d.clone().style_earclean();
         assert!(e.inear_cm > 1.0 && e.hold_s >= 20.0 && e.isolation_db >= 40.0);
         assert!(e.breath_db == 0.0 && e.puff == 0.0 && e.sway == 0.0 && e.sway_follow == 0.0 && e.soft_near == 0.0);
@@ -500,6 +520,9 @@ mod tests {
         // 旧配置文件里没有入耳和正面比例这几项：读进来是默认值（不进耳道）
         let p: Params = ron::from_str("(ear_dist:0.15,isolation_db:0.0,room:true)").unwrap();
         assert_eq!(p.inear_cm, 0.0);
+        assert_eq!(p.breath_reach, 0.0);
+        assert!(!p.static_ambience);
+        assert_eq!(p.sharp_soften_db, 0.0);
         assert_eq!((p.front, p.canal_db, p.rumble, p.muffle_db), (0.08, 10.0, 1.0, 6.0));
         assert!(p.room && p.ear_dist == 0.15);
         let e = Params::default().style_earclean();

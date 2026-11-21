@@ -640,7 +640,9 @@ mod tests {
     /// 44.1 kHz 的流：输出长度不变、不断流、有声音、两耳不一样（被空间化了）、频率没跑偏。
     #[test]
     fn resampled_stream_stays_continuous() {
+        let _g = settings::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         settings::provide_repo_data();
+        settings::load_config("()").unwrap(); // 固定为默认单声源，避免并行测试或上一项测试的预设影响声道差。
         for rate in [44_100usize, 48_000, 32_000] {
             let mut p = Processor::new(rate);
             let mut x = tone(rate, 6.0);

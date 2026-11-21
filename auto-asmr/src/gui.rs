@@ -1505,7 +1505,11 @@ impl App {
                         ui.label(format!("{} {} µs（{} {}）", t("处理时间", "Processing"), sh.proc_us.load(Ordering::Relaxed), t("最大", "max"), sh.proc_max_us.load(Ordering::Relaxed)));
                         ui.label(format!("{} {}", t("断流次数", "Dropouts"), sh.xruns.load(Ordering::Relaxed)));
                     } else {
-                        ui.label(format!("{} {:.1} ms", t("算法延迟", "Algorithm latency"), if self.s.params.denoise { 22.4 } else { 2.4 }));
+                        let mut latency = if self.s.params.denoise { 22.4 } else { 2.4 };
+                        if self.s.params.static_ambience {
+                            latency += 1000.0 * crate::dsp::ambience::AMBIENCE_DELAY as f32 / FS;
+                        }
+                        ui.label(format!("{} {:.1} ms", t("算法延迟", "Algorithm latency"), latency));
                         ui.label(RichText::new(t("未运行", "Stopped")).weak());
                     }
                 });
@@ -2169,7 +2173,7 @@ impl App {
                 *p = p.clone().style_ear();
                 file_lufs = back;
             }
-            if ui.button(t("KU100 实录", "KU100 natural")).on_hover_text(t("按真实 KU100 轻语录音标定：远耳听得到、真实房间、KU100 原机音色；像真人一样随机走位，约三分之一的停留在正面，贴耳时离耳约 2–4 cm；贴耳与正面的响度差更小，气流更明显，齿音和 5 kHz 附近更柔", "Calibrated to real KU100 whisper recordings: far ear audible, real room, native KU100 tone; moves like a person (about a third of the stops in front, 2–4 cm from the ear when close); smaller level difference between ear and front, more breath on the ear, softer sibilants and 5 kHz region")).clicked() {
+            if ui.button(t("KU100 实录", "KU100 natural")).on_hover_text(t("模拟 KU100 近耳轻语。贴近时带出原声里细微的呼吸，控制响齿音和低频气流。声源在耳边和身前随机停留，远耳保留实测房间声。", "Models close whispers on a KU100. Brings out quiet breath as the voice draws near, with controlled sibilance and low-frequency air pulses. The voice pauses near either ear or in front, with measured room sound in the far ear.")).clicked() {
                 *p = p.clone().style_ku100();
                 file_lufs = back;
             }
@@ -2195,6 +2199,7 @@ impl App {
                 row(ui, t("近耳低频", "Near-ear bass"), t("贴耳时只给近耳加的低频", "Bass added only to the near ear"), egui::Slider::new(&mut p.ear_warmth_db, 0.0..=10.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("远耳低频削减", "Far-ear bass cut"), t("贴耳时远耳 320 Hz 以下再压低", "Extra cut below 320 Hz at the far ear"), egui::Slider::new(&mut p.far_lf_cut_db, 0.0..=18.0).suffix(" dB").fixed_decimals(0));
                 row(ui, t("气声增强", "Breath lift"), t("贴耳时把嗓音里轻的送气声 / 气息提上来（最多这么多），响的齿音不提；只用嗓音自己的气声，不加噪声。0 = 关闭", "Lifts the soft breathy part of the voice when close (by at most this much); loud sibilants are left alone. No noise is added. 0 = off"), egui::Slider::new(&mut p.breath_db, 0.0..=12.0).suffix(" dB").fixed_decimals(1));
+                row(ui, t("近处气声范围", "Breath lift around the head"), t("把部分气声增强延伸到身前等近处方位。数值越大，面前轻声越清楚。到头中心 20 cm 内最强，65 cm 处淡出。0 = 只在贴耳时增强；气流扑耳单独调节。", "Extends a fraction of the breath lift to nearby positions, including in front. Full reach within 20 cm of the head center, fading out by 65 cm. At 0, lift applies only near the ear. Breath puff has its own control."), egui::Slider::new(&mut p.breath_reach, 0.0..=1.0).fixed_decimals(2));
                 row(ui, t("气流扑耳", "Breath puff"), t("送气时气流扑到耳朵上的低频脉冲（耳朵痒的感觉），由嗓音自己的送气声导出。0 = 关闭，1 倍 = 标准；滑块到 8 倍，手输可更高", "Low-frequency pulses of breath hitting the ear, derived from the voice's own aspiration. 0 = off, 1x = standard; slider up to 8x, type for higher values"), egui::Slider::new(&mut p.puff, 0.0..=8.0).suffix(t(" 倍", "x")).fixed_decimals(2));
                 row(ui, t("耳甲共鸣", "Concha resonance"), t("贴耳时近耳 4.3 kHz 的耳甲腔共振（KU100 贴耳实录的共有特征）。0 = 关闭", "4.3 kHz concha resonance at the near ear when close. 0 = off"), egui::Slider::new(&mut p.concha_db, 0.0..=8.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("贴耳轻声", "Soft when close"), t("凑到耳边时把嗓音均衡成「放轻声音」，退开时恢复（只做均衡）。0 = 关闭", "EQ towards a lowered voice when at the ear, back to normal when away (EQ only). 0 = off"), egui::Slider::new(&mut p.soft_near, 0.0..=1.5).fixed_decimals(2));
@@ -2380,6 +2385,8 @@ impl App {
         });
         egui::CollapsingHeader::new(RichText::new(t("KU100 临场感", "KU100 presence")).strong()).default_open(true).show(ui, |ui| {
             ui.checkbox(&mut p.room, t("真实房间（KU100 实测，远耳听到的是房间声而不是寂静）", "Real room (measured with a KU100: the far ear hears the room, not silence)"));
+            ui.checkbox(&mut p.static_ambience, t("固定原声底噪", "Keep recorded ambience stationary"))
+                .on_hover_text(t("持续的房间底声留在固定位置，说话和短促呼吸随声源移动。", "Keep steady room tone in place while speech and short breaths move with the source."));
             egui::Grid::new("g4").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.add_enabled_ui(p.room, |ui| ui.label(t("房间声大小", "Room level")));
                 ui.add_enabled(p.room, egui::Slider::new(&mut p.wet_db, -12.0..=9.0).clamping(egui::SliderClamping::Never).suffix(" dB").fixed_decimals(0));
@@ -2416,6 +2423,7 @@ impl App {
             egui::Grid::new("g5").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 row(ui, t("响应阈值", "Gate threshold"), t("输入低于这个电平时当作静音（−90 = 关闭）", "Input below this level is muted (−90 = off)"), egui::Slider::new(&mut p.gate_db, -90.0..=-20.0).suffix(" dB").fixed_decimals(0));
                 row(ui, t("去齿音", "De-ess"), t("只在 s / sh / x 出现时压低 4.5 kHz 以上，最多压这么多", "Ducks >4.5 kHz only on sibilants, by at most this much"), egui::Slider::new(&mut p.deess_db, 0.0..=10.0).suffix(" dB").fixed_decimals(1));
+                row(ui, t("强辅音柔化", "Soften sharp consonants"), t("只在强辅音突出时收轻 5 kHz 附近的窄频带。调高会让刺耳的字音更柔，0 = 关闭。", "Softens a band around 5 kHz on prominent consonants. Increase to tame sharp syllables. 0 = off."), egui::Slider::new(&mut p.sharp_soften_db, 0.0..=8.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("轻声化", "Soft voice"), t("把嗓音均衡成「压低声音说话」（只做均衡，不改嗓音）", "EQ towards a lowered-voice spectrum (EQ only)"), egui::Slider::new(&mut p.soft_voice, 0.0..=1.5).fixed_decimals(2));
             });
         });

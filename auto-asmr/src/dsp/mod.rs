@@ -2,6 +2,7 @@
 //! 实时模式和文件模式共用同一个 [`engine::Engine`]。
 
 pub mod align;
+pub mod ambience;
 pub mod balance;
 pub mod analysis;
 pub mod direct;

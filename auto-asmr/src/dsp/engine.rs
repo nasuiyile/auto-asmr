@@ -1,6 +1,7 @@
 //! 引擎：把人声预处理、语音分析、运动、直达声、房间、回放补偿、响度和限制器串起来，逐块流式处理。
 //! 实时模式和文件模式用的是同一个引擎；文件模式多了约 1 秒的"预读"，并把响度归一化留到第二遍做。
 
+use super::ambience::{AmbienceSeparator, AMBIENCE_DELAY};
 use super::analysis::{Analyzer, Features};
 use super::direct::{DirectRenderer, BASE_DELAY};
 use super::dynamics::{Leveler, Limiter};
@@ -11,7 +12,7 @@ use super::pinna::pinnas;
 use super::rain::{Rain, RainSetup};
 use super::room::{conv_energy, Room};
 use super::tables::{tables, Hrir, Tables};
-use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathFx, CanalComb, ContactFx, DeEsser, Denoiser, Gate, DENOISE_DELAY, EAR_EQ_TAPS};
+use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathFx, CanalComb, ContactFx, DeEsser, Denoiser, Gate, SharpSoftener, DENOISE_DELAY, EAR_EQ_TAPS};
 use super::{db_to_lin, lin_to_db, smoothstep, C, CANAL_L0, CTRL, CTRL_DT, EAR_R, FS, NTAP, R_MAX, R_MIN};
 use std::sync::Arc;
 
@@ -177,6 +178,74 @@ struct EarLf {
     hp: [Biquad; 2],
 }
 
+/// 原录音的稳定底响。两耳各用两个全通段，保持每耳的幅频响应平直；
+/// 低频基本同相，中高频有固定的相位差。没有随人声变化的方向、增益或混响发送量。
+struct FixedAmbience {
+    split: AmbienceSeparator,
+    delay: Vec<f32>,
+    pos: usize,
+    phase: [[Biquad; 2]; 2],
+    gain: f32,
+    wet: f32,
+    warmup: usize,
+    tail: usize,
+}
+
+const AMBIENCE_FADE: f32 = 1.0 / (0.020 * FS);
+
+impl FixedAmbience {
+    fn new(lookahead: usize, enabled: bool, gain: f32) -> Self {
+        let allpass = |fc: f32| {
+            let (s, c) = (std::f32::consts::TAU * fc / FS).sin_cos();
+            let alpha = s / (2.0 * BUTTER_Q);
+            Biquad::from_coeffs([1.0 - alpha, -2.0 * c, 1.0 + alpha], [1.0 + alpha, -2.0 * c, 1.0 - alpha])
+        };
+        Self {
+            split: AmbienceSeparator::new(),
+            delay: vec![0.0; lookahead + ROOM_DELAY],
+            pos: 0,
+            phase: [[allpass(1850.0), allpass(6800.0)], [allpass(2500.0), allpass(9050.0)]],
+            gain,
+            wet: if enabled { 1.0 } else { 0.0 },
+            warmup: AMBIENCE_DELAY,
+            tail: 0,
+        }
+    }
+
+    fn separate(&mut self, x: f32, enabled: bool) -> (f32, f32) {
+        let (voice, bed) = self.split.process(x);
+        if self.warmup > 0 {
+            self.warmup -= 1;
+        } else if enabled {
+            self.wet = (self.wet + AMBIENCE_FADE).min(1.0);
+        }
+        if !enabled {
+            self.wet = (self.wet - AMBIENCE_FADE).max(0.0);
+            if self.wet == 0.0 {
+                self.split.reset();
+                self.warmup = AMBIENCE_DELAY;
+            }
+        }
+        if self.wet == 1.0 { (voice, bed) } else { (x + self.wet * (voice - x), self.wet * bed) }
+    }
+
+    fn render(&mut self, bed: f32) -> [f32; 2] {
+        // 与人声的离线预读和固定插值延迟对齐；开关后让已排队的底响自然播完。
+        if bed != 0.0 {
+            self.tail = self.delay.len() + 256;
+        } else if self.tail != 0 {
+            self.tail -= 1;
+        }
+        let delayed = self.delay[self.pos] * self.gain;
+        self.delay[self.pos] = bed;
+        self.pos = (self.pos + 1) % self.delay.len();
+        self.phase.each_mut().map(|filters| {
+            let a = filters[0].process(delayed);
+            filters[1].process(a)
+        })
+    }
+}
+
 impl EarLf {
     fn new() -> Self {
         EarLf { lp: [Biquad::lowpass(320.0, BUTTER_Q); 2], hp: [Biquad::highpass(320.0, BUTTER_Q); 2] }
@@ -229,8 +298,10 @@ pub struct Engine {
     post: PostMode,
     in_hp: Biquad,
     gate: Gate,
+    fixed_ambience: FixedAmbience,
     denoiser: Denoiser,
     deess: DeEsser,
+    sharp_softener: SharpSoftener,
     soft: Option<Fir>,
     soft_src: Option<Arc<Vec<f32>>>,
     softn: Option<Fir>,
@@ -298,14 +369,20 @@ impl Engine {
         let analyzer = Analyzer::new(lookahead_s);
         let la = analyzer.lookahead_samples();
         let seed = cfg.params.seed;
+        // 用 14 cm 参考位置的 KU100 双耳能量定一次标，之后底响增益与嘴的位置无关。
+        let mut h = Hrir::default();
+        tables().lookup(270.0, 0.14, &mut h);
+        let bed_gain = (0.5 * h.h.iter().flatten().map(|v| v * v).sum::<f32>()).sqrt();
         let mut e = Engine {
             tab: tables(),
             cfg: cfg.clone(),
             post,
             in_hp: Biquad::highpass(40.0, BUTTER_Q),
             gate: Gate::new(),
+            fixed_ambience: FixedAmbience::new(la, cfg.params.static_ambience, bed_gain),
             denoiser: Denoiser::new(),
             deess: DeEsser::new(),
+            sharp_softener: SharpSoftener::new(),
             soft: None,
             soft_src: None,
             softn: None,
@@ -416,11 +493,12 @@ impl Engine {
         self.analyzer.features().act
     }
 
-    /// 算法本身的延时（样本，48 kHz）：降噪 20 ms（开启时）+ 预读 + 分数延时插值 + 限制器。
+    /// 算法本身的延时（样本，48 kHz）：可选降噪、可选底响分离、预读、分数延时插值、限制器。
     /// 声音从嘴传到耳朵的传播时间（贴耳时约 0.3 ms）是效果的一部分，不算在内。
     pub fn latency_samples(&self) -> usize {
         let p = &self.cfg.params;
-        (if p.denoise { DENOISE_DELAY } else { 0 }) + self.la_buf.len() + ROOM_DELAY + if self.post == PostMode::Realtime { self.limiter.delay() } else { 0 }
+        (if p.denoise { DENOISE_DELAY } else { 0 }) + (if p.static_ambience { AMBIENCE_DELAY } else { 0 })
+            + self.la_buf.len() + ROOM_DELAY + if self.post == PostMode::Realtime { self.limiter.delay() } else { 0 }
     }
 
     /// 控制块开始：推进说话时钟和位置，算出块末尾的滤波器、时延和各种增益。
@@ -455,8 +533,10 @@ impl Engine {
         } else {
             (CTRL_DT as f64, 1.0)
         };
-        // 轨迹时间与音频对齐：有预读时音频晚 K 个控制块才出来，这段时间轨迹不动
-        if self.n_blocks > (self.la_buf.len() / CTRL) as u64 {
+        // 轨迹时间与音频对齐：预读和底响分离积累输入的这段时间，文件模式不会提前移动。
+        let pre_roll = self.la_buf.len() + if p.static_ambience { AMBIENCE_DELAY } else { 0 };
+        let pre_blocks = (pre_roll / CTRL) as u64;
+        if self.n_blocks > pre_blocks {
             self.tm += step;
         }
         let mut pose = self.motion.step(p, self.tm, amp, f.follow_db);
@@ -467,7 +547,7 @@ impl Engine {
         }
         self.pose = pose;
         if let Some(tr) = &mut self.trace {
-            let t = (self.n_blocks.saturating_sub((self.la_buf.len() / CTRL) as u64)) as f32 * CTRL_DT;
+            let t = self.n_blocks.saturating_sub(pre_blocks) as f32 * CTRL_DT;
             tr.push([t, pose.az, pose.r, pose.r_base, f.act, pose.el, pose.depth]);
         }
         let az_sofa = (360.0 - pose.az).rem_euclid(360.0); // 顺时针 -> SOFA 逆时针
@@ -581,8 +661,8 @@ impl Engine {
         let d = [rc / C * FS + self.hr.tau[0] + BASE_DELAY, rc / C * FS + self.hr.tau[1] + BASE_DELAY];
         self.direct.set_target(&self.hr.h, d);
 
-        // 贴耳气声：气声增强 + 气流扑耳，随贴耳程度渐入
-        self.breath.begin_block(cl, p.breath_db, p.puff);
+        // 自身气息也可在近距离正面听见；气流扑耳仍只随贴耳程度渐入。
+        self.breath.begin_block_at(cl, rc, p.breath_reach, p.breath_db, p.puff);
 
         // 近讲温暖感（两耳共同）、贴耳低频（近耳加、远耳减）
         let prox = ((0.6 - pose.r) / (0.6 - 0.13)).clamp(0.0, 1.0);
@@ -659,8 +739,10 @@ impl Engine {
         let ph = self.phase;
         let la = self.la_buf.len();
         let dn_mix = p.denoise_mix();
+        let sharp_mix = 1.0 - db_to_lin(-p.sharp_soften_db.clamp(0.0, 8.0));
         let breath_on = p.breath_db > 0.0 || p.puff > 0.0;
         let rumble_on = p.inear_cm > 0.0 && p.rumble > 0.0;
+        let mut bed = [0.0; CTRL];
         for i in 0..m {
             let x = input[i];
             self.in_pk = self.in_pk.max(x.abs());
@@ -668,6 +750,9 @@ impl Engine {
             v = self.gate.process(v, p.gate_db);
             if p.denoise {
                 v = self.denoiser.process(v, dn_mix);
+            }
+            if p.static_ambience || self.fixed_ambience.wet > 0.0 {
+                (v, bed[i]) = self.fixed_ambience.separate(v, p.static_ambience);
             }
             if p.deess_db > 0.0 {
                 v = self.deess.process(v, p.deess_db);
@@ -684,6 +769,7 @@ impl Engine {
                 self.la_pos = (self.la_pos + 1) % la;
                 o
             };
+            let a = self.sharp_softener.process(a, sharp_mix);
             self.xa[i] = a;
             // 房间声的输入和直达声一样多延后几个样本（分数延时插值器的固定时延），两者的相对时间与 Python 版一致
             self.xr[i] = self.room_dl[self.room_dl_pos];
@@ -752,6 +838,11 @@ impl Engine {
         }
         for i in 0..m {
             let (mut l, mut r) = (self.dl[i], self.dr[i]);
+            if bed[i] != 0.0 || self.fixed_ambience.tail != 0 {
+                let [bl, br] = self.fixed_ambience.render(bed[i]);
+                l += bl;
+                r += br;
+            }
             if let Some(pb) = &mut self.pb {
                 l = pb[0].process(l);
                 r = pb[1].process(r);
@@ -788,6 +879,79 @@ mod tests {
             eng.process(c, &mut l[o..o + c.len()], &mut r[o..o + c.len()]);
         }
         (l, r)
+    }
+
+    /// 用同一段麦克风底噪打底，先留三秒安静，再加入持续变化的发声。
+    /// 两个等价渲染只镜像声源位置，底响应稳定，叠在上面的说话声应仍可定位。
+    #[test]
+    fn recorded_ambience_stays_put_while_the_voice_moves() {
+        let fs = FS as usize;
+        let voice = crate::dsp::testsig::test_voice(1.5);
+        let mut seed = 12345u32;
+        let x: Vec<_> = (0..5 * fs).map(|i| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let noise = 0.003 * ((seed >> 8) as f32 / 8388608.0 - 1.0);
+            noise + i.checked_sub(3 * fs).and_then(|n| voice.get(n)).copied().unwrap_or(0.0)
+        }).collect();
+        let ilds = |fixed, az| {
+            let p = Params { mode: MotionMode::Manual, manual_az: az, manual_dist: 0.115, static_ambience: fixed, ..Params::default().style_ku100() };
+            let (l, r) = render(p, &x);
+            let ild = |start, end| band_db(&l[start..end], 250.0, 8000.0) - band_db(&r[start..end], 250.0, 8000.0);
+            (ild(fs * 2, fs * 3), ild(fs * 3 + fs / 10, fs * 4))
+        };
+        for (az, side) in [(270.0, 1.0), (90.0, -1.0)] {
+            let moving = ilds(false, az);
+            let fixed = ilds(true, az);
+            assert!(side * moving.0 > 10.0 && fixed.0.abs() < 1.0, "方位 {az}° 的底响声级差：原来 {moving:?}，固定后 {fixed:?}");
+            assert!(side * fixed.1 > 10.0 && (fixed.1 - moving.1).abs() < 2.0, "方位 {az}° 的话音声级差：原来 {moving:?}，固定后 {fixed:?}");
+        }
+        // 已开机的流动态切换。验证启用时先填足延迟，关闭后返回逐样本旁通，
+        // 再开启时不会重播上一次分离的残余样本。
+        let mut fixed = FixedAmbience::new(0, false, 1.0);
+        for _ in 0..AMBIENCE_DELAY {
+            assert_eq!(fixed.separate(0.5, true), (0.5, 0.0));
+        }
+        for &v in &x[..fs] {
+            fixed.separate(v, true);
+        }
+        for &v in &x[..1024] {
+            if fixed.wet > 0.0 {
+                fixed.separate(v, false);
+            }
+        }
+        assert_eq!(fixed.wet, 0.0);
+        for _ in 0..2 * AMBIENCE_DELAY {
+            assert_eq!(fixed.separate(0.0, true), (0.0, 0.0));
+        }
+    }
+
+    /// 冷启动先收到数字静音，再收到渐强的微弱有色底声，语音稍后才出现。
+    #[test]
+    fn ku100_keeps_a_fading_in_noise_floor_centered_from_the_opening() {
+        let fs = FS as usize;
+        let voice = crate::dsp::testsig::test_voice(0.9);
+        let mut rng = crate::dsp::rng::Rng::new(105);
+        let mut colored = 0.0;
+        let input: Vec<f32> = (0..3 * fs).map(|i| {
+            let t = i as f32 / FS;
+            let white = rng.uniform(-1.0, 1.0);
+            colored = 0.96 * colored + 0.04 * white;
+            let fade = ((t - 0.2) / 0.4).clamp(0.0, 1.0);
+            let noise = 0.00085 * fade * (colored + 0.08 * white);
+            noise + i.checked_sub(2 * fs).and_then(|j| voice.get(j)).copied().unwrap_or(0.0)
+        }).collect();
+        let params = Params { mode: MotionMode::Manual, manual_az: 270.0, manual_dist: 0.115, ..Params::default().style_ku100() };
+        let (left, right) = render(params, &input);
+        let levels = |ms: usize, end_ms: usize| {
+            let span = ms * fs / 1000..end_ms * fs / 1000;
+            (band_db(&left[span.clone()], 80.0, 12000.0), band_db(&right[span], 80.0, 12000.0))
+        };
+        for (begin, end) in [(250, 400), (400, 800), (800, 1200), (1200, 1600)] {
+            let (l, r) = levels(begin, end);
+            assert!(l > -100.0 && r > -100.0 && (l - r).abs() < 3.0, "{begin}–{end} ms: {l:.1}/{r:.1} dB");
+        }
+        let (l, r) = levels(2100, 2700);
+        assert!(l - r > 10.0, "开头底声固定后，左侧人声仍需清楚定位：{l:.1}/{r:.1} dB");
     }
 
     /// 背景音：实时引擎在人声之外加上雨声（没有人声时也在），比目标响度低"音量"那么多；拖到 0 淡出后完全消失，

@@ -8,6 +8,8 @@
 
 Rust 版多出来的：实时模式（含"话少时也一直在动"）、试听、输入降噪、噪声门、自动响度、随机走位模式（含正面比例 `--front`）、忽远忽近的随机程度、多音频合成、掏耳预设 `--style earclean`（入耳深度、耳道共鸣、耳内低频、堵耳闷感，见[效果与依据 · 掏耳](effects.md#掏耳入耳--style-earclean)）。
 
-`--style ku100` 两版不再相同：Rust 版后来按更多的 KU100 轻语实录重新标定，用了随机走位、更近的贴耳距离、去齿音等（见[效果与依据 · KU100 实录风格](effects.md#ku100-实录风格---style-ku100)）；Python 版没有随机走位，仍是最初的标定（左右穿梭、离耳约 6 cm）。在 Rust 版里给 `--style ku100` 再加 `--mode sweep --hold-time 2.5 --randomness 0.1 --dist 0.15 --level-follow 0.2 --puff 1 --dark 0 --deess 0`，输出与重新标定之前逐字节相同，也就是 Python 版的那套设置。贴耳加强（默认风格）两版仍然相同。
+两版的 `--style ku100` 采用不同的标定。Rust 版用随机走位，并能用 `--breath-reach` 控制说话人从耳侧移到身前时保留的气声细节。Python 版沿用最初的左右穿梭、离耳约 6 cm 的设置。两版默认的贴耳加强风格都只在耳侧提升气声。各代 KU100 预设的参数见[效果与依据](effects.md#ku100-实录风格---style-ku100)。
+
+Rust 版的「固定原声底噪」在实时和文件模式、安卓与 Chromium 上使用同一套分离器。Python 脚本仍把整个输入声道送入移动声源。
 
 Rust 版没有移植的：合成房间（treated / bedroom / living）、爆破音气团、`phrase` / `pingpong` / `wander` / `path` 运动模式。需要这些请用 Python 版。

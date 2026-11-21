@@ -45,8 +45,8 @@ convert 的选项（括号里是默认值）：
   --duo [毫秒]            第 2 个声音晚多少毫秒（1–300；不写数值 = 80）。30 ms 以下两边容易融成一个声音，
                           50–120 ms 像两个人一前一后地说，150 ms 以上像回声。可以和 --pos（两个位置）、--mix-gain、
                           --mix-follow、--mix-balance 一起用；输出比原音频长出这段延迟
-  --style ear|ku100|earclean   ear=贴耳加强；ku100=像真实 KU100 轻语实录（远耳听得到、真实房间、像真人一样随机走位，
-                          约三分之一的停留在正面，贴耳时离耳约 2–4 cm）；earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
+  --style ear|ku100|earclean   ear=贴耳加强；ku100=KU100 近耳轻语（突出轻微呼吸，随机走位，远耳保留实测房间声）；
+                          earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
                           带耳道共鸣和耳内低频，每只耳朵约 40 秒才换边，目标响度默认 −20 LUFS）
   --start <秒> --duration <秒>      只处理一段
   --channel auto|left|right|mix     立体声取哪个声道（auto=更响的那个）
@@ -71,6 +71,7 @@ convert 的选项（括号里是默认值）：
   --far-lf-cut <dB>       远耳低频再压低（12）    --dark <dB>         近耳 5 kHz 压低（0）
   --ku100-eq              近耳用 KU100 实测校正曲线
   --breath <dB>           气声增强：贴耳时轻的送气声 / 气息最多提高多少，响的齿音不提（6，0=关闭）
+  --breath-reach <0–1>    近处气声范围：身前等近处也保留部分气声增强，到头中心 20 cm 内最强，65 cm 处淡出（0=仅贴耳）
   --puff <x>              气流扑耳：送气时气流扑到耳朵上的低频脉冲，由嗓音自己的送气声导出（1，0=关闭）
   --pinna ku100|A…G       耳廓选择：ku100=人工头自己的耳廓；A…G=真人耳廓（挑最像自己耳朵的）；--pinna list 列出（ku100）
   --mouth <cm>            嘴的大小：嘴是约 2 cm 宽的开口而不是一个点，贴耳时耳廓的窄谷变浅（2，0=点声源）
@@ -88,7 +89,7 @@ convert 的选项（括号里是默认值）：
   --hold-time <秒> --move-time <秒> 停留、移动时长（2.5、2.5）
   --randomness <0–1>      时长和落点的随机程度（0.1）
   --approach <0–1>        换边时先退远再凑近的概率（0.25）
-  --front <0–1>           随机走位：停在正前方的比例（0.08；ku100 0.35）
+  --front <0–1>           随机走位：停在正前方的比例（0.08；ku100 0.36）
   --via front|back|alternate|random  从哪里绕（front）
   --ear-angle <度>（100）  --pass-dist <米>（0.2）  --az <度>（270）  --radius <米>（0.35）  --period <秒>（12）
   --level-follow <0–1>    响度随位置变化的程度（按模式：0.2 / 0.5 / 0.3 / 1）
@@ -103,11 +104,13 @@ convert 的选项（括号里是默认值）：
   --over-top <0–1>        换耳时从头顶绕过去的概率（0）
  房间与回放
   --room none|real        KU100 实测真实房间（none）    --wet <dB>（-3）
+  --static-ambience on|off  固定原声底噪。KU100 预设开启；其他预设默认关闭
   --headphone diffuse|native|<型号>   回放补偿（diffuse）；--headphone list 列出型号
  人声处理
   --denoise [0–100]       输入降噪 RNNoise（关）。数值 = 底噪最多压低多少 dB，如 12；不写数值或 100 = 降到最干净
   --gate <dBFS>           响应阈值，低于它当作静音（关）
   --deess <dB>            去齿音最多压低（0）       --soft-voice <x>   轻声化（0）
+  --sharp-soften <0–8>    强辅音柔化：强辅音突出时，5 kHz 附近最多收轻多少 dB（0=关）
  输出
   --lufs <L>（-16）  --peak <dBTP>（-1）  --max-gr <dB>（8）  --bits 16|24（24）  --seed <n>（1）
   --save-trajectory <csv> 导出实际走位（时间, 方位角, 距离, 不含忽远忽近的距离, 说话活动, 仰角, 入耳深度）
@@ -119,6 +122,14 @@ fn parse_bg_preset(p: Params, v: Option<&str>) -> Result<Params, String> {
         Some("rain-night") | Some("雨夜") | Some("rain") => Ok(p.bg_rain_night()),
         Some("off") | Some("关") => Ok(Params { bg_level: 0.0, ..p }),
         _ => Err("--bg 只能是 rain-night 或 off".into()),
+    }
+}
+
+fn parse_static_ambience(value: Option<&String>) -> Result<bool, String> {
+    match value.map(String::as_str) {
+        Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        _ => Err("--static-ambience 需要 on 或 off".into()),
     }
 }
 
@@ -302,6 +313,12 @@ pub fn run(args: Vec<String>) -> i32 {
                 p = p.style_ku100();
             }
             p.denoise = args.iter().any(|a| a == "--denoise");
+            if let Some(i) = args.iter().position(|a| a == "--static-ambience") {
+                match parse_static_ambience(args.get(i + 1)) {
+                    Ok(enabled) => p.static_ambience = enabled,
+                    Err(e) => { eprintln!("{e}"); return 1; }
+                }
+            }
             let mut o = crate::realtime::RtOptions::default();
             if let Some(i) = args.iter().position(|a| a == "--buffer") {
                 o.buffer_frames = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(256);
@@ -423,6 +440,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             "--dark" => p.dark_db = f(&mut it)?,
             "--ku100-eq" => p.ku100_eq = true,
             "--breath" => p.breath_db = f(&mut it)?.max(0.0),
+            "--breath-reach" => p.breath_reach = f(&mut it)?.clamp(0.0, 1.0),
             "--puff" => p.puff = f(&mut it)?.max(0.0),
             "--concha" => p.concha_db = f(&mut it)?,
             "--pinna" => {
@@ -501,6 +519,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
                 }
             }
             "--wet" => p.wet_db = f(&mut it)?,
+            "--static-ambience" => p.static_ambience = parse_static_ambience(it.next())?,
             "--headphone" => {
                 let v = it.next().ok_or("--headphone 后面缺少名称")?;
                 let norm = |s: &str| s.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
@@ -533,6 +552,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             }
             "--gate" => p.gate_db = f(&mut it)?,
             "--deess" => p.deess_db = f(&mut it)?,
+            "--sharp-soften" => p.sharp_soften_db = f(&mut it)?.clamp(0.0, 8.0),
             "--soft-voice" => p.soft_voice = f(&mut it)?,
             "--lufs" => {
                 lufs = f(&mut it)?;
@@ -813,6 +833,9 @@ fn run_rt_sim(args: &[String]) -> Result<(), String> {
     }
     let get = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
     let getf = |name: &str| get(name).and_then(|v| v.parse::<f32>().ok());
+    if args.iter().any(|a| a == "--static-ambience") {
+        p.static_ambience = parse_static_ambience(get("--static-ambience"))?;
+    }
     let input = PathBuf::from(args.first().ok_or("缺少输入文件")?);
     let mut opts = ConvertOptions::new(input);
     opts.duration = getf("--duration").map(|v| v as f64);

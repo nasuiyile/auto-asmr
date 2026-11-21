@@ -59,7 +59,8 @@ export const GROUPS = [
       { key: 'warmth_db', label: '温暖感', min: 0, max: 12, unit: 'dB', dec: 1, tip: '凑近时两耳共同的低频' },
       { key: 'ear_warmth_db', label: '近耳低频', min: 0, max: 10, unit: 'dB', dec: 1, tip: '贴耳时只给近耳加的低频' },
       { key: 'far_lf_cut_db', label: '远耳低频削减', min: 0, max: 18, unit: 'dB', dec: 0, tip: '贴耳时远耳 320 Hz 以下再压低' },
-      { key: 'breath_db', label: '气声增强', min: 0, max: 12, unit: 'dB', dec: 1, tip: '贴耳时把嗓音里轻的送气声 / 气息提上来（最多这么多），响的齿音不提。0 = 关闭' },
+      { key: 'breath_db', label: '气声增强', min: 0, max: 12, unit: 'dB', dec: 1, tip: '原声中轻微送气和呼吸声的最大增益，响亮的齿音不会得到额外增强。0 = 关闭' },
+      { key: 'breath_reach', label: '近处气声范围', min: 0, max: 1, dec: 2, tip: '在身前和耳侧近处保留多少比例的气声增强。0 = 仅贴耳，1 = 近处可用全部增益。声源离头中心 20 cm 内最强，渐弱至 65 cm 消失。低频气流仍只在贴耳时生效' },
       { key: 'puff', label: '气流扑耳', min: 0, max: 8, unit: '倍', dec: 2, tip: '送气时气流扑到耳朵上的低频脉冲（耳朵痒的感觉）。0 = 关闭，1 倍 = 标准' },
       { key: 'concha_db', label: '耳甲共鸣', min: 0, max: 8, unit: 'dB', dec: 1, tip: '贴耳时近耳 4.3 kHz 的耳甲腔共振。0 = 关闭' },
       { key: 'soft_near', label: '贴耳轻声', min: 0, max: 1.5, dec: 2, tip: '凑到耳边时把嗓音均衡成「放轻声音」，退开时恢复（只做均衡）。0 = 关闭' },
@@ -170,6 +171,7 @@ export const GROUPS = [
   {
     title: 'KU100 临场感',
     rows: [
+      { type: 'check', key: 'static_ambience', label: '固定原声底噪', tip: '让原录音里的稳定底噪留在固定空间，人声和呼吸继续随声源移动。合成雨声单独调节。' },
       { type: 'check', key: 'room', label: '真实房间（KU100 实测，远耳听到的是房间声而不是寂静）' },
       { key: 'wet_db', label: '房间声大小', min: -12, max: 9, unit: 'dB', dec: 0, on: (p) => p.room },
       { type: 'pinna', key: 'pinna', label: '耳廓', tip: 'KU100：人工头自己的耳廓（给别人听选这个最稳）；真人 A–G：自己听时挑前后、上下最分得清的那只' },
@@ -182,6 +184,7 @@ export const GROUPS = [
       { key: 'denoise', derived: true, label: '降噪', min: 0, max: 100, dec: 0, fmt: (x) => (x < 0.5 ? '0 关' : x >= 99.5 ? '100 最大' : `${x.toFixed(0)} dB`), tip: '输入降噪（RNNoise）：数值 = 底噪最多压低多少分贝，0 = 关闭，100 = 不设上限。开启后多 20 ms 延时' },
       { key: 'gate_db', label: '响应阈值', min: -90, max: -20, unit: 'dB', dec: 0, tip: '输入低于这个电平时当作静音（−90 = 关闭）' },
       { key: 'deess_db', label: '去齿音', min: 0, max: 10, unit: 'dB', dec: 1, tip: '只在 s / sh / x 出现时压低 4.5 kHz 以上，最多压这么多' },
+      { key: 'sharp_soften_db', label: '强辅音柔化', min: 0, max: 8, unit: 'dB', dec: 1, tip: '强辅音突出时，最多压低 5 kHz 附近窄频带这么多，保留轻微呼吸的细节。0 = 关闭' },
       { key: 'soft_voice', label: '轻声化', min: 0, max: 1.5, dec: 2, tip: '把嗓音均衡成「压低声音说话」（只做均衡）' },
     ],
   },

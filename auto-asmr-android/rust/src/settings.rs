@@ -422,9 +422,11 @@ mod tests {
         let desk = Saved { buffer: 512, input: Some("Mic".into()), params: Params { puff: 2.5, ..Params::default() }, ..Saved::default() };
         load_config(&config::to_text(&desk).unwrap()).unwrap();
         update_params(|p| set_field(p, "presence_db", json!(5.0))).unwrap();
+        update_params(|p| set_field(p, "static_ambience", json!(true))).unwrap();
         set_dry(true);
         let back = config::parse(&export_config().unwrap()).unwrap();
         assert!(back.buffer == 512 && back.input.as_deref() == Some("Mic") && back.dry);
+        assert!(back.params.static_ambience);
         assert_eq!((back.params.puff, back.params.presence_db), (2.5, 5.0));
         assert!(load_config("not ron").is_err());
     }

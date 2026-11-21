@@ -135,6 +135,43 @@ impl DeEsser {
     }
 }
 
+/// 对强辅音的 5 kHz 邻域做动态衰减。干声减去同相带通，中心最多衰减滑块指定的量。
+pub struct SharpSoftener {
+    band: Biquad,
+    band_power: f32,
+    input_power: f32,
+    recent_peak: f32,
+    mix: f32,
+}
+
+impl SharpSoftener {
+    pub fn new() -> Self {
+        Self { band: Biquad::bandpass(5000.0, 1.5), band_power: 0.0, input_power: 0.0, recent_peak: 0.0, mix: 0.0 }
+    }
+
+    #[inline]
+    pub fn process(&mut self, x: f32, max_mix: f32) -> f32 {
+        if max_mix == 0.0 && self.mix < 1e-5 {
+            if self.input_power > 0.0 || self.recent_peak > 0.0 {
+                *self = Self::new();
+            }
+            return x;
+        }
+        let band = self.band.process(x);
+        let detect = ema_coef(0.004, DT);
+        self.band_power += detect * (band * band - self.band_power);
+        self.input_power += detect * (x * x - self.input_power);
+        self.recent_peak = (self.recent_peak * (1.0 - ema_coef(3.0, DT))).max(self.band_power);
+        // 两个软门限均按功率：频带占总能量的 8%–36%，且达到近期带内峰值的 4%–40%。
+        let share = ((self.band_power / self.input_power.max(1e-9) - 0.08) / 0.28).clamp(0.0, 1.0);
+        let level = ((self.band_power / self.recent_peak.max(1e-8) - 0.04) / 0.36).clamp(0.0, 1.0);
+        let target = max_mix * share * level;
+        let rate = if target > self.mix { ema_coef(0.002, DT) } else { ema_coef(0.025, DT) };
+        self.mix += rate * (target - self.mix);
+        x - self.mix * band
+    }
+}
+
 // ANSI S3.5-1997 表 3：不同说话力度的标准语音频谱（1/3 倍频程，dB）
 const ANSI_F: [f32; 18] = [160., 200., 250., 315., 400., 500., 630., 800., 1000., 1250., 1600., 2000., 2500., 3150., 4000., 5000., 6300., 8000.];
 const ANSI_NORMAL: [f32; 18] = [32.41, 34.48, 34.75, 33.98, 34.59, 34.27, 32.06, 28.3, 25.01, 23.0, 20.15, 17.32, 13.18, 11.55, 9.33, 5.31, 2.59, 1.13];
@@ -365,7 +402,7 @@ pub const PUFF_K: f32 = 1.5;
 pub const BREATH_FC: f32 = 2500.0;
 
 /// 贴耳气声（与 Python 版 `breath_fx` 相同）：嘴贴近耳朵时把嗓音自己的气声提上来，并加上气流扑到耳朵上的低频脉冲。
-/// 两样都只用嗓音里已有的送气声，不生成任何噪声、不改变嗓音；离开耳边时都为 0。
+/// 两样都只用嗓音里已有的高频成分。气声增强可延伸到近距离正面，气流脉冲只在贴耳时出现。
 ///
 /// * 气声增强：气声带 = 2.5 kHz 以上。只把"轻"的部分提上来（频带内向上压缩）：电平比响的齿音低 16 dB 以上的
 ///   送气声 / 气息 / 轻辅音提得最多，接近齿音电平的不提，低到底噪附近（低 36–48 dB）的也不提。
@@ -423,7 +460,14 @@ impl BreathFx {
 
     /// 控制块开始：`cl` = 块末尾的贴耳程度（0–1），算出这一块里气声增益和气流增益走到哪里。
     pub fn begin_block(&mut self, cl: f32, lift_db: f32, puff: f32) {
-        let t = if lift_db > 0.0 { cl * (db_to_lin(lift_db * self.g) - 1.0) } else { 0.0 };
+        self.begin_block_at(cl, 0.0, 0.0, lift_db, puff);
+    }
+
+    /// `distance` 为嘴到头中心的距离（米），`reach` 只扩展气声增强的作用范围。
+    pub(crate) fn begin_block_at(&mut self, cl: f32, distance: f32, reach: f32, lift_db: f32, puff: f32) {
+        let nearby = ((0.65 - distance) / (0.65 - 0.20)).clamp(0.0, 1.0);
+        let lift_weight = cl.max(reach.clamp(0.0, 1.0) * nearby);
+        let t = if lift_db > 0.0 { lift_weight * (db_to_lin(lift_db * self.g) - 1.0) } else { 0.0 };
         let u = PUFF_K * puff.max(0.0) * cl;
         if self.primed {
             self.lift = (self.lift.1, t);
@@ -503,6 +547,47 @@ mod tests {
     use super::*;
     use crate::dsp::filters::fir_mag;
 
+    #[test]
+    fn sharp_softener_is_selective_and_bypasses_cleanly() {
+        let mut fx = SharpSoftener::new();
+        let max_mix = 1.0 - db_to_lin(-6.0);
+        let n = FS as usize / 2;
+        let mut run = |frequency: f32, amplitude: f32, mix: f32| {
+            let (mut dry, mut wet) = (0.0f64, 0.0f64);
+            for i in 0..n {
+                let phase = std::f32::consts::TAU * frequency * (i % 480) as f32 / FS;
+                let x = amplitude * phase.sin();
+                let y = fx.process(x, mix);
+                if i >= n / 2 {
+                    dry += f64::from(x).powi(2);
+                    wet += f64::from(y).powi(2);
+                }
+            }
+            10.0 * (wet / dry).log10()
+        };
+        assert_eq!(run(5000.0, 0.3, 0.0), 0.0);
+        assert!((run(5000.0, 0.3, max_mix) + 6.0).abs() < 0.03);
+        assert!(run(5000.0, 0.015, max_mix).abs() < 0.03, "峰值之后的微弱同频成分");
+        assert!(run(10000.0, 0.3, max_mix).abs() < 0.5, "高频空气感");
+        assert!(run(400.0, 0.3, max_mix).abs() < 0.03, "低频人声基音");
+        run(5000.0, 0.3, max_mix);
+        run(5000.0, 0.3, 0.0);
+        assert_eq!(fx.process(-0.1234567, 0.0).to_bits(), (-0.1234567f32).to_bits());
+        assert_eq!(fx.recent_peak, 0.0);
+        // 中途短暂关掉，在淡出完成前重开时沿当前的衰减量继续。
+        for i in 0..4800 {
+            fx.process(0.3 * (std::f32::consts::TAU * 5000.0 * (i % 48) as f32 / FS).sin(), max_mix);
+        }
+        let on = fx.mix;
+        for _ in 0..48 {
+            fx.process(0.0, 0.0);
+        }
+        let releasing = fx.mix;
+        assert!(releasing > 0.9 * on && releasing < on);
+        fx.process(0.0, max_mix);
+        assert!((fx.mix - releasing).abs() < 0.01);
+    }
+
     /// 远耳高频遮挡：6 kHz 处压一半，最高频接近设定值，500 Hz 基本不动。
     #[test]
     fn far_shadow_shape() {
@@ -526,13 +611,17 @@ mod tests {
     }
 
     /// 跑一段信号：返回（提升后 2.5 kHz 以上相对原来的增益 dB，气流脉冲有效值相对输入有效值 dB）。
-    fn run_breath(x: &[f32], cl: f32, lift_db: f32, puff: f32, skip: usize) -> (f32, f32) {
+    fn run_breath(x: &[f32], cl: f32, lift_db: f32, puff: f32, skip: usize, placement: Option<(f32, f32)>) -> (f32, f32) {
         let mut fx = BreathFx::new();
         let mut hp_in = Biquad::highpass(BREATH_FC, BUTTER_Q);
         let mut hp_out = Biquad::highpass(BREATH_FC, BUTTER_Q);
         let (mut ei, mut eo, mut ep, mut ex) = (0f64, 0f64, 0f64, 0f64);
         for (k, blk) in x.chunks(super::super::CTRL).enumerate() {
-            fx.begin_block(cl, lift_db, puff);
+            if let Some((distance, reach)) = placement {
+                fx.begin_block_at(cl, distance, reach, lift_db, puff);
+            } else {
+                fx.begin_block(cl, lift_db, puff);
+            }
             for (i, &a) in blk.iter().enumerate() {
                 let (y, p) = fx.process(a, i as f32 / super::super::CTRL as f32);
                 let (bi, bo) = (hp_in.process(a), hp_out.process(y));
@@ -556,14 +645,25 @@ mod tests {
         // 前 2 s 响（让"响的齿音"电平跟上去），后 2 s 低 20 dB / 低 60 dB；从变轻 0.6 s 后开始量
         let mk = |drop_db: f32| -> Vec<f32> { loud.iter().enumerate().map(|(i, &v)| if i < n / 2 { v } else { v * db_to_lin(-drop_db) }).collect() };
         let half = n / 2 + FS as usize * 6 / 10;
-        let (g_loud, _) = run_breath(&loud, 1.0, 6.0, 0.0, half);
-        let (g_soft, _) = run_breath(&mk(20.0), 1.0, 6.0, 0.0, half);
-        let (g_floor, _) = run_breath(&mk(60.0), 1.0, 6.0, 0.0, half);
-        let (g_away, _) = run_breath(&mk(20.0), 0.0, 6.0, 0.0, half);
+        let soft = mk(20.0);
+        let (g_loud, _) = run_breath(&loud, 1.0, 6.0, 0.0, half, None);
+        let (g_soft, _) = run_breath(&soft, 1.0, 6.0, 0.0, half, None);
+        let (g_floor, _) = run_breath(&mk(60.0), 1.0, 6.0, 0.0, half, None);
+        let (g_away, _) = run_breath(&soft, 0.0, 6.0, 0.0, half, None);
         assert!(g_loud.abs() < 0.5, "响的不提：{g_loud}");
         assert!(g_soft > 4.5 && g_soft < 6.2, "轻的提到接近 6 dB：{g_soft}");
         assert!(g_floor.abs() < 0.5, "底噪不提：{g_floor}");
         assert!(g_away.abs() < 1e-3, "离开耳边不动：{g_away}");
+
+        // 正前方没有贴耳气流。扩展到近场后仍只增强原声的高频，退到 65 cm 或关闭时恢复。
+        let frontal = |distance, reach| run_breath(&soft, 0.0, 6.0, 1.0, half, Some((distance, reach)));
+        let (near, pulse) = frontal(0.20, 0.75);
+        let (middle, _) = frontal(0.425, 0.75);
+        assert!(near > 3.0 && middle > 1.0 && middle < near);
+        assert_eq!(pulse, f32::NEG_INFINITY);
+        assert_eq!(frontal(0.65, 0.75).0, g_away);
+        assert_eq!(frontal(0.2, 0.0).0, g_away);
+        assert_eq!(run_breath(&soft, 1.0, 6.0, 0.0, half, Some((0.11, 0.75))).0, g_soft);
     }
 
     /// 气流扑耳：能量集中在 50–130 Hz，强度随 puff 线性变化，离开耳边时为 0。
@@ -590,9 +690,9 @@ mod tests {
         assert!(e_all > 0.0);
         assert!(e_lo / e_all > 0.8, "200 Hz 以下占 {}", e_lo / e_all);
         assert!(e_hi / e_all < 0.01, "400 Hz 以上占 {}", e_hi / e_all);
-        let (_, p1) = run_breath(&x, 1.0, 0.0, 1.0, 0);
-        let (_, p2) = run_breath(&x, 1.0, 0.0, 2.0, 0);
-        let (_, p0) = run_breath(&x, 0.0, 0.0, 1.0, 0);
+        let (_, p1) = run_breath(&x, 1.0, 0.0, 1.0, 0, None);
+        let (_, p2) = run_breath(&x, 1.0, 0.0, 2.0, 0, None);
+        let (_, p0) = run_breath(&x, 0.0, 0.0, 1.0, 0, None);
         assert!((p2 - p1 - 6.02).abs() < 0.1, "puff 加倍 +6 dB：{}", p2 - p1);
         assert!(p1 > -30.0 && p1 < 0.0, "脉冲电平相对输入 {p1} dB");
         assert!(p0 < -200.0, "离开耳边没有脉冲：{p0}");

@@ -30,7 +30,7 @@ App 禁止被录，是因为不想被录音。所以这个 App 只做实时处�
 
 一共两个进程：
 
-- **App 进程**（界面、通知栏、悬浮球，也是网页模式的浏览器）：参数由 `Settings` 管（和网页模式同一份，引擎在 `libasmrhook.so` 里，经 `NativeHook` 调用；自动保存到 `files/auto-asmr.ron`）。配置一变，就把**整份配置文件**推给服务进程：左右双人的延迟、排布、自动平衡存在配置文件里 `params` 之外，原声开关也在里面，所以推整份，两种模式才用得上同一份配置。
+- **App 进程**（界面、通知栏，也是网页模式的浏览器）：参数由 `Settings` 管（和网页模式同一份，引擎在 `libasmrhook.so` 里，经 `NativeHook` 调用；自动保存到 `files/auto-asmr.ron`）。配置一变，就把**整份配置文件**推给服务进程：左右双人的延迟、排布、自动平衡存在配置文件里 `params` 之外，原声开关也在里面，所以推整份，两种模式才用得上同一份配置。
 - **服务进程**（shell 或 root 身份）：注册音频策略、截声音、用引擎处理、放出来，背景雨声也在这里放。它加载 `libasmrglobal.so`（同一个 Rust 静态库，不带 hook），不存配置，配置都来自 App。
 
 服务进程有三种起法，核心代码相同（`global/server/EngineCore.kt`），只是入口和命令的通道不同：
@@ -45,15 +45,16 @@ App 禁止被录，是因为不想被录音。所以这个 App 只做实时处�
 
 服务进程退出或被杀时，系统发现策略的回调 binder 断开，自动注销策略，各 App 的声音回到原来的设备（已实测）。
 
-## 防止被杀后台
+## 后台运行
 
-1. **引擎在常驻进程里**（Shizuku 方式，不用设置）：服务进程是 shell / root 身份的进程，不归系统的 App 后台管理。App 进程被清掉后声音照常处理，参数保持最后一次的。这是最主要的一条。
-2. **前台服务自动拉起**：连着服务进程时 App 开着一个前台服务（`global/InterceptService.kt`，和网页模式的播放通知分开；通知栏可以暂停 / 继续拦截、切效果 / 原声、退出）。它被系统杀掉后会被重新拉起，新的 App 进程收到 Shizuku 的 binder 后用 `peekUserService` 连回还在跑的服务进程（不会新开一个），通知和悬浮球随之恢复；10 秒内没连上就自己关掉。
-3. **悬浮球**（要「显示在其他应用上层」的权限）：点一下切换效果 / 原声，长按打开 App，拖动后贴到屏幕左边或右边。颜色表示状态：紫 = 效果，灰 = 原声，浅灰 = 暂停拦截，红 = 没连上；外圈亮起表示此刻在处理声音。App 有一个看得见的窗口时，系统把它当作"用户看得见的"进程，很少回收。
-4. **忽略电池优化**：界面上一键申请，系统省电时不再限制 App。
-5. **厂商的后台管理**：只能由用户在系统设置里改，界面上按厂商给出说明和「应用设置」入口。荣耀 / 华为：应用启动管理里把 auto-asmr 改成手动管理，打开「允许自启动」「允许后台活动」。
+1. **引擎在常驻进程里**（Shizuku 方式，不用设置）：服务进程是 Shizuku 起的 shell / root 身份的进程，不归系统的 App 后台管理。App 进程被清掉后声音照常处理，参数保持最后一次的。这本身就是防杀，不需要别的手段。
+2. **前台服务**：连着服务进程时 App 开着一个前台服务（`global/InterceptService.kt`，和网页模式的播放通知分开），通知栏里可以暂停 / 继续拦截、切效果 / 原声、退出。它被系统杀掉后会被重新拉起，新的 App 进程收到 Shizuku 的 binder 后用 `peekUserService` 连回还在跑的服务进程（不会新开一个），通知随之恢复；10 秒内没连上就自己关掉。
 
-root 方式没有第 1、2 条：服务进程跟着 App 进程走。想要常驻，可以先用 root 启动 Shizuku，再走 Shizuku 方式。
+App 不主动申请通知权限（Android 13 起要用户同意）。没有这个权限时前台服务照常运行，只是通知栏里不显示它的通知；想要通知栏控制，在系统设置里给 auto-asmr 打开通知，回到 App 时通知就会出来。
+
+root 方式没有第 1 条，第 2 条也只剩前台服务本身：服务进程跟着 App 进程走（管道断开就停止拦截并退出，声音恢复原样），App 进程被杀后没有可以连回去的服务进程；前台服务让 App 进程不容易被系统回收。想要常驻，可以先用 root 启动 Shizuku，再走 Shizuku 方式。
+
+以前还有悬浮球、「忽略电池优化」一键申请、厂商后台管理的说明，都是为了让 App 进程别被清掉。Shizuku 方式下声音不靠 App 进程，所以都去掉了；悬浮球"点一下切换效果 / 原声"的用法改在 App 里或通知栏切换。去掉以后实测：`kill -9` App 进程，服务进程照常处理，约 1 秒后前台服务被系统拉起并连回去（见[去掉悬浮球等之后](#去掉悬浮球等之后)）。
 
 ## 使用
 
@@ -65,7 +66,6 @@ root 方式没有第 1、2 条：服务进程跟着 App 进程走。想要常驻
 全局页一页从上到下（切换条下面）：
 
 - **服务进程**：Shizuku 状态、服务进程的版本和身份、「拦截其他 App 的声音」开关（暂停 / 继续）、输入 / 输出峰值、断流次数、「退出服务」。
-- **后台运行（防止被杀）**：悬浮球开关、忽略电池优化、厂商后台管理的说明和入口。
 - **ASMR 效果**：和网页模式同一个效果面板（`EffectPanel.kt`）：效果 / 原声开关、风格按钮、位置图和手动摆位、降噪、各组参数（含**左右双人**）、导入 / 导出配置。状态一行显示是否在处理、链路延迟、处理占用。
 - **日志**：App 和服务进程的日志（点开才显示）。
 
@@ -85,7 +85,7 @@ root 方式没有第 1、2 条：服务进程跟着 App 进程走。想要常驻
 - 立体声：通话类声音有一条专用的直通输出（`VOIP_RX`），很多手机上是 16 位单声道。通话那路的输出流是浮点立体声，和它的格式对不上，AOSP 的音频策略会退回普通的混音输出，立体声保得住。通话那路开始放时，服务进程会查一次这条流所在的输出有几个声道（读 `dumpsys media.audio_flinger`，至少隔 30 秒查一次），日志里有一行 `通话一路的输出：2 声道`；如果这台手机把它放到了单声道输出上，就换成媒体用途（日志里有一行 warn），立体声保住，代价是对方的声音跟媒体音量走。
 - 延迟：对方的声音晚到约 90–100 ms（和其它声音一样，见[实测结果](#实测结果模拟器android-16)），对话时能察觉到一点。
 - 回声：通话 App 的回声消除用的是它自己放出的声音做参考，处理后的声音左右移动、晚一点，开免提时对方可能听到回声。戴耳机没有这个问题（双耳效果本来也要戴耳机听）。
-- 不想处理某个通话：暂停拦截（全局页的开关或悬浮球），或者只选要处理的 App（`start only=UID`）。
+- 不想处理某个通话：暂停拦截（全局页的开关，或者打开了通知时的通知栏），或者只选要处理的 App（`start only=UID`）。
 - 普通电话（运营商通话）不走 App 的播放，截不到，也不处理。
 
 ## 和网页模式的关系
@@ -202,6 +202,18 @@ QQ、微光这类 App 里对方的声音没有被处理，原因是它们用"语
 
 通话那路万一要换成媒体用途（单声道输出时），要先放掉旧的输出流再用同一个会话号建新的：AudioFlinger 不允许同一个会话号里有不同用途的播放流（日志 `createTrack_l() mismatched strategy`），而会话号不能变（拦截规则靠它排除自己的声音）。正在放的旧流要等混音线程下一轮才撤下来，所以建新流失败时隔 10 ms 再试，最多试 0.3 秒。这条退路在模拟器上没走到过（模拟器上是 2 声道）。
 
+### 去掉悬浮球等之后
+
+不再主动申请通知权限，去掉悬浮球、忽略电池优化、厂商后台管理的说明（见[后台运行](#后台运行)）。模拟器上全新安装 debug 包，没给通知权限：
+
+| 检查 | 结果 |
+|---|---|
+| 网页页打开测试页放声音 | 不弹通知权限申请；网页的播放通知照样显示在通知栏的媒体控件里（带媒体会话的播放通知不需要这个权限） |
+| 全局页「用 Shizuku 启动」 | 只弹 Shizuku 自己的授权，不弹通知权限申请；页面上没有「后台运行」卡片；前台服务在运行（`isForeground=true`），通知栏里没有它的通知 |
+| 拦截中（探针在放）`kill -9` App 进程 | 服务进程（PID 不变）继续处理，扬声器上照常是它的输出流；约 1 秒后系统重新拉起前台服务，新的 App 进程连回同一个服务进程（日志「服务进程还在运行，连回去」），前台服务恢复。没有悬浮窗、电池优化白名单这些豁免也一样 |
+| 在系统里打开通知（`pm grant … POST_NOTIFICATIONS`）再回到 App | 通知栏出现「auto-asmr 全局模式 · 拦截中 · ASMR 效果（通过 Shizuku）」 |
+| 清单 | 不再声明 `SYSTEM_ALERT_WINDOW`、`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`；`POST_NOTIFICATIONS` 保留声明（不主动申请，用户才能在系统设置里打开通知） |
+
 ### 0.2.0（单独的 App 时：常驻服务进程、悬浮球、参数面板）
 
 | 检查 | 结果 |
@@ -215,6 +227,8 @@ QQ、微光这类 App 里对方的声音没有被处理，原因是它们用"语
 | 界面 | 一页里：服务进程、后台运行、和安卓版相同的效果面板（全部参数组）、日志 |
 | release 包（R8 精简） | 15.5 MB（debug 包 47 MB，主要是没精简的 Compose）；以上流程在 release 包上重跑一遍，照常 |
 | root / adb 通道（当时的 `tools/server.sh`，现在是 `auto-asmr-android/tools/global_server.sh`） | 照常；延迟对照多出 98.6 ms，和之前一致 |
+
+悬浮球和「后台运行」卡片后来去掉了（见[后台运行](#后台运行)）。
 
 0.2.0 之前的版本没有真正切到原声：`dry` 只记进了配置，引擎照样在处理。现在原声时服务进程不调用引擎（和安卓版 hook 层的做法一样）。
 
@@ -249,12 +263,12 @@ QQ、微光这类 App 里对方的声音没有被处理，原因是它们用"语
 
 复现：装好 App 后用 `auto-asmr-android/tools/global_server.sh --start --onset`。探针的第二个参数写 `voice` 时模拟语音通话 App（见[语音通话](#语音通话)）。延迟对照要让探针以另一个身份跑，例如服务进程用 shell，探针用 `adb shell "su 0 sh -c 'CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.LatencyProbe 12'"`。
 
-模拟器上测 Shizuku：装官方 APK（GitHub Release），用 `adb shell <Shizuku 的安装目录>/lib/arm64/libshizuku.so` 启动它（安装目录用 `adb shell pm path moe.shizuku.privileged.api` 查），再在 App 的全局页点「用 Shizuku 启动」，或者 `adb shell am start -n io.github.nasuiyile.autoasmr/.MainActivity --es page global --es launch shizuku`（其它测试参数见 `MainActivity.kt` 的类注释）。悬浮窗权限可以用 `adb shell appops set io.github.nasuiyile.autoasmr SYSTEM_ALERT_WINDOW allow` 直接给。
+模拟器上测 Shizuku：装官方 APK（GitHub Release），用 `adb shell <Shizuku 的安装目录>/lib/arm64/libshizuku.so` 启动它（安装目录用 `adb shell pm path moe.shizuku.privileged.api` 查），再在 App 的全局页点「用 Shizuku 启动」，或者 `adb shell am start -n io.github.nasuiyile.autoasmr/.MainActivity --es page global --es launch shizuku`（其它测试参数见 `MainActivity.kt` 的类注释）。通知权限可以用 `adb shell pm grant io.github.nasuiyile.autoasmr android.permission.POST_NOTIFICATIONS` 直接给（`pm revoke` 收回，收回时 App 进程会被系统结束）。
 
 ## 还没验证的
 
 - **真机**：荣耀 AAP-AN00（Android 17）第一次试在开始录音时出错，已经修改（见[厂商系统的兼容处理](#厂商系统的兼容处理)），还要复测；其它机型都没测。厂商可能改过音频框架或音频策略（华为、小米、三星等），要逐个看。
-- **真机上的保活**：常驻服务进程、前台服务被拉起后连回去、悬浮球，在 MagicOS 这类后台管理很严的系统上表现如何；Shizuku 本身被清掉时服务进程也会退出。
+- **真机上的保活**：常驻服务进程、前台服务被拉起后连回去，在 MagicOS 这类后台管理很严的系统上表现如何。去掉悬浮球和电池优化以后 App 进程更容易被清掉：Shizuku 方式下不影响声音（只是通知要等 App 再起来才恢复），root 方式下拦截会停。Shizuku 本身被清掉时服务进程也会退出。
 - **Shizuku 的 root 模式**：只测了 adb 模式（shell 身份）。root 模式下服务进程是 root 身份，这个身份用 adb 测过，但没经过 Shizuku 跑。
 - **root 启动**：模拟器自带的 `su` 不让 App 用（只认 shell 和 root），点「用 root 启动」会提示 `Permission denied`。服务进程在 root 身份下已经验证，没验证的是 Magisk / KernelSU 的 `su -c` 和管道转发（0.2.0 的编号请求 / 回复）。
 - **硬件直通播放**：用 offload（DSP 解码长音频）或 AAudio MMAP 独占模式播放的 App 会不会按规则被截走。
@@ -285,12 +299,10 @@ auto-asmr-android/
     MainActivity.kt       三个页面（网页 / 全局 / 文件转换）的切换、共用的导入导出和提示；adb 测试参数
     Settings.kt           参数（两种模式共用），连着服务进程时把整份配置推过去；雨声由谁放
     global/
-      GlobalScreen.kt     全局页：服务进程、后台运行、效果面板、日志
+      GlobalScreen.kt     全局页：服务进程、效果面板、日志
       Controller.kt       起服务进程（Shizuku UserService / su）、连上、推配置、定时读状态
       Links.kt            到服务进程的连接：binder（Shizuku）、管道（root）
-      InterceptService.kt 全局模式的前台服务：通知栏控制、挂悬浮球、被杀后拉起再连回去
-      FloatingBall.kt     悬浮球
-      KeepAlive.kt        悬浮窗权限、电池优化、厂商后台管理的说明
+      InterceptService.kt 全局模式的前台服务：通知栏控制、被杀后拉起再连回去
       server/             服务进程（shell / root 身份）
         EngineCore.kt     核心：引擎、拦截、雨声、命令处理、统计、日志
         EngineService.kt  Shizuku UserService 入口（binder）

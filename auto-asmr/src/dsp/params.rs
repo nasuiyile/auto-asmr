@@ -428,6 +428,27 @@ impl Params {
         p
     }
 
+    /// 风格按钮的名字（和安卓版、插件的 action 同名），按桌面版按钮的顺序。
+    pub const STYLES: [&'static str; 4] = ["style_ear", "style_ku100", "style_breath", "style_earclean"];
+
+    /// 按名字套用风格（名字见 [`Params::STYLES`]）；不认识的名字返回 None。
+    pub fn with_style(self, name: &str) -> Option<Self> {
+        Some(match name {
+            "style_ear" => self.style_ear(),
+            "style_ku100" => self.style_ku100(),
+            "style_breath" => self.style_breath(),
+            "style_earclean" => self.style_earclean(),
+            _ => return None,
+        })
+    }
+
+    /// 现在选中的风格：再按一次这个风格按钮参数一点不变，就算选中了它（界面上把它标出来）。
+    /// 风格管的参数手动调过、和哪个风格都对不上时为 None；风格不管的设置（降噪、耳廓、输出、位置等）不影响。
+    /// 恢复默认后是贴耳加强（默认参数就是贴耳加强）。
+    pub fn active_style(&self) -> Option<&'static str> {
+        Self::STYLES.into_iter().find(|n| self.clone().with_style(n).as_ref() == Some(self))
+    }
+
     /// "雨夜"：四面八方的小到中雨（约 2 mm/h），重心绕着头慢慢转（8D 环绕）；身边地上的落地声比参考的 8D 雨声
     /// 轻约 6 dB；不隔窗、没有屋檐滴水、没有雷（雷声是可选的，要的话再拉「雷声」）；雨声比人声低约 18 dB。只改背景音这几项。
     pub fn bg_rain_night(mut self) -> Self {
@@ -563,6 +584,22 @@ mod tests {
             assert!(q.out_gain_db == -3.0 && q.ceiling_db == -2.0 && !q.auto_level && q.seed == 9);
             assert!(q.static_az == 45.0 && q.orbit_radius == 0.5 && q.manual_az == 10.0);
         }
+    }
+
+    #[test]
+    fn active_style_follows_the_last_style_button() {
+        let d = Params::default();
+        assert_eq!(d.active_style(), Some("style_ear"));
+        // 风格不管的设置改了也还算选中
+        let mine = Params { denoise: true, denoise_db: 12.0, pinna: "B".to_string(), out_gain_db: -3.0, seed: 9, static_az: 45.0, bg_level: 55.0, ..d.clone() };
+        for name in Params::STYLES {
+            let q = mine.clone().with_style(name).unwrap();
+            assert_eq!(q.active_style(), Some(name), "{name}");
+        }
+        // 手动调了风格管的参数：谁都不是
+        let q = Params { ear_dist: d.ear_dist + 0.01, ..d.clone().style_ku100() };
+        assert_eq!(q.active_style(), None);
+        assert!(d.clone().with_style("style_x").is_none());
     }
 
     #[test]

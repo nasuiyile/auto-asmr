@@ -1,9 +1,6 @@
 package io.github.nasuiyile.autoasmr
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
@@ -61,9 +58,7 @@ import androidx.compose.runtime.setValue
 import io.github.nasuiyile.autoasmr.files.FilesScreen
 import io.github.nasuiyile.autoasmr.global.Controller
 import io.github.nasuiyile.autoasmr.global.GlobalScreen
-import io.github.nasuiyile.autoasmr.global.GlobalUi
 import io.github.nasuiyile.autoasmr.global.InterceptService
-import io.github.nasuiyile.autoasmr.global.KeepAlive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -93,7 +88,7 @@ import java.io.File
  * --es action <按钮>（style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off）；
  * --es params '<RON>'；--ei rec <秒>（录下处理前后的声音）；--es ua desktop|mobile；--es mute 1|0；
  * --es import <文件名> / --es export <文件名>（在 /sdcard/Android/data/<包名>/files/ 里，导入 / 导出配置）。
- * 页面：--es page web|global|files。文件转换：--es files_add <文件名,…>（外部文件目录里的）；--es files_op '<JSON 命令>'。全局模式：--es launch shizuku|root；--es intercept 1|0；--es dry 1|0；--es ball 1|0；--es exit 1。
+ * 页面：--es page web|global|files。文件转换：--es files_add <文件名,…>（外部文件目录里的）；--es files_op '<JSON 命令>'。全局模式：--es launch shizuku|root；--es intercept 1|0；--es dry 1|0；--es exit 1。
  */
 class MainActivity : ComponentActivity() {
     private lateinit var browser: Browser
@@ -126,8 +121,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         Controller.uiVisible = true
-        GlobalUi.resumed++ // 从系统设置回来：重新看悬浮窗权限、电池优化
-        InterceptService.instance?.refreshBall()
+        InterceptService.instance?.refresh() // 从系统设置回来时可能刚打开了通知
     }
 
     override fun onPause() {
@@ -135,7 +129,7 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
-    /** adb 驱动的参数（见类注释）；通知栏、悬浮球打开 App 时带 page=global。 */
+    /** adb 驱动的参数（见类注释）；通知栏打开 App 时带 page=global。 */
     private fun handle(intent: Intent) {
         when (intent.getStringExtra("page")) {
             "global" -> setPage(this, Page.GLOBAL)
@@ -157,10 +151,6 @@ class MainActivity : ComponentActivity() {
         }
         intent.getStringExtra("intercept")?.let { Controller.setIntercept(it == "1") }
         intent.getStringExtra("dry")?.let { Settings.setDry(it == "1") }
-        intent.getStringExtra("ball")?.let {
-            KeepAlive.setBallWanted(this, it == "1")
-            InterceptService.instance?.refreshBall()
-        }
         if (intent.getStringExtra("exit") == "1") Controller.exit()
         val tab = browser.current ?: return
         intent.getIntExtra("mode", -1).takeIf { it in 0..3 }?.let { NativeHook.setMode(it) }
@@ -328,19 +318,6 @@ private fun Screen(b: Browser, record: (Int) -> Unit, onImport: () -> Unit, onEx
     // 网页没在出声、全局模式在处理其他 App 的声音时，位置图和状态显示全局模式的
     val shown = if ((tele.isEmpty() || tele[0] <= 0f) && Controller.intercepting) Controller.poll.tele else tele
     val shownTitle = if (shown === tele) b.audibleTab?.let { it.title.ifEmpty { it.url } } else null
-
-    // 第一次有声音时请求通知权限（Android 13 起）：后台播放的通知栏控制要用；拒绝了也照常播放
-    val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    val sounding = b.audibleTab != null || Settings.rainOn
-    LaunchedEffect(sounding) {
-        if (sounding && Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            val prefs = ctx.getSharedPreferences("ui", 0)
-            if (!prefs.getBoolean("asked_notifications", false)) {
-                prefs.edit().putBoolean("asked_notifications", true).apply()
-                notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-    }
 
     BackHandler {
         when {

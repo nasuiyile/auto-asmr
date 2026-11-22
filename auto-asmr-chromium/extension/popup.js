@@ -184,6 +184,8 @@ let state = asmr.ui();
 function render() {
   for (const b of document.querySelectorAll('#dry button')) b.classList.toggle('on', String(state.dry) === b.dataset.dry);
   for (const b of document.querySelectorAll('#mode button')) b.classList.toggle('on', state.params.mode === b.dataset.mode);
+  // 选中的风格（参数和它一致）亮起来；手动调过风格管的参数后都不亮
+  for (const b of document.querySelectorAll('[data-style]')) b.classList.toggle('on', state.derived.style === +b.dataset.style);
   if (document.activeElement !== $('rain')) $('rain').value = state.params.bg_level;
   $('rain-on').classList.toggle('on', state.params.bg_level > 0);
   if (document.activeElement !== $('duo')) $('duo').value = state.doc.duo_ms;

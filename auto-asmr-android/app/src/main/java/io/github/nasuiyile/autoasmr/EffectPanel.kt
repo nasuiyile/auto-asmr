@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -88,8 +89,15 @@ fun EffectPanel(
             Spacer(Modifier.height(8.dp))
             Text("风格", style = MaterialTheme.typography.labelLarge)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 选中的风格（参数和它一致）用实心按钮标出来；手动调过风格管的参数后都不标
+                val active = p.optString("active_style")
                 for (s in SpecUi.items(spec.optJSONArray("styles"))) {
-                    OutlinedButton(onClick = { Settings.action(s.optString("action")) }) { Text(s.optString("label")) }
+                    val action = s.optString("action")
+                    if (action == active) {
+                        Button(onClick = { Settings.action(action) }) { Text("✓ " + s.optString("label")) }
+                    } else {
+                        OutlinedButton(onClick = { Settings.action(action) }) { Text(s.optString("label")) }
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))

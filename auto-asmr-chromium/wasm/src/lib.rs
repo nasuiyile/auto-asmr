@@ -208,8 +208,12 @@ pub extern "C" fn asmr_doc_text() -> i32 {
 
 /// 界面要显示的内容（JSON）：`params`（全部参数，字段名同配置文件）、`dry`、
 /// `derived`（界面上的换算值：`ear_cm` 贴耳距离、`manual_cm` 手动摆位的离头距离、`moves_per_min` 移动频率、
-/// `denoise` 降噪滑条、`bg_db` 雨声比人声低多少 dB，关闭时为 null）、
+/// `denoise` 降噪滑条、`bg_db` 雨声比人声低多少 dB，关闭时为 null；`style` 选中的风格，编号同 `style`，
+/// 参数和哪个风格都对不上时为 null）、
 /// `doc`（配置文件里 `params` 之外、和桌面版共用的左右双人设置：`duo_ms`、`mix_follow`、`mix_balance`）。
+/// 插件风格按钮的编号（`style` 0..3）对应的风格名（[`Params::STYLES`]）。
+const STYLE_ORDER: [&str; 4] = ["style_ear", "style_ku100", "style_earclean", "style_breath"];
+
 #[no_mangle]
 pub extern "C" fn asmr_doc_ui() -> i32 {
     let v = with(|st| {
@@ -224,6 +228,7 @@ pub extern "C" fn asmr_doc_ui() -> i32 {
                     "moves_per_min": p.moves_per_min(),
                     "denoise": p.denoise_slider(),
                     "bg_db": p.bg_db(),
+                    "style": p.active_style().and_then(|n| STYLE_ORDER.iter().position(|x| *x == n)),
                 },
                 "doc": {
                     "duo_ms": st.doc.duo_ms,
@@ -603,6 +608,7 @@ mod tests {
 
         assert_eq!(set("style", "2"), 0);
         assert_eq!(ui()["params"]["inear_cm"].as_f64().unwrap() as f32, Params::default().style_earclean().inear_cm);
+        assert_eq!(ui()["derived"]["style"], 2);
         let expected = with(|st| st.doc.params.clone().style_breath());
         assert_eq!(set("style", "3"), 0);
         assert_eq!(with(|st| st.doc.params.clone()), expected);

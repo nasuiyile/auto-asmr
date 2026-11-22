@@ -24,10 +24,10 @@ auto-asmr 有一份 Rust 引擎和四个版本（安卓版有网页、全局两�
 
 ## 新增一个预设
 
-1. **共用库**：在 params.rs 加方法。风格预设从 `self.style_base()` 开始，只改和风格有关的字段：「按一下没有变化，就说明当前是这个风格」，安卓的 `describe_config` 就靠这一点认出配置文件是哪个风格。背景音预设只改背景音那几项（参考 `bg_rain_night`）。在 params.rs 的测试里加上风格互相切换、重复按的断言（已有的测试可以照着写）。
+1. **共用库**：在 params.rs 加方法。风格预设从 `self.style_base()` 开始，只改和风格有关的字段：「按一下没有变化，就说明当前是这个风格」，`Params::active_style` 就靠这一点认出当前是哪个风格（三个版本的界面标出选中的风格按钮、安卓的 `describe_config` 认配置文件都用它），所以新风格要加进 params.rs 的 `Params::STYLES` 和 `with_style`。背景音预设只改背景音那几项（参考 `bg_rain_night`）。在 params.rs 的测试里加上风格互相切换、重复按的断言（已有的测试可以照着写）。
 2. **桌面版**：gui.rs 加按钮和中英文提示；cli.rs 的 `--style` 加取值、写进帮助文字。文件转换要用不同的目标响度时，加一个常量。
-3. **安卓版**：settings.rs 的 `action()` 和 `describe_config()`；风格预设还要在 lib.rs 的 `asmr_set_style` 末尾加编号；ui_spec.json 的 `styles` 加一项（`action`、`label`、`label_en`、`tip`、`tip_en`），背景音预设放进对应分组的 `actions`；更新 asmr_core.h、NativeHook.kt 注释里的按钮列表，以及 MainActivity.kt 的 adb 列表。
-4. **插件**：wasm/src/lib.rs 的编号映射，popup.html 和 options.html 各加一个按钮，wasm 的测试里加上它。
+3. **安卓版**：settings.rs 的 `action()` 和 `describe_config()`（风格名的中文）；风格预设还要在 lib.rs 的 `asmr_set_style` 末尾加编号；ui_spec.json 的 `styles` 加一项（`action`、`label`、`label_en`、`tip`、`tip_en`），背景音预设放进对应分组的 `actions`；更新 asmr_core.h、NativeHook.kt 注释里的按钮列表，以及 MainActivity.kt 的 adb 列表。
+4. **插件**：wasm/src/lib.rs 的编号映射（`asmr_doc_set` 里的 `style` 和选中标记用的 `STYLE_ORDER`），popup.html 和 options.html 各加一个按钮，wasm 的测试里加上它。
 5. **安卓全局模式**：`global/server/Engine.kt` 注释里的按钮列表。界面按 ui_spec.json 自动出现，服务进程的引擎跟着 Rust 层编进去，不用改。
 6. **Python 版**：移植到 `STYLES`；做不到就写进文档，说明只有 Rust 版有。
 

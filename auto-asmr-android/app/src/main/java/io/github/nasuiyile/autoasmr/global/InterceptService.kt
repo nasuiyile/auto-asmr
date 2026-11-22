@@ -17,13 +17,14 @@ import io.github.nasuiyile.autoasmr.R
 import io.github.nasuiyile.autoasmr.Settings
 
 /**
- * 前台服务：连着服务进程时一直开着。通知栏显示状态，可以暂停 / 继续拦截、切效果 / 原声、退出；悬浮球（[FloatingBall]）也挂在这里。
+ * 前台服务：连着服务进程时一直开着。通知栏显示状态，可以暂停 / 继续拦截、切效果 / 原声、退出
+ * （App 不主动申请通知权限，用户在系统设置里打开通知后才显示；没打开时服务照常运行）。
+ * root 方式下服务进程跟着 App 进程走，前台服务让 App 进程不容易被系统回收。
  *
  * 被系统杀掉后会被重新拉起（START_STICKY）：这时 App 进程是新的，[Controller] 收到 Shizuku 的 binder 后会连回还在跑的
- * 服务进程（引擎一直在处理声音，不受影响），通知和悬浮球随之恢复；10 秒内没连上就自己关掉。
+ * 服务进程（引擎一直在处理声音，不受影响），通知随之恢复；10 秒内没连上就自己关掉。
  */
 class InterceptService : Service() {
-    private var ball: FloatingBall? = null
     private var last = ""
     private val main = Handler(Looper.getMainLooper())
     private val listener: () -> Unit = { main.post { update() } }
@@ -53,32 +54,14 @@ class InterceptService : Service() {
             main.removeCallbacks(giveUp)
             main.postDelayed(giveUp, 10_000)
         }
-        refreshBall()
+        update()
         return START_STICKY
     }
 
-    /** 悬浮球：设置里打开了、而且有悬浮窗权限时显示。 */
-    fun refreshBall() {
-        val want = KeepAlive.ballWanted(this) && KeepAlive.canOverlay(this)
-        if (want && ball == null) {
-            ball = FloatingBall(
-                this,
-                onTap = {
-                    if (Controller.connected) Settings.setDry(!Settings.params.optBoolean("dry"))
-                    else openApp()
-                },
-                onLongPress = ::openApp,
-            ).also { it.show() }
-        } else if (!want && ball != null) {
-            ball?.hide()
-            ball = null
-        }
+    /** 重发一次通知（回到 App 时调用：用户可能刚在系统设置里打开了通知）。 */
+    fun refresh() {
         last = ""
         update()
-    }
-
-    private fun openApp() {
-        startActivity(Intent(this, MainActivity::class.java).putExtra("page", "global").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP))
     }
 
     private fun update() {
@@ -89,16 +72,6 @@ class InterceptService : Service() {
             return
         }
         val dry = Settings.params.optBoolean("dry")
-        val sounding = c.poll.tele.isNotEmpty() && c.poll.tele[0] > 0f
-        ball?.update(
-            when {
-                !c.connected -> FloatingBall.Look.OFF
-                !c.poll.running -> FloatingBall.Look.PAUSED
-                dry -> FloatingBall.Look.DRY
-                else -> FloatingBall.Look.EFFECT
-            },
-            sounding,
-        )
         val key = "${c.phase}|${c.poll.running}|$dry|${c.how}"
         if (key == last) return
         last = key
@@ -138,8 +111,6 @@ class InterceptService : Service() {
         instance = null
         main.removeCallbacks(giveUp)
         Controller.removeListener(listener)
-        ball?.hide()
-        ball = null
         super.onDestroy()
     }
 
@@ -155,7 +126,7 @@ class InterceptService : Service() {
         @Volatile var instance: InterceptService? = null
 
         fun start(ctx: Context) {
-            // App 在后台时系统可能不让开前台服务（Android 12 起）；有悬浮窗权限时不受这个限制
+            // App 在后台时系统可能不让开前台服务（Android 12 起）；平时是在 App 界面上连服务进程时开，不受影响
             runCatching { ctx.startForegroundService(Intent(ctx, InterceptService::class.java)) }
                 .onFailure { Controller.addLog("# 前台服务开不起来：${it.javaClass.simpleName}") }
         }

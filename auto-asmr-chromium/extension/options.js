@@ -213,6 +213,8 @@ function render(src) {
     r.update(state, src);
   }
   for (const b of document.querySelectorAll('#dry button')) b.classList.toggle('on', String(state.dry) === b.dataset.dry);
+  // 选中的风格（参数和它一致）亮起来；手动调过风格管的参数后都不亮
+  for (const b of document.querySelectorAll('[data-style]')) b.classList.toggle('on', state.derived.style === +b.dataset.style);
 }
 
 // ------------------------------------------------------------------ 顶部

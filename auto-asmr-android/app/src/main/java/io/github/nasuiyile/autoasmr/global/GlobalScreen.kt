@@ -1,10 +1,5 @@
 package io.github.nasuiyile.autoasmr.global
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,18 +19,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.nasuiyile.autoasmr.BuildConfig
@@ -43,30 +33,12 @@ import io.github.nasuiyile.autoasmr.EffectPanel
 import io.github.nasuiyile.autoasmr.ModeSwitch
 import java.util.Locale
 
-/** 全局模式页面用的界面状态。 */
-object GlobalUi {
-    /** Activity 每次回到前台加一：从系统设置回来时重新看悬浮窗权限、电池优化。 */
-    var resumed by mutableIntStateOf(0)
-}
-
 /**
- * 全局模式（Shizuku / root）的页面：一页里放下服务进程（启动、拦截开关、退出）、后台运行（悬浮球、电池优化、厂商设置）、
+ * 全局模式（Shizuku / root）的页面：一页里放下服务进程（启动、拦截开关、退出）、
  * 效果参数（和网页模式同一个面板）、日志。
  */
 @Composable
 fun GlobalScreen(onImport: () -> Unit, onExport: () -> Unit) {
-    val ctx = LocalContext.current
-    // 第一次连上服务进程时请求通知权限（Android 13 起）：通知栏控制要用；拒绝了也照常工作
-    val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    LaunchedEffect(Controller.connected) {
-        if (Controller.connected && Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            val prefs = ctx.getSharedPreferences("ui", 0)
-            if (!prefs.getBoolean("asked_notifications", false)) {
-                prefs.edit().putBoolean("asked_notifications", true).apply()
-                notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-    }
     EffectPanel(
         tele = Controller.poll.tele,
         status = globalStatusLine(),
@@ -77,7 +49,6 @@ fun GlobalScreen(onImport: () -> Unit, onExport: () -> Unit) {
             item { ModeSwitch(Modifier.padding(top = 4.dp)) }
             item { Title() }
             item { ServiceCard() }
-            item { KeepAliveCard() }
             item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
         },
         footer = { item { LogCard() } },
@@ -179,57 +150,6 @@ private fun ServiceCard() {
                     "Shizuku 启动的服务进程是常驻的：App 被系统清掉后声音照常处理，重新打开 App 会自动连回去。"
                 },
             )
-        }
-    }
-}
-
-@Composable
-private fun KeepAliveCard() {
-    val ctx = LocalContext.current
-    val tick = GlobalUi.resumed // 从设置页回来时重新读下面几项
-    val canOverlay = remember(tick) { KeepAlive.canOverlay(ctx) }
-    val battery = remember(tick) { KeepAlive.ignoringBattery(ctx) }
-    var ball by remember { mutableStateOf(KeepAlive.ballWanted(ctx)) }
-    var open by rememberSaveable { mutableStateOf(!battery || !ball) }
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Row(
-            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("后台运行（防止被杀）", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            Text(if (open) "▲" else "▼", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        if (!open) return@Card
-        Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("悬浮球", style = MaterialTheme.typography.bodyMedium)
-                    SmallNote(
-                        if (ball && !canOverlay) "还没有「显示在其他应用上层」的权限，点开关去授权"
-                        else "点一下切换效果 / 原声，长按打开 App，可拖动。有悬浮窗时系统很少清掉 App",
-                    )
-                }
-                Switch(checked = ball && canOverlay, onCheckedChange = { on ->
-                    ball = on
-                    KeepAlive.setBallWanted(ctx, on)
-                    if (on && !canOverlay) runCatching { ctx.startActivity(KeepAlive.overlayIntent(ctx)) }
-                    InterceptService.instance?.refreshBall()
-                })
-            }
-            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("忽略电池优化", style = MaterialTheme.typography.bodyMedium)
-                    SmallNote(if (battery) "已允许" else "没允许：省电时系统可能限制或清掉后台的 App")
-                }
-                if (!battery) TextButton(onClick = { runCatching { ctx.startActivity(KeepAlive.batteryIntent(ctx)) } }) { Text("去允许") }
-            }
-            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("系统的后台管理", style = MaterialTheme.typography.bodyMedium)
-                    SmallNote(KeepAlive.vendorHint())
-                }
-                TextButton(onClick = { runCatching { ctx.startActivity(KeepAlive.appDetailsIntent(ctx)) } }) { Text("应用设置") }
-            }
         }
     }
 }

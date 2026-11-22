@@ -2169,19 +2169,22 @@ impl App {
             ui.label(RichText::new(t("风格", "Style")).strong());
             // 从掏耳切回人声的风格：文件转换的目标响度也恢复成 −16
             let back = (p.inear_cm > 0.0 || p.target_lufs == crate::dsp::params::BREATH_LUFS).then_some(Params::default().target_lufs);
-            if ui.button(t("贴耳加强", "Close to ear")).on_hover_text(t("嘴离耳约 1.7 cm，另一只耳朵几乎听不到，不加房间，左右耳慢慢穿梭", "Mouth ≈1.7 cm from the ear, far ear almost silent, no room, slow sweeps between the ears")).clicked() {
+            // 选中的风格（参数和它一致）按钮亮起来
+            let active = p.active_style();
+            let style_button = |ui: &mut egui::Ui, name: &str, label: &str| ui.add(egui::Button::selectable(active == Some(name), label));
+            if style_button(ui, "style_ear", t("贴耳加强", "Close to ear")).on_hover_text(t("嘴离耳约 1.7 cm，另一只耳朵几乎听不到，不加房间，左右耳慢慢穿梭", "Mouth ≈1.7 cm from the ear, far ear almost silent, no room, slow sweeps between the ears")).clicked() {
                 *p = p.clone().style_ear();
                 file_lufs = back;
             }
-            if ui.button(t("KU100 实录", "KU100 natural")).on_hover_text(t("模拟 KU100 近耳轻语。贴近时带出原声里细微的呼吸，控制响齿音和低频气流。声源在耳边和身前随机停留，远耳保留实测房间声。", "Models close whispers on a KU100. Brings out quiet breath as the voice draws near, with controlled sibilance and low-frequency air pulses. The voice pauses near either ear or in front, with measured room sound in the far ear.")).clicked() {
+            if style_button(ui, "style_ku100", t("KU100 实录", "KU100 natural")).on_hover_text(t("模拟 KU100 近耳轻语。贴近时带出原声里细微的呼吸，控制响齿音和低频气流。声源在耳边和身前随机停留，远耳保留实测房间声。", "Models close whispers on a KU100. Brings out quiet breath as the voice draws near, with controlled sibilance and low-frequency air pulses. The voice pauses near either ear or in front, with measured room sound in the far ear.")).clicked() {
                 *p = p.clone().style_ku100();
                 file_lufs = back;
             }
-            if ui.button(t("呼吸音", "Breathing")).on_hover_text(t("处理录音中的吸气和呼气。用带自然停顿的单声道呼吸录音试听。", "Use a recording of breathing with its natural pauses.")).clicked() {
+            if style_button(ui, "style_breath", t("呼吸音", "Breathing")).on_hover_text(t("处理录音中的吸气和呼气。用带自然停顿的单声道呼吸录音试听。", "Use a recording of breathing with its natural pauses.")).clicked() {
                 *p = p.clone().style_breath();
                 file_lufs = Some(crate::dsp::params::BREATH_LUFS);
             }
-            if ui.button(t("掏耳", "Ear cleaning")).on_hover_text(t("给棉签、挖耳勺、刮擦这类触发音用（不是给人声用的）：声源伸进耳道进进出出，带耳道共鸣、耳内低频和堵耳的闷感，另一只耳朵基本听不到，每只耳朵约 40 秒才换边。按两段 KU100 掏耳实录标定。降噪会把这类声音当噪声压掉，请把降噪关掉或调低", "For trigger sounds such as cotton swabs, ear picks and scratching (not for voice): the source moves in and out of the ear canal with canal resonance, in-ear rumble and an occluded tone; the other ear is almost silent and the ear changes about every 40 s. Calibrated to two KU100 ear-cleaning recordings. Denoise treats such sounds as noise: turn it off or down")).clicked() {
+            if style_button(ui, "style_earclean", t("掏耳", "Ear cleaning")).on_hover_text(t("给棉签、挖耳勺、刮擦这类触发音用（不是给人声用的）：声源伸进耳道进进出出，带耳道共鸣、耳内低频和堵耳的闷感，另一只耳朵基本听不到，每只耳朵约 40 秒才换边。按两段 KU100 掏耳实录标定。降噪会把这类声音当噪声压掉，请把降噪关掉或调低", "For trigger sounds such as cotton swabs, ear picks and scratching (not for voice): the source moves in and out of the ear canal with canal resonance, in-ear rumble and an occluded tone; the other ear is almost silent and the ear changes about every 40 s. Calibrated to two KU100 ear-cleaning recordings. Denoise treats such sounds as noise: turn it off or down")).clicked() {
                 *p = p.clone().style_earclean();
                 file_lufs = Some(crate::dsp::params::EARCLEAN_LUFS);
             }

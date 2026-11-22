@@ -88,7 +88,7 @@ object Controller {
     private var lastLogSeq = 0L
     private var polling = false
 
-    /** 界面在前台时读得勤一些（位置图要动），否则 1.5 秒一次（通知栏、悬浮球用）。 */
+    /** 界面在前台时读得勤一些（位置图要动），否则 1.5 秒一次（通知栏用）。 */
     @Volatile var uiVisible = false
         set(v) {
             field = v

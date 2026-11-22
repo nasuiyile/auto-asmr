@@ -131,17 +131,13 @@ pub fn load_config(text: &str) -> Result<(), String> {
 pub fn describe_config(text: &str) -> Result<String, ConfigError> {
     let s = config::parse(text)?;
     let p = &s.params;
-    // 风格按钮只改风格相关的参数：按一下没有变化，就是这个风格
-    let style = if p.clone().style_earclean() == *p {
-        "掏耳"
-    } else if p.clone().style_breath() == *p {
-        "呼吸音"
-    } else if p.clone().style_ku100() == *p {
-        "KU100 实录"
-    } else if p.clone().style_ear() == *p {
-        "贴耳加强"
-    } else {
-        "自定义"
+    // 风格按钮只改风格相关的参数：按一下没有变化，就是这个风格（和界面上标出选中的风格是同一个判断）
+    let style = match p.active_style() {
+        Some("style_earclean") => "掏耳",
+        Some("style_breath") => "呼吸音",
+        Some("style_ku100") => "KU100 实录",
+        Some("style_ear") => "贴耳加强",
+        _ => "自定义",
     };
     let mode = match p.mode {
         MotionMode::Sweep => "穿梭",
@@ -228,6 +224,8 @@ pub fn params_json(p: &Params, dry: bool) -> Value {
         m.insert("manual_cm".into(), json!(p.manual_cm()));
         m.insert("moves_per_min".into(), json!(p.moves_per_min()));
         m.insert("denoise_slider".into(), json!(p.denoise_slider()));
+        // 选中的风格（action 名，参数和哪个风格都对不上时为空串）：界面上把那个风格按钮标出来
+        m.insert("active_style".into(), json!(p.active_style().unwrap_or("")));
         m.insert("dry".into(), json!(dry));
     }
     v

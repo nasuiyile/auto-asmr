@@ -5,11 +5,11 @@
     <!-- 后台播放：媒体播放类型的前台服务，通知栏控制 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 通知：App 不主动申请（Android 13 起没有这个权限时前台服务照常运行，只是通知栏里不显示）；
+         用户想要通知栏控制，可以在系统设置里给 auto-asmr 打开通知 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- 全局模式：连着服务进程时的前台服务（通知栏控制、悬浮球）、悬浮球、请用户把本 App 加进电池优化白名单 -->
+    <!-- 全局模式：连着服务进程时的前台服务（通知栏控制，root 方式下也让 App 进程不容易被清掉） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name=".AsmrApp"

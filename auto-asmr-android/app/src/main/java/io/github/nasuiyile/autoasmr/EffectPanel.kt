@@ -1,6 +1,17 @@
 package io.github.nasuiyile.autoasmr
 
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +46,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.lazy.LazyListScope
 import org.json.JSONObject
@@ -72,66 +85,122 @@ fun EffectPanel(
             return@LazyColumn
         }
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("ASMR 效果", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        status,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (showDry) {
-                    Text(if (p.optBoolean("dry")) "原声" else "效果", Modifier.padding(end = 8.dp))
-                    Switch(checked = !p.optBoolean("dry"), onCheckedChange = { Settings.setDry(!it) })
+            // 效果开关和状态：开着时用主色的卡片，一眼看出是不是在加效果
+            val on = !showDry || !p.optBoolean("dry")
+            Card(
+                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                shape = MaterialTheme.shapes.large,
+                colors = CardDefaults.cardColors(
+                    containerColor = if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                ),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().let { m -> if (showDry) m.clickable { Settings.setDry(on) } else m }.padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(if (on) "ASMR 效果" else "原声（不加效果）", style = MaterialTheme.typography.titleMedium)
+                        Text(status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.alpha(0.8f))
+                    }
+                    if (showDry) Switch(checked = on, onCheckedChange = { Settings.setDry(!it) })
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Text("风格", style = MaterialTheme.typography.labelLarge)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // 选中的风格（参数和它一致）用实心按钮标出来；手动调过风格管的参数后都不标
-                val active = p.optString("active_style")
-                for (s in SpecUi.items(spec.optJSONArray("styles"))) {
-                    val action = s.optString("action")
-                    if (action == active) {
-                        Button(onClick = { Settings.action(action) }) { Text("✓ " + s.optString("label")) }
-                    } else {
-                        OutlinedButton(onClick = { Settings.action(action) }) { Text(s.optString("label")) }
+        }
+        item {
+            Section("风格", subtitle = "一键套用一组参数，之后还可以细调") {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                    // 选中的风格（参数和它一致）标出来；手动调过风格管的参数后都不标
+                    val active = p.optString("active_style")
+                    for (s in SpecUi.items(spec.optJSONArray("styles"))) {
+                        val action = s.optString("action")
+                        val sel = action == active
+                        FilterChip(
+                            selected = sel,
+                            onClick = { Settings.action(action) },
+                            label = { Text(s.optString("label")) },
+                            leadingIcon = if (sel) ({ Ic(AppIcons.Check, size = 18.dp) }) else null,
+                        )
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { if (map != null) map() else PositionMap(p, tele, manual) }
+        }
+        item {
             val m = spec.optJSONObject("manual")
             val toggleManual = { on: Boolean ->
                 val pose = if (tele.isNotEmpty() && tele[0] > 0f) floatArrayOf(tele[1], tele[2], tele[3]) else null
                 Settings.setManual(on, pose)
             }
-            Row(Modifier.fillMaxWidth().clickable { toggleManual(!manual) }, verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = manual, onCheckedChange = { toggleManual(it) })
-                Text(m?.optString("label") ?: "手动摆位", style = MaterialTheme.typography.bodyMedium)
+            Section("声源位置") {
+                Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) { if (map != null) map() else PositionMap(p, tele, manual) }
+                Row(
+                    Modifier.fillMaxWidth().clickable { toggleManual(!manual) }.padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(m?.optString("label") ?: "手动摆位", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).padding(end = 12.dp))
+                    Switch(checked = manual, onCheckedChange = { toggleManual(it) })
+                }
             }
-            spec.optJSONObject("denoise")?.let { SliderItem(it, p, true) }
-            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+        }
+        spec.optJSONObject("denoise")?.let { d -> item { Section { SliderItem(d, p, true) } } }
+        item {
+            Text(
+                "全部参数",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 4.dp, top = 14.dp, bottom = 2.dp),
+            )
         }
         items(groups, key = { it.optString("id") }) { g -> Group(g, p, tele) }
         item {
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onImport) { Text("导入配置") }
-                OutlinedButton(onClick = onExport) { Text("导出配置") }
+            Section("配置文件", modifier = Modifier.padding(top = 8.dp)) {
+                Text(
+                    "和电脑版通用：电脑版「导出配置」的 .ron 可以直接导入；这里导出的文件也能在电脑版里导入。" +
+                        "电脑版独有的设置（音频设备、文件转换等）会原样保留。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
+                        Ic(AppIcons.Folder, size = 18.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text("导入配置")
+                    }
+                    OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f)) {
+                        Ic(AppIcons.Save, size = 18.dp)
+                        Spacer(Modifier.width(6.dp))
+                        Text("导出配置")
+                    }
+                }
             }
-            Text(
-                "配置文件和电脑版通用：电脑版「导出配置」的 .ron 可以直接导入；这里导出的文件也能在电脑版里导入。" +
-                    "电脑版独有的设置（音频设备、文件转换等）会原样保留。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-            Spacer(Modifier.height(8.dp))
         }
         footer()
+        item { ProjectLinks(Modifier.padding(top = 6.dp)) }
         item { Spacer(Modifier.height(32.dp)) }
+    }
+}
+
+/** 项目的 GitHub 和研发人的 B 站主页（同电脑版右下角）：GitHub 用系统浏览器打开，B 站优先唤起 B 站 App（见 [AppLinks]）。 */
+@Composable
+fun ProjectLinks(modifier: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    Section("关于", modifier) {
+        LinkRow(AppIcons.Star, "给个star", "GitHub · 觉得好用就点个 Star") { AppLinks.start(ctx, AppLinks.GITHUB_URL) }
+        LinkRow(AppIcons.Play, "随意Official", "研发人 B站主页 · 装了 B 站 App 时直接在 App 里打开") { AppLinks.openBilibili(ctx) }
+    }
+}
+
+@Composable
+private fun LinkRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, sub: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Ic(icon, tint = MaterialTheme.colorScheme.primary)
+        Column(Modifier.padding(start = 14.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -147,20 +216,25 @@ fun statusLine(tele: FloatArray, audibleTitle: String?, rain: Boolean = false): 
 private fun Group(g: JSONObject, p: JSONObject, tele: FloatArray) {
     var open by remember { mutableStateOf(g.optBoolean("open") || SpecUi.cond(g.optJSONObject("open_if"), p)) }
     val enabled = SpecUi.cond(g.optJSONObject("enable_if"), p)
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+    val turn by animateFloatAsState(if (open) 180f else 0f, label = "chevron")
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
         Row(
-            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(SpecUi.groupTitle(g, p), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            Text(if (open) "▲" else "▼", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Ic(AppIcons.ExpandMore, Modifier.rotate(turn), size = 24.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (open) {
-            Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp).alpha(if (enabled) 1f else 0.45f)) {
+            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp).alpha(if (enabled) 1f else 0.45f)) {
                 val actions = SpecUi.items(g.optJSONArray("actions")).filter { SpecUi.cond(it.optJSONObject("show_if"), p) }
                 if (actions.isNotEmpty()) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        for (a in actions) OutlinedButton(onClick = { Settings.action(a.optString("action")) }) { Text(a.optString("label")) }
+                        for (a in actions) FilledTonalButton(onClick = { Settings.action(a.optString("action")) }) { Text(a.optString("label")) }
                     }
                 }
                 for (it in SpecUi.items(g.optJSONArray("items"))) {
@@ -191,12 +265,13 @@ private fun Label(item: JSONObject, value: String?, modifier: Modifier = Modifie
     val t = item.optString("tip")
     Column(modifier) {
         Row(Modifier.fillMaxWidth().clickable(enabled = t.isNotEmpty()) { tip = !tip }, verticalAlignment = Alignment.CenterVertically) {
-            Text(item.optString("label") + if (t.isNotEmpty()) " ⓘ" else "", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            if (value != null) Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            Row(Modifier.weight(1f).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(item.optString("label"), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
+                if (t.isNotEmpty()) Ic(AppIcons.Info, Modifier.padding(start = 4.dp), size = 15.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (value != null) Text(value, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         }
-        if (tip && t.isNotEmpty()) {
-            Text(t, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        if (tip && t.isNotEmpty()) TipText(t)
     }
 }
 
@@ -226,9 +301,9 @@ fun SliderItem(item: JSONObject, p: JSONObject, enabled: Boolean) {
 private fun CheckItem(item: JSONObject, p: JSONObject, enabled: Boolean) {
     val key = item.optString("key")
     val on = p.optBoolean(key)
-    Row(Modifier.fillMaxWidth().clickable(enabled = enabled) { Settings.setBool(key, !on) }, verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(checked = on, onCheckedChange = { Settings.setBool(key, it) }, enabled = enabled)
-        Label(item, null, Modifier.weight(1f))
+    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Label(item, null, Modifier.weight(1f).padding(end = 12.dp))
+        Switch(checked = on, onCheckedChange = { Settings.setBool(key, it) }, enabled = enabled)
     }
 }
 
@@ -254,7 +329,10 @@ private fun ChoiceItem(item: JSONObject, p: JSONObject, enabled: Boolean, tele: 
             val label = opts.firstOrNull { it.opt("value")?.toString() == cur }?.optString("label") ?: cur.orEmpty()
             Label(item, null)
             Box {
-                OutlinedButton(onClick = { open = true }, enabled = enabled) { Text(label) }
+                OutlinedButton(onClick = { open = true }, enabled = enabled) {
+                    Text(label)
+                    Ic(AppIcons.ExpandMore, Modifier.padding(start = 4.dp), size = 18.dp)
+                }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                     for (o in opts) DropdownMenuItem(text = { Text(o.optString("label")) }, onClick = { open = false; choose(o) })
                 }
@@ -263,7 +341,14 @@ private fun ChoiceItem(item: JSONObject, p: JSONObject, enabled: Boolean, tele: 
             Label(item, null)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (o in opts) {
-                    FilterChip(selected = o.opt("value")?.toString() == cur, onClick = { choose(o) }, label = { Text(o.optString("label")) }, enabled = enabled)
+                    val sel = o.opt("value")?.toString() == cur
+                    FilterChip(
+                        selected = sel,
+                        onClick = { choose(o) },
+                        label = { Text(o.optString("label")) },
+                        enabled = enabled,
+                        leadingIcon = if (sel) ({ Ic(AppIcons.Check, size = 18.dp) }) else null,
+                    )
                 }
             }
         }
@@ -276,8 +361,32 @@ private fun IntItem(item: JSONObject, p: JSONObject, enabled: Boolean) {
     val v = p.optLong(key, 1)
     Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Label(item, null, Modifier.weight(1f))
-        TextButton(onClick = { Settings.set(key, (v - 1).coerceAtLeast(0).toString()) }, enabled = enabled) { Text("−") }
-        Text(v.toString(), Modifier.width(48.dp), style = MaterialTheme.typography.bodyLarge)
-        TextButton(onClick = { Settings.set(key, (v + 1).toString()) }, enabled = enabled) { Text("+") }
+        Stepper(v.toString(), enabled, onMinus = { Settings.set(key, (v - 1).coerceAtLeast(0).toString()) }, onPlus = { Settings.set(key, (v + 1).toString()) })
+    }
+}
+
+/** 标签下面展开的说明。 */
+@Composable
+fun TipText(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 2.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.shapes.small)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    )
+}
+
+/** − 数值 + 的步进器。 */
+@Composable
+fun Stepper(text: String, enabled: Boolean, onMinus: () -> Unit, onPlus: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape),
+    ) {
+        IconButton(onClick = onMinus, enabled = enabled, modifier = Modifier.size(36.dp)) { Text("−", style = MaterialTheme.typography.titleMedium) }
+        Text(text, style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center, modifier = Modifier.widthIn(min = 40.dp))
+        IconButton(onClick = onPlus, enabled = enabled, modifier = Modifier.size(36.dp)) { Text("+", style = MaterialTheme.typography.titleMedium) }
     }
 }

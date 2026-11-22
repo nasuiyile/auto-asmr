@@ -214,6 +214,7 @@ class Browser(private val context: Context) {
                 assets.shouldInterceptRequest(request.url)
 
             // 网站常把移动版页面重定向到 bilibili:// 之类唤起 App 的链接，WebView 打不开，直接拦掉留在网页里
+            // （只有 App 自带首页上用户点的 B 站主页链接例外，见下面）
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val scheme = request.url.scheme?.lowercase()
                 if (scheme == "http" || scheme == "https") {
@@ -223,6 +224,13 @@ class Browser(private val context: Context) {
                         return true
                     }
                     return false
+                }
+                // App 自带首页上的「随意Official」：用户点的才唤起 B 站 App，没装时在这个标签页里打开网页版主页
+                if (request.isForMainFrame && request.hasGesture() && view.url?.startsWith(HOME) == true &&
+                    request.url.toString() == AppLinks.BILIBILI_APP_URI
+                ) {
+                    AppLinks.openBilibili(context) { open(tab, AppLinks.BILIBILI_URL) }
+                    return true
                 }
                 Log.i(TAG, "拦掉了非网页链接：${request.url}")
                 return true

@@ -239,12 +239,29 @@ pub struct App {
     mix_sel: Option<usize>,
 }
 
+/// 窗口和任务栏图标：戴耳机的白色小猫（assets/icon.png，由 icon/make_icons.py 生成）。读不出来时用 egui 默认图标。
+fn window_icon() -> std::sync::Arc<egui::IconData> {
+    let decode = || -> Option<egui::IconData> {
+        let mut dec = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon.png").as_slice()));
+        dec.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
+        let mut reader = dec.read_info().ok()?;
+        let mut buf = vec![0; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut buf).ok()?;
+        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+            return None;
+        }
+        buf.truncate(info.buffer_size());
+        Some(egui::IconData { rgba: buf, width: info.width, height: info.height })
+    };
+    std::sync::Arc::new(decode().unwrap_or_default())
+}
+
 /// `screenshot`：(PNG 路径, 是否切到文件页, 演示文件)——自检用：打开界面、可选地试听演示文件几秒、截图后退出。
 pub fn run(screenshot: Option<(PathBuf, bool, Option<PathBuf>)>) -> Result<(), String> {
     let config_path = std::env::current_dir().map_err(|e| format!("无法获取当前运行目录：{e}"))?.join(CONFIG_FILE);
     let opts = eframe::NativeOptions {
         persistence_path: Some(config_path),
-        viewport: egui::ViewportBuilder::default().with_inner_size([1260.0, 840.0]).with_min_inner_size([1040.0, 640.0]).with_title("auto-asmr · KU100 双耳 ASMR"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1260.0, 840.0]).with_min_inner_size([1040.0, 640.0]).with_title("auto-asmr · KU100 双耳 ASMR").with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native("auto-asmr", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot))))).map_err(|e| e.to_string())
@@ -2434,7 +2451,6 @@ impl App {
         });
         egui::CollapsingHeader::new(RichText::new(t("人声处理", "Voice")).strong()).default_open(true).show(ui, |ui| {
             egui::Grid::new("g5").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
-                row(ui, t("响应阈值", "Gate threshold"), t("输入低于这个电平时当作静音（−90 = 关闭）", "Input below this level is muted (−90 = off)"), egui::Slider::new(&mut p.gate_db, -90.0..=-20.0).suffix(" dB").fixed_decimals(0));
                 row(ui, t("去齿音", "De-ess"), t("只在 s / sh / x 出现时压低 4.5 kHz 以上，最多压这么多", "Ducks >4.5 kHz only on sibilants, by at most this much"), egui::Slider::new(&mut p.deess_db, 0.0..=10.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("强辅音柔化", "Soften sharp consonants"), t("只在强辅音突出时收轻 5 kHz 附近的窄频带。调高会让刺耳的字音更柔，0 = 关闭。", "Softens a band around 5 kHz on prominent consonants. Increase to tame sharp syllables. 0 = off."), egui::Slider::new(&mut p.sharp_soften_db, 0.0..=8.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("轻声化", "Soft voice"), t("把嗓音均衡成「压低声音说话」（只做均衡，不改嗓音）", "EQ towards a lowered-voice spectrum (EQ only)"), egui::Slider::new(&mut p.soft_voice, 0.0..=1.5).fixed_decimals(2));
@@ -3011,5 +3027,15 @@ mod tests {
             assert!(((az2 - az + 180.0).rem_euclid(360.0) - 180.0).abs() < 0.2, "az {az} -> {az2}");
             assert!((dist2 - dist).abs() < 5e-4, "dist {dist} -> {dist2}");
         }
+    }
+
+    /// 窗口图标（assets/icon.png）要能解出 256×256 的 RGBA，不然会退回 egui 的默认图标
+    #[test]
+    fn window_icon_decodes() {
+        let icon = window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        assert_eq!(icon.rgba[3], 0, "圆形图标的角落应当透明");
+        assert_eq!(icon.rgba[(128 * 256 + 128) * 4 + 3], 255);
     }
 }

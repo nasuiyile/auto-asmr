@@ -103,6 +103,9 @@ mod tests {
         assert_eq!(bare.params.seed, 3);
         assert_eq!(bare.buffer, 256);
         assert_eq!(bare.rt_duo_ms, 0.0);
+        // 已删除的参数（如响应阈值 gate_db）留在旧配置里也照样能读，直接忽略
+        let old = parse("(params: (seed: 4, gate_db: -50.0))").unwrap();
+        assert_eq!(old.params.seed, 4);
         assert!(matches!(parse("{\"other\": \"()\"}"), Err(ConfigError::NotAutoAsmr)));
         assert!(matches!(parse("not ron"), Err(ConfigError::Parse(_))));
     }

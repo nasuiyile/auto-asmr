@@ -31,6 +31,7 @@ cd auto-asmr-chromium && ./build.sh
 - **开始 / 停止**：在要处理的标签页上点插件图标，弹窗一打开就开始处理（这个标签页已经在处理时不重复开始）；弹窗最上面的开关关掉就停止、恢复原声，再打开又继续。每次点图标都会开始，关掉之后想改设置又不想处理，就在弹窗里再把开关关上。不打开弹窗也可以按快捷键 `Alt+Shift+A` 开始 / 停止（可以在 `chrome://extensions/shortcuts` 改）。在处理的标签页，插件图标上显示 `ON`。可以同时处理几个标签页。关掉标签页时自动停止。
 - **弹窗**：处理开关、效果 / 原声切换、四个风格（贴耳加强、KU100 实录、掏耳、呼吸音；当前参数和哪个风格一致，那个按钮就亮着，设置页也一样）、左右移动的方式、雨夜背景音和它的音量、左右双人（按钮开 / 关，开是 80 ms；滑条调第 2 个声音晚多少毫秒）；位置图实时显示声源在头的哪一侧、多远（左右双人时两个点：1 号橙色、2 号蓝色），下面是说话活动、输出电平、延时。
 - **设置页**（弹窗右上角「全部参数 / 导入配置」）：桌面版的全部效果参数，分组、名字、范围与桌面版界面相同；数字框可以手输超出滑块范围的值。改动立即对正在处理的标签页生效。
+- **链接**：弹窗底部和设置页标题栏右侧有本项目 GitHub（「给个star」）和研发人 B 站主页（「随意Official」）的链接，在新标签页打开（同桌面版右下角）。
 - **呼吸去闷**在设置页的「贴耳感」里。呼吸声偏闷时可调整 100–300 Hz 能量堆积时的最大衰减，范围为 0–12 dB。
 - 同一栏的「薄声补偿」可按录音频谱补充偏弱的气流低频、柔化偏亮的高频，范围为 0–1。选择「穿梭」时可勾选「换气时换边」，声源在一侧停够时间后等换气间隙再移动。
 - **固定原声底噪**在设置页的「KU100 临场感」里。选择「KU100 实录」会开启；说话人走位时，录音中的持续环境声保持在固定的双耳声场。该项与生成雨声的「背景音」相互独立。
@@ -122,11 +123,10 @@ Chrome for Testing 从 [Chrome for Testing](https://googlechromelabs.github.io/c
 | `extension/worklet.js` | AudioWorklet：共用的 wasm 实例、处理器、配置、出错时直通 |
 | `extension/asmr.js` | 插件页面用的 wasm 封装（配置文档）和存取 `chrome.storage` |
 | `extension/popup.*`、`options.*`、`schema.js`、`style.css` | 弹窗、设置页、设置页的参数表（与桌面版界面对应） |
-| `extension/icons/` | 图标（`tools/make_icons.py` 生成） |
+| `extension/icons/` | 图标（仓库根目录的 `icon/make_icons.py` 从 `icon/auto-asmr-icon.svg` 生成，三端共用一个图标） |
 | `tools/serve.py`、`chrome-shim.js` | 开发服务器、假的 `chrome.*` |
 | `tools/worklet-test.*`、`offscreen-test.*` | 浏览器里的测试页 |
 | `tools/e2e_test.py`、`e2e-page.html` | 端到端测试（装进 Chrome for Testing、CDP 驱动）和它用的发声页 |
-| `tools/make_icons.py` | 生成图标（只用 Python 标准库） |
 
 ## 限制和没做的
 

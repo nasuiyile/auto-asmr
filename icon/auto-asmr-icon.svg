@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    auto-asmr 图标：圆形纯色底上，一只戴耳机的白色小猫从底边探出头（简约扁平风格，同 Shizuku 那类图标）。
+    只有白色和底色两种颜色：耳机和猫之间、眼睛都用底色"挖"出来；背后两道半透明的声波。
+  -->
+  <defs>
+    <clipPath id="disc">
+      <circle cx="256" cy="256" r="240"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#disc)">
+    <!-- 底色（id="bg"：安卓自适应图标里它是背景层，其余是前景层） -->
+    <rect id="bg" width="512" height="512" fill="#E2689A"/>
+    <!-- 半透明的声波（以猫头为圆心） -->
+    <path d="M375,164 A212,212 0 0 1 447,247" fill="none" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="20" stroke-linecap="round"/>
+    <path d="M404,136 A252,252 0 0 1 474,214" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="20" stroke-linecap="round"/>
+
+    <!-- 耳机头梁 -->
+    <path d="M112,336 A144,144 0 0 1 400,336" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"/>
+
+    <!-- 猫（耳朵 + 头 + 肩）：先用底色描一圈粗边，和头梁之间留出缝 -->
+    <g fill="#E2689A" stroke="#E2689A" stroke-width="28" stroke-linejoin="round">
+      <path d="M146,300 Q150,228 164,178 Q170,166 180,174 Q214,204 240,232 Z"/>
+      <path d="M366,300 Q362,228 348,178 Q342,166 332,174 Q298,204 272,232 Z"/>
+      <ellipse cx="256" cy="342" rx="150" ry="124"/>
+      <ellipse cx="256" cy="566" rx="204" ry="170"/>
+    </g>
+    <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="4" stroke-linejoin="round">
+      <path d="M146,300 Q150,228 164,178 Q170,166 180,174 Q214,204 240,232 Z"/>
+      <path d="M366,300 Q362,228 348,178 Q342,166 332,174 Q298,204 272,232 Z"/>
+      <ellipse cx="256" cy="342" rx="150" ry="124"/>
+      <ellipse cx="256" cy="566" rx="204" ry="170"/>
+    </g>
+
+    <!-- 眼睛：两个点 -->
+    <circle cx="208" cy="350" r="14" fill="#E2689A"/>
+    <circle cx="304" cy="350" r="14" fill="#E2689A"/>
+
+    <!-- 耳罩：白色，底色描边和头分开 -->
+    <rect x="80" y="292" width="62" height="108" rx="31" fill="#FFFFFF" stroke="#E2689A" stroke-width="14"/>
+    <rect x="370" y="292" width="62" height="108" rx="31" fill="#FFFFFF" stroke="#E2689A" stroke-width="14"/>
+  </g>
+</svg>

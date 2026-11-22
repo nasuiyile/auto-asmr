@@ -15,7 +15,6 @@ rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$' 
 
 (cd wasm && cargo build --release --target wasm32-unknown-unknown)
 cp wasm/target/wasm32-unknown-unknown/release/asmr_chromium.wasm extension/asmr.wasm
-[ -f extension/icons/icon128.png ] || python3 tools/make_icons.py >/dev/null
 echo "extension/asmr.wasm $(du -h extension/asmr.wasm | cut -f1)"
 
 if [ "${1:-}" = "--zip" ]; then

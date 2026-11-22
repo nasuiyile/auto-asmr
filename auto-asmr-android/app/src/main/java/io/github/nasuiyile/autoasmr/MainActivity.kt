@@ -12,8 +12,29 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +43,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -37,17 +57,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -79,7 +93,7 @@ import java.io.File
  * - **网页**：浏览器（地址栏、标签页）+ 底栏（ASMR 开关、处理状态、标签页、效果面板、菜单）。没有 Shizuku 时用它听效果。
  * - **全局**（global/GlobalScreen.kt）：有 Shizuku 或 root 时处理任意 App 的声音。
  * - **文件转换**（files/FilesScreen.kt）：和电脑版的文件转换页一样，把音频文件转成双耳效果，可以试听。
- * 三个页面共用一份参数（[Settings]），顶上都有「网页 | 全局（Shizuku） | 文件转换」切换条（[ModeSwitch]）。
+ * 三个页面共用一份参数（[Settings]），用底部导航栏切换（[Root]；网页全屏看视频、打字时收起）。
  * 第一次打开时，有 Shizuku 就进全局页，否则进网页；之后记住用户上次选的页面。
  *
  * 也可以用 adb 驱动（tools/hook_test.sh）：
@@ -104,7 +118,7 @@ class MainActivity : ComponentActivity() {
         // 从别的 App「用其他应用打开」.ron 配置文件启动的（进程被系统回收后重建时不再弹一次）
         if (savedInstanceState == null && SharedImport.isOpenFile(intent)) SharedImport.handle(this, intent)
         setContent {
-            MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
+            AsmrTheme {
                 Surface(Modifier.fillMaxSize()) { Root(browser, ::record) }
             }
         }
@@ -198,27 +212,28 @@ fun setPage(ctx: android.content.Context, p: Page) {
     ctx.getSharedPreferences("ui", 0).edit().putString("page", p.name).apply()
 }
 
-/**
- * 页面顶上的切换条：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）/
- * 文件转换（和电脑版的文件转换页一样）。
- */
+/** 底部导航栏：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）/ 文件转换（同电脑版）。 */
 @Composable
-fun ModeSwitch(modifier: Modifier = Modifier) {
+private fun NavBar() {
     val ctx = LocalContext.current
-    SingleChoiceSegmentedButtonRow(modifier.fillMaxWidth()) {
-        val pages = listOf(Page.WEB to "网页", Page.GLOBAL to "全局（Shizuku）", Page.FILES to "文件转换")
-        pages.forEachIndexed { i, (p, label) ->
-            SegmentedButton(
+    NavigationBar {
+        for ((p, label, icon) in listOf(
+            Triple(Page.WEB, "网页", AppIcons.Web),
+            Triple(Page.GLOBAL, "全局", AppIcons.Headset),
+            Triple(Page.FILES, "文件转换", AppIcons.Library),
+        )) {
+            NavigationBarItem(
                 selected = currentPage == p,
                 onClick = { setPage(ctx, p) },
-                shape = SegmentedButtonDefaults.itemShape(index = i, count = pages.size),
-                label = { Text(label, maxLines = 1) },
+                icon = { Ic(icon, size = 24.dp) },
+                label = { Text(label) },
             )
         }
     }
 }
 
-/** 两个页面共用的部分：配置文件的导入导出、提示、别的 App 传来的 .ron；按 [currentPage] 显示网页或全局页面。 */
+/** 三个页面共用的部分：配置文件的导入导出、提示、别的 App 传来的 .ron；按 [currentPage] 显示网页或全局页面。 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Root(b: Browser, record: (Int) -> Unit) {
     val ctx = LocalContext.current
@@ -261,15 +276,24 @@ private fun Root(b: Browser, record: (Int) -> Unit) {
     val onImport = { importLauncher.launch(arrayOf("*/*")) }
     val onExport = { exportLauncher.launch("auto-asmr-export.ron") }
 
-    when (currentPage) {
-        Page.WEB -> Screen(b, record, onImport, onExport)
-        Page.GLOBAL -> {
-            BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
-            GlobalScreen(onImport = onImport, onExport = onExport)
-        }
-        Page.FILES -> {
-            BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
-            FilesScreen(onImport = onImport, onExport = onExport)
+    // 网页里全屏看视频、打字（键盘弹出）时收起导航栏
+    val showNav = b.fullscreen == null && !(currentPage == Page.WEB && WindowInsets.isImeVisible)
+    Scaffold(
+        bottomBar = { if (showNav) NavBar() },
+        contentWindowInsets = WindowInsets.safeDrawing,
+    ) { inner ->
+        Box(Modifier.fillMaxSize().padding(inner).consumeWindowInsets(inner)) {
+            when (currentPage) {
+                Page.WEB -> Screen(b, record, onImport, onExport)
+                Page.GLOBAL -> {
+                    BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
+                    GlobalScreen(onImport = onImport, onExport = onExport)
+                }
+                Page.FILES -> {
+                    BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
+                    FilesScreen(onImport = onImport, onExport = onExport)
+                }
+            }
         }
     }
 
@@ -327,26 +351,46 @@ private fun Screen(b: Browser, record: (Int) -> Unit, onImport: () -> Unit, onEx
         }
     }
 
-    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
-        ModeSwitch(Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 4.dp)) {
-            TextButton(onClick = { tab.web.goBack() }, enabled = tab.canBack) { Text("‹", style = MaterialTheme.typography.titleLarge) }
-            TextButton(onClick = { tab.web.goForward() }, enabled = tab.canForward) { Text("›", style = MaterialTheme.typography.titleLarge) }
-            OutlinedTextField(
+    Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+        // 顶栏：浏览器的控件都在这里（后退、前进、地址栏和刷新、标签页、菜单）
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        ) {
+            IconButton(onClick = { tab.web.goBack() }, enabled = tab.canBack) { Ic(AppIcons.Back, size = 24.dp) }
+            if (tab.canForward) IconButton(onClick = { tab.web.goForward() }) { Ic(AppIcons.Forward, size = 24.dp) }
+            AddressField(
                 value = address,
                 onValueChange = { address = it },
-                singleLine = true,
-                placeholder = { Text("输入网址或搜索", style = MaterialTheme.typography.bodyMedium) },
-                textStyle = MaterialTheme.typography.bodyMedium,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { b.open(tab, address) }),
-                modifier = Modifier.weight(1f),
+                onGo = { b.open(tab, address) },
+                loading = tab.progress < 100,
+                onReload = { if (tab.progress < 100) tab.web.stopLoading() else tab.web.reload() },
+                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
             )
-            TextButton(onClick = { if (tab.progress < 100) tab.web.stopLoading() else tab.web.reload() }) {
-                Text(if (tab.progress < 100) "✕" else "⟳", style = MaterialTheme.typography.titleMedium)
+            IconButton(onClick = { showTabs = true }) { TabCount(b.tabs.size) }
+            Box {
+                IconButton(onClick = { menu = true }) { Ic(AppIcons.More, size = 24.dp) }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    val check: @Composable (Boolean) -> Unit = { on -> if (on) Ic(AppIcons.Check) }
+                    DropdownMenuItem(text = { Text("新标签页") }, leadingIcon = { Ic(AppIcons.Add) }, onClick = { menu = false; b.newTab() })
+                    DropdownMenuItem(text = { Text("首页") }, leadingIcon = { Ic(AppIcons.Web) }, onClick = { menu = false; b.open(tab, Browser.HOME) })
+                    HorizontalDivider()
+                    DropdownMenuItem(text = { Text("桌面版网站") }, trailingIcon = { check(tab.desktop) }, onClick = { menu = false; b.setDesktop(tab, !tab.desktop) })
+                    DropdownMenuItem(text = { Text("只放一个标签页的声音") }, trailingIcon = { check(b.onlyOne) }, onClick = { menu = false; b.changeOnlyOne(!b.onlyOne) })
+                    HorizontalDivider()
+                    DropdownMenuItem(text = { Text("导入配置") }, leadingIcon = { Ic(AppIcons.Folder) }, onClick = { menu = false; onImport() })
+                    DropdownMenuItem(text = { Text("导出配置") }, leadingIcon = { Ic(AppIcons.Save) }, onClick = { menu = false; onExport() })
+                    HorizontalDivider()
+                    DropdownMenuItem(text = { Text("测试页") }, onClick = { menu = false; b.open(tab, Browser.TEST_URL) })
+                    DropdownMenuItem(text = { Text("录 20 秒处理前后的声音") }, onClick = { menu = false; record(20) })
+                }
             }
         }
-        if (tab.progress < 100) LinearProgressIndicator(progress = { tab.progress / 100f }, modifier = Modifier.fillMaxWidth())
+        if (tab.progress < 100) {
+            LinearProgressIndicator(progress = { tab.progress / 100f }, modifier = Modifier.fillMaxWidth().height(2.dp), drawStopIndicator = {})
+        } else {
+            Spacer(Modifier.height(2.dp))
+        }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             // 固定出声的标签页垫在当前标签页下面：看不见，但对 Chromium 来说网页仍然"可见"，视频不会被自动暂停
             val pin = b.pinned
@@ -364,43 +408,39 @@ private fun Screen(b: Browser, record: (Int) -> Unit, onImport: () -> Unit, onEx
                 it,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.errorContainer).padding(horizontal = 12.dp, vertical = 6.dp),
+                modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.errorContainer).padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }
-        HorizontalDivider()
+        // 底栏：ASMR 开关、处理状态（点开效果面板）、效果按钮
         val dry = Settings.params.optBoolean("dry")
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 8.dp)) {
-            Switch(checked = !dry, onCheckedChange = { Settings.setDry(!it) }, enabled = Settings.ready)
-            Column(Modifier.weight(1f).padding(start = 8.dp).clickable { showEffects = true }) {
-                Text(if (dry) "原声" else "ASMR 效果", style = MaterialTheme.typography.labelLarge)
-                Text(
-                    if (Playback.pausedByUser) "已暂停（在通知栏里继续）" else statusLine(shown, shownTitle, Settings.rainOn),
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            TextButton(onClick = { showTabs = true }) { Text("标签 ${b.tabs.size}") }
-            TextButton(onClick = { showEffects = true }) { Text("效果") }
-            Box {
-                TextButton(onClick = { menu = true }) { Text("⋮", style = MaterialTheme.typography.titleMedium) }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("新标签页") }, onClick = { menu = false; b.newTab() })
-                    DropdownMenuItem(text = { Text((if (tab.desktop) "✓ " else "") + "桌面版网站") }, onClick = { menu = false; b.setDesktop(tab, !tab.desktop) })
-                    DropdownMenuItem(text = { Text((if (b.onlyOne) "✓ " else "") + "只放一个标签页的声音") }, onClick = { menu = false; b.changeOnlyOne(!b.onlyOne) })
-                    DropdownMenuItem(text = { Text("首页") }, onClick = { menu = false; b.open(tab, Browser.HOME) })
-                    DropdownMenuItem(text = { Text("测试页") }, onClick = { menu = false; b.open(tab, Browser.TEST_URL) })
-                    DropdownMenuItem(text = { Text("导入配置") }, onClick = { menu = false; onImport() })
-                    DropdownMenuItem(text = { Text("导出配置") }, onClick = { menu = false; onExport() })
-                    DropdownMenuItem(text = { Text("录 20 秒处理前后的声音") }, onClick = { menu = false; record(20) })
+        Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Switch(checked = !dry, onCheckedChange = { Settings.setDry(!it) }, enabled = Settings.ready)
+                Column(Modifier.weight(1f).padding(horizontal = 12.dp).clickable { showEffects = true }) {
+                    Text(if (dry) "原声" else "ASMR 效果", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (Playback.pausedByUser) "已暂停（在通知栏里继续）" else statusLine(shown, shownTitle, Settings.rainOn),
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                FilledTonalButton(onClick = { showEffects = true }, contentPadding = PaddingValues(horizontal = 16.dp)) {
+                    Ic(AppIcons.Tune, size = 18.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("效果")
                 }
             }
         }
     }
 
     if (showEffects) {
-        ModalBottomSheet(onDismissRequest = { showEffects = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        ModalBottomSheet(
+            onDismissRequest = { showEffects = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = MaterialTheme.colorScheme.surface, // 面板里的分区卡片用 surfaceContainerLow，背景要和它分开
+        ) {
             EffectPanel(
                 tele = shown,
                 status = statusLine(shown, shownTitle, Settings.rainOn),
@@ -437,12 +477,51 @@ private fun Screen(b: Browser, record: (Int) -> Unit, onImport: () -> Unit, onEx
     }
 }
 
+/** 圆角胶囊样式的地址栏，右端是刷新 / 停止。 */
+@Composable
+private fun AddressField(value: String, onValueChange: (String) -> Unit, onGo: () -> Unit, loading: Boolean, onReload: () -> Unit, modifier: Modifier = Modifier) {
+    val focus = LocalFocusManager.current
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = CircleShape, modifier = modifier.height(44.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 16.dp)) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (value.isEmpty()) Text("输入网址或搜索", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go, keyboardType = KeyboardType.Uri),
+                    keyboardActions = KeyboardActions(onGo = { focus.clearFocus(); onGo() }),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            IconButton(onClick = onReload, modifier = Modifier.size(40.dp)) { Ic(if (loading) AppIcons.Close else AppIcons.Refresh) }
+        }
+    }
+}
+
+/** 标签页个数（像手机浏览器那样的小方框）。 */
+@Composable
+private fun TabCount(n: Int) {
+    Box(
+        Modifier.size(22.dp).border(2.dp, LocalContentColor.current, RoundedCornerShape(5.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(if (n > 99) ":D" else n.toString(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+    }
+}
+
 @Composable
 private fun TabList(b: Browser, onPick: () -> Unit) {
     Column(Modifier.padding(horizontal = 16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("标签页", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            TextButton(onClick = { b.newTab(); onPick() }) { Text("＋ 新标签页") }
+            TextButton(onClick = { b.newTab(); onPick() }) {
+                Ic(AppIcons.Add, size = 18.dp)
+                Spacer(Modifier.width(4.dp))
+                Text("新标签页")
+            }
         }
         Text(
             when {
@@ -471,7 +550,7 @@ private fun TabList(b: Browser, onPick: () -> Unit) {
                         Text(t.url, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     TextButton(onClick = { b.togglePin(t) }) { Text(if (b.pinned == t) "📌" else "📍") }
-                    TextButton(onClick = { b.close(t) }) { Text("✕") }
+                    IconButton(onClick = { b.close(t) }) { Ic(AppIcons.Close) }
                 }
             }
         }

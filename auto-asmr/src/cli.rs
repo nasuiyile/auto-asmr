@@ -111,7 +111,6 @@ convert 的选项（括号里是默认值）：
   --headphone diffuse|native|<型号>   回放补偿（diffuse）；--headphone list 列出型号
  人声处理
   --denoise [0–100]       输入降噪 RNNoise（关）。数值 = 底噪最多压低多少 dB，如 12；不写数值或 100 = 降到最干净
-  --gate <dBFS>           响应阈值，低于它当作静音（关）
   --deess <dB>            去齿音最多压低（0）       --soft-voice <x>   轻声化（0）
   --sharp-soften <0–8>    强辅音柔化：强辅音突出时，5 kHz 附近最多收轻多少 dB（0=关）
  输出
@@ -565,7 +564,6 @@ fn run_convert(args: &[String]) -> Result<(), String> {
                     it.next();
                 }
             }
-            "--gate" => p.gate_db = f(&mut it)?,
             "--deess" => p.deess_db = f(&mut it)?,
             "--sharp-soften" => p.sharp_soften_db = f(&mut it)?.clamp(0.0, 8.0),
             "--soft-voice" => p.soft_voice = f(&mut it)?,

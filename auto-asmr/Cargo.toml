@@ -17,7 +17,7 @@ required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
-desktop = ["files", "dep:cpal", "dep:eframe", "dep:rfd", "dep:png"]
+desktop = ["files", "dep:cpal", "dep:eframe", "dep:rfd", "dep:png", "dep:winresource"]
 # 文件转换（解码、转换、批量、多音频合成）：库里的 `offline`、`batch`。安卓版也打开它（文件转换页）
 files = ["dep:symphonia", "dep:hound"]
 # 数据文件不编进程序，运行时用 dsp::data::provide 提供（安卓版用：数据放在 APK 资源里，各 CPU 架构共用一份）
@@ -47,3 +47,7 @@ strip = true
 
 [profile.dev]
 opt-level = 2
+
+# Windows 版 exe 的文件图标（assets/icon.ico，见 build.rs）；只有桌面版用
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1", optional = true }

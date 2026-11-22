@@ -51,7 +51,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.nasuiyile.autoasmr.EffectPanel
-import io.github.nasuiyile.autoasmr.ModeSwitch
+import io.github.nasuiyile.autoasmr.AppIcons
+import io.github.nasuiyile.autoasmr.Ic
+import io.github.nasuiyile.autoasmr.PageHeader
+import io.github.nasuiyile.autoasmr.Section
+import io.github.nasuiyile.autoasmr.Stepper
+import io.github.nasuiyile.autoasmr.TipText
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Switch
 import io.github.nasuiyile.autoasmr.Settings
 import io.github.nasuiyile.autoasmr.statusLine
 import org.json.JSONArray
@@ -111,27 +120,30 @@ fun FilesScreen(onImport: () -> Unit, onExport: () -> Unit) {
         showDry = false,
         map = if (mixing) ({ MixMap(st) }) else null,
         header = {
-            item { ModeSwitch(Modifier.padding(top = 4.dp)) }
+            item { PageHeader("文件转换", "把音频文件转成 KU100 双耳 ASMR 效果的 WAV，可以先试听、边听边调参数；支持批量、多音频合成、左右双人（同电脑版）。") }
+            item { FileList(st, busy, multi, onAddFiles = { addFiles.launch(arrayOf("audio/*", "video/*", "application/ogg", "application/octet-stream")) }, onAddFolder = { addFolder.launch(null) }) }
             item {
-                Column(Modifier.padding(top = 8.dp, bottom = 4.dp)) {
-                    Text("文件转换", style = MaterialTheme.typography.headlineSmall)
-                    Note("和电脑版「文件转换」页一样：把音频文件转成 KU100 双耳 ASMR 效果的 WAV，可以先试听、边听边调参数；支持批量、多音频合成、左右双人。")
+                Section("多人声音", subtitle = "几个音频各在一个位置，或者一个音频当成左右两个人") {
+                    MixBlock(st, busy)
+                    DuoBlock(st, busy)
                 }
             }
-            item { FileList(st, busy, multi, onAddFiles = { addFiles.launch(arrayOf("audio/*", "video/*", "application/ogg", "application/octet-stream")) }, onAddFolder = { addFolder.launch(null) }) }
-            item { MixBlock(st, busy) }
-            item { DuoBlock(st, busy) }
             item {
-                OutputRow(st, busy, onSaveAs = { key, name ->
-                    saveAsKey = key
-                    saveAs.launch(name)
-                }, onOutFolder = { outFolder.launch(null) })
+                Section("试听与转换") {
+                    Buttons(st, busy, multi)
+                    PreviewBar(st)
+                    Progress(st)
+                }
             }
-            item { Progress(st) }
-            item { Options(st, busy, multi) }
-            item { Buttons(st, busy, multi) }
-            item { PreviewBar(st) }
-            item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+            item {
+                Section("输出设置") {
+                    OutputRow(st, busy, onSaveAs = { key, name ->
+                        saveAsKey = key
+                        saveAs.launch(name)
+                    }, onOutFolder = { outFolder.launch(null) })
+                    Options(st, busy, multi)
+                }
+            }
         },
     )
 }
@@ -146,8 +158,11 @@ private fun Note(text: String, color: Color = MaterialTheme.colorScheme.onSurfac
 private fun TipLabel(label: String, tip: String, modifier: Modifier = Modifier) {
     var open by remember { mutableStateOf(false) }
     Column(modifier) {
-        Text("$label ⓘ", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.clickable { open = !open })
-        if (open) Note(tip)
+        Row(Modifier.clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false))
+            Ic(AppIcons.Info, Modifier.padding(start = 4.dp), size = 15.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (open) TipText(tip)
     }
 }
 
@@ -168,18 +183,26 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
     val files = st.optJSONArray("files") ?: JSONArray()
     val n = files.length()
     var detail by remember { mutableStateOf<Pair<String, String>?>(null) }
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Column(Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("音频文件", style = MaterialTheme.typography.titleSmall)
-                if (n > 0) Note("  $n 个")
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = onAddFiles, enabled = !busy) { Text("添加文件…") }
-                TextButton(onClick = onAddFolder, enabled = !busy) { Text("添加文件夹…") }
-                if (n > 0) TextButton(onClick = { FileSession.cmd("clear") }, enabled = !busy) { Text("清空") }
+    Section(
+        "音频文件",
+        subtitle = if (n > 0) "$n 个" else null,
+        actions = { if (n > 0) TextButton(onClick = { FileSession.cmd("clear") }, enabled = !busy) { Text("清空") } },
+    ) {
+        Column {
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(onClick = onAddFiles, enabled = !busy, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                    Ic(AppIcons.Add, size = 18.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("添加文件")
+                }
+                FilledTonalButton(onClick = onAddFolder, enabled = !busy, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                    Ic(AppIcons.Folder, size = 18.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text("添加文件夹")
+                }
             }
             if (n == 0) {
-                Note("点「添加文件…」可以一次多选；「添加文件夹…」加入文件夹里的全部音频（不含子文件夹，跳过已转换的 _asmr 文件）。支持 wav / m4a / mp3 / flac / ogg 等常见格式。")
+                Note("「添加文件」可以一次多选；「添加文件夹」加入文件夹里的全部音频（不含子文件夹，跳过已转换的 _asmr 文件）。支持 wav / m4a / mp3 / flac / ogg 等常见格式。")
             }
             val voices = st.optJSONArray("voices")
             val offsets = st.optJSONArray("follow_offsets")
@@ -190,8 +213,13 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
                 val f = files.getJSONObject(i)
                 val inMix = f.optBoolean("in_mix")
                 val sel = if (inMix) mixSel == i else selected == i
-                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { FileSession.cmd("remove", "index" to i) }, enabled = !busy, modifier = Modifier.width(36.dp)) { Text("×") }
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 2.dp).clip(MaterialTheme.shapes.small)
+                        .background(if (sel) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                        .clickable(enabled = !multi || inMix) { FileSession.cmd("select", "index" to i) }
+                        .padding(start = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     if (inMix) Badge(i, sel)
                     Text(
                         f.optString("name"),
@@ -199,15 +227,15 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
                         overflow = TextOverflow.Ellipsis,
                         style = if (sel) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyMedium,
                         color = if (multi && !inMix) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f).padding(start = 6.dp)
-                            .background(if (sel) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                            .clickable(enabled = !multi || inMix) { FileSession.cmd("select", "index" to i) }
-                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f).padding(start = 6.dp, top = 10.dp, bottom = 10.dp),
                     )
                     when {
                         inMix -> VoiceControls(i, voices?.optJSONObject(i), busy, if (follow) offsets?.optDouble(i)?.toFloat() else null)
                         multi -> Note("不参与合成")
                         else -> StatusCell(f.optJSONObject("status")) { title, body -> detail = title to body }
+                    }
+                    IconButton(onClick = { FileSession.cmd("remove", "index" to i) }, enabled = !busy, modifier = Modifier.size(40.dp)) {
+                        Ic(AppIcons.Close, size = 18.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -228,7 +256,7 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
 @Composable
 private fun StatusCell(s: JSONObject?, onDetail: (String, String) -> Unit) {
     if (s == null) return
-    Box(Modifier.width(130.dp)) {
+    Box(Modifier.width(110.dp)) {
         when (s.optString("kind")) {
             "waiting" -> Note("等待中")
             "running" -> Column {
@@ -282,25 +310,25 @@ private fun MixBlock(st: JSONObject, busy: Boolean) {
     val p = Settings.params
     val on = p.optBoolean("mix")
     val n = st.optJSONArray("files")?.length() ?: 0
-    Column(Modifier.padding(top = 4.dp)) {
+    Column(Modifier.padding(top = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = on, onCheckedChange = { Settings.setBool("mix", it) }, enabled = !busy)
             TipLabel(
                 "多音频合成：几个音频各在一个位置，同时播放",
                 "勾上后，列表里的前 4 个音频各放一个位置（默认一个在左耳、一个在右耳，再多就放正前、正后），「试听」时一起播放，「合成并保存」输出一个文件。下面的「排布」可以选各自固定（位置在列表里选或在位置图上拖）或一起移动（按「左右移动」的方式一起走，彼此始终相对）。各音频先自动对齐到一样响，列表里的 dB 是在这之上的加减",
-                Modifier.weight(1f),
+                Modifier.weight(1f).padding(end = 12.dp),
             )
+            Switch(checked = on, onCheckedChange = { Settings.setBool("mix", it) }, enabled = !busy)
         }
         if (on) Note(if (n < 2) "再添加一个音频" else if (n > 4) "只用前 4 个" else "最多 4 个", MaterialTheme.colorScheme.onSurfaceVariant)
         if (on) LayoutRow(busy)
         if (on) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = p.optBoolean("mix_align"), onCheckedChange = { Settings.setBool("mix_align", it) }, enabled = !busy)
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
                 TipLabel(
                     "自动对齐：同一首歌的几个版本，从一起开始唱的地方叠加",
                     "同一首歌的几个版本（比如一段前奏长、一段前奏短，或者不同的编曲）：按旋律、和弦和节奏自动找到它们一起开始唱的地方，从那里叠加；对不上的开头和结尾裁掉（裁开的地方淡入淡出），下面会写出每段从哪里开始用、裁掉多少。试听和合成并保存用的是同一份对齐结果；「从第几秒 / 处理多少秒」和播放条都按对齐之后的时间算。几段对不上（不像同一首歌）时不裁剪，按原样合成",
-                    Modifier.weight(1f),
+                    Modifier.weight(1f).padding(end = 12.dp),
                 )
+                Switch(checked = p.optBoolean("mix_align"), onCheckedChange = { Settings.setBool("mix_align", it) }, enabled = !busy)
             }
             val al = st.optJSONObject("align")
             if (al != null) {
@@ -360,7 +388,7 @@ private fun DuoBlock(st: JSONObject, busy: Boolean) {
     var drag by remember { mutableStateOf<Float?>(null) }
     val shown = drag?.toDouble() ?: ms
     val n = st.optJSONArray("files")?.length() ?: 0
-    Column(Modifier.padding(top = 4.dp)) {
+    Column(Modifier.padding(top = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TipLabel(
                 "左右双人",
@@ -477,9 +505,12 @@ private fun Options(st: JSONObject, busy: Boolean, multi: Boolean) {
             val n = st.optInt("threads", cores)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TipLabel("同时转换", "批量转换时同时处理几个文件，每个文件占一个核。默认 = 本机逻辑核数 $cores。整段读进内存，长音频每小时约占 0.7 GB，内存紧张时调小", Modifier.weight(1f))
-                TextButton(onClick = { val v = (n - 1).coerceAtLeast(1); Settings.set("jobs", (if (v == cores) 0 else v).toString()) }, enabled = !busy) { Text("−") }
-                Text("$n 个文件", style = MaterialTheme.typography.bodyMedium)
-                TextButton(onClick = { val v = (n + 1).coerceAtMost(maxOf(cores, 64)); Settings.set("jobs", (if (v == cores) 0 else v).toString()) }, enabled = !busy) { Text("+") }
+                Stepper(
+                    "$n 个",
+                    !busy,
+                    onMinus = { val v = (n - 1).coerceAtLeast(1); Settings.set("jobs", (if (v == cores) 0 else v).toString()) },
+                    onPlus = { val v = (n + 1).coerceAtMost(maxOf(cores, 64)); Settings.set("jobs", (if (v == cores) 0 else v).toString()) },
+                )
                 if (p.optInt("jobs", 0) != 0) TextButton(onClick = { Settings.set("jobs", "0") }, enabled = !busy) { Text("自动") }
             }
         }
@@ -512,11 +543,26 @@ private fun Buttons(st: JSONObject, busy: Boolean, multi: Boolean) {
         n > 1 -> "全部转换并保存（$n）"
         else -> "转换并保存"
     }
-    Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        OutlinedButton(onClick = { FileSession.cmd("preview") }, enabled = st.optBoolean("can_preview") && !previewing) { Text("试听") }
-        OutlinedButton(onClick = { FileSession.cmd("stop") }, enabled = previewing) { Text("停止") }
-        Button(onClick = { FileSession.convert() }, enabled = n > 0 && !busy) { Text(label) }
-        if (busy) TextButton(onClick = { FileSession.cmd("cancel") }) { Text("取消") }
+    Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        // 试听 / 停止合成一个按钮
+        FilledTonalButton(
+            onClick = { FileSession.cmd(if (previewing) "stop" else "preview") },
+            enabled = previewing || st.optBoolean("can_preview"),
+            contentPadding = PaddingValues(horizontal = 16.dp),
+        ) {
+            Ic(if (previewing) AppIcons.Stop else AppIcons.Play, size = 18.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(if (previewing) "停止" else "试听")
+        }
+        if (busy) {
+            OutlinedButton(onClick = { FileSession.cmd("cancel") }, modifier = Modifier.weight(1f)) { Text("取消转换") }
+        } else {
+            Button(onClick = { FileSession.convert() }, enabled = n > 0, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp)) {
+                Ic(AppIcons.Save, size = 18.dp)
+                Spacer(Modifier.width(6.dp))
+                Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
     }
 }
 

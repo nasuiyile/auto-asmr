@@ -12,7 +12,7 @@ use super::pinna::pinnas;
 use super::rain::{Rain, RainSetup};
 use super::room::{conv_energy, Room};
 use super::tables::{tables, Hrir, Tables};
-use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathDeBoom, BreathFx, BreathTone, CanalComb, ContactFx, DeEsser, Denoiser, Gate, SharpSoftener, DENOISE_DELAY, EAR_EQ_TAPS};
+use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathDeBoom, BreathFx, BreathTone, CanalComb, ContactFx, DeEsser, Denoiser, SharpSoftener, DENOISE_DELAY, EAR_EQ_TAPS};
 use super::{db_to_lin, lin_to_db, smoothstep, C, CANAL_L0, CTRL, CTRL_DT, EAR_R, FS, NTAP, R_MAX, R_MIN};
 use std::sync::Arc;
 
@@ -297,7 +297,6 @@ pub struct Engine {
     cfg: Arc<EngineConfig>,
     post: PostMode,
     in_hp: Biquad,
-    gate: Gate,
     fixed_ambience: FixedAmbience,
     denoiser: Denoiser,
     deess: DeEsser,
@@ -380,7 +379,6 @@ impl Engine {
             cfg: cfg.clone(),
             post,
             in_hp: Biquad::highpass(40.0, BUTTER_Q),
-            gate: Gate::new(),
             fixed_ambience: FixedAmbience::new(la, cfg.params.static_ambience, bed_gain),
             denoiser: Denoiser::new(),
             deess: DeEsser::new(),
@@ -755,7 +753,6 @@ impl Engine {
             let x = input[i];
             self.in_pk = self.in_pk.max(x.abs());
             let mut v = self.in_hp.process(x);
-            v = self.gate.process(v, p.gate_db);
             if p.denoise {
                 v = self.denoiser.process(v, dn_mix);
             }

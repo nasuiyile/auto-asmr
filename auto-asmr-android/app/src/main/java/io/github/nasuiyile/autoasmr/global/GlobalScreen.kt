@@ -30,7 +30,18 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import io.github.nasuiyile.autoasmr.BuildConfig
 import io.github.nasuiyile.autoasmr.EffectPanel
-import io.github.nasuiyile.autoasmr.ModeSwitch
+import io.github.nasuiyile.autoasmr.AppIcons
+import io.github.nasuiyile.autoasmr.Ic
+import io.github.nasuiyile.autoasmr.PageHeader
+import io.github.nasuiyile.autoasmr.Section
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import java.util.Locale
 
 /**
@@ -46,10 +57,8 @@ fun GlobalScreen(onImport: () -> Unit, onExport: () -> Unit) {
         onExport = onExport,
         modifier = Modifier.safeDrawingPadding(),
         header = {
-            item { ModeSwitch(Modifier.padding(top = 4.dp)) }
             item { Title() }
             item { ServiceCard() }
-            item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
         },
         footer = { item { LogCard() } },
     )
@@ -75,14 +84,19 @@ fun globalStatusLine(): String {
 
 @Composable
 private fun Title() {
-    Column(Modifier.padding(top = 8.dp, bottom = 4.dp)) {
-        Text("auto-asmr · 全局模式", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "把其他 App 播放的声音截下来，用 auto-asmr 引擎做成 KU100 双耳 ASMR 效果再放出来。需要 Shizuku 或 root，戴耳机听。" +
-                "没有的话切到上面的「网页模式」，在内嵌浏览器里听网页。版本 ${BuildConfig.VERSION_NAME}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+    PageHeader(
+        "全局模式",
+        "把其他 App 播放的声音截下来，做成 KU100 双耳 ASMR 效果再放出来。需要 Shizuku 或 root，戴耳机听；" +
+            "都没有的话用「网页」页在内嵌浏览器里听。版本 ${BuildConfig.VERSION_NAME}",
+    )
+}
+
+/** 状态小圆点 + 文字。 */
+@Composable
+private fun StatusDot(color: Color, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+        androidx.compose.foundation.layout.Box(Modifier.size(8.dp).background(color, CircleShape))
+        Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(start = 8.dp))
     }
 }
 
@@ -95,75 +109,93 @@ private fun SmallNote(text: String) {
 private fun ServiceCard() {
     val c = Controller
     val p = c.poll
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Column(Modifier.padding(12.dp)) {
-            Text("服务进程", style = MaterialTheme.typography.titleSmall)
-            SmallNote("Shizuku：${c.shizuku}")
-            SmallNote(
-                when (c.phase) {
-                    Controller.Phase.IDLE -> "服务进程：没在运行"
-                    Controller.Phase.STARTING -> "服务进程：正在启动（通过 ${c.how?.label}）…"
-                    Controller.Phase.CONNECTED -> "服务进程：已连上（通过 ${c.how?.label}）"
-                },
+    val ok = Color(0xFF3FA66B)
+    val warn = Color(0xFFE0A030)
+    val off = MaterialTheme.colorScheme.outline
+    Section("服务进程") {
+        StatusDot(if (c.shizukuUp) ok else off, "Shizuku：${c.shizuku}")
+        when (c.phase) {
+            Controller.Phase.IDLE -> StatusDot(off, "服务进程没在运行")
+            Controller.Phase.STARTING -> StatusDot(warn, "正在启动（通过 ${c.how?.label}）…")
+            Controller.Phase.CONNECTED -> StatusDot(ok, "已连上（通过 ${c.how?.label}）")
+        }
+        if (c.connected) c.hello?.let { SmallNote(it) }
+        p.fatal?.let {
+            Text(
+                "出错：$it",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    .background(MaterialTheme.colorScheme.errorContainer, MaterialTheme.shapes.small).padding(10.dp),
             )
-            if (c.connected) c.hello?.let { SmallNote(it) }
-            p.fatal?.let {
-                Text(
-                    "出错：$it",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp).background(MaterialTheme.colorScheme.errorContainer).padding(6.dp),
-                )
+        }
+        when (c.phase) {
+            Controller.Phase.IDLE -> Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { c.startShizuku() }, modifier = Modifier.weight(1f)) { Text("用 Shizuku 启动") }
+                OutlinedButton(onClick = { c.startRoot() }, modifier = Modifier.weight(1f)) { Text("用 root 启动") }
             }
-            when (c.phase) {
-                Controller.Phase.IDLE -> Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { c.startShizuku() }) { Text("用 Shizuku 启动") }
-                    OutlinedButton(onClick = { c.startRoot() }) { Text("用 root 启动") }
-                }
-                Controller.Phase.STARTING -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
-                Controller.Phase.CONNECTED -> {
-                    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("拦截其他 App 的声音", style = MaterialTheme.typography.bodyMedium)
-                            SmallNote(if (p.running) "原声不再直接进耳机，听到的是处理后的" else "已暂停：各 App 的声音照常直接放出")
+            Controller.Phase.STARTING -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
+            Controller.Phase.CONNECTED -> {
+                Card(
+                    Modifier.fillMaxWidth().padding(top = 12.dp),
+                    shape = MaterialTheme.shapes.medium,
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (p.running) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                    ),
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { c.setIntercept(!p.running) }.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text("拦截其他 App 的声音", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                if (p.running) "原声不再直接进耳机，听到的是处理后的" else "已暂停：各 App 的声音照常直接放出",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                         Switch(checked = p.running, onCheckedChange = { c.setIntercept(it) })
                     }
-                    if (p.running) {
-                        SmallNote(
-                            String.format(
-                                Locale.ROOT, "输入峰值 %.2f · 输出峰值 %.2f · 断流 %d · 输出缓冲 %.0f ms",
-                                p.inPeak, p.outPeak, p.underruns, p.outBuf,
-                            ),
-                        )
-                    }
-                    Row(Modifier.padding(top = 4.dp)) {
-                        OutlinedButton(onClick = { c.exit() }) { Text("退出服务") }
-                    }
+                }
+                if (p.running) {
+                    SmallNote(
+                        String.format(
+                            Locale.ROOT, "输入峰值 %.2f · 输出峰值 %.2f · 断流 %d · 输出缓冲 %.0f ms",
+                            p.inPeak, p.outPeak, p.underruns, p.outBuf,
+                        ),
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { c.exit() }) { Text("退出服务") }
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            SmallNote(
-                if (c.how == Controller.How.ROOT) {
-                    "root 启动的服务进程跟着 App 走：App 被杀时它也退出。想让它常驻，用 Shizuku（Shizuku 本身也可以用 root 启动）。"
-                } else {
-                    "Shizuku 启动的服务进程是常驻的：App 被系统清掉后声音照常处理，重新打开 App 会自动连回去。"
-                },
-            )
         }
+        Spacer(Modifier.height(6.dp))
+        SmallNote(
+            if (c.how == Controller.How.ROOT) {
+                "root 启动的服务进程跟着 App 走：App 被杀时它也退出。想让它常驻，用 Shizuku（Shizuku 本身也可以用 root 启动）。"
+            } else {
+                "Shizuku 启动的服务进程是常驻的：App 被系统清掉后声音照常处理，重新打开 App 会自动连回去。"
+            },
+        )
     }
 }
 
 @Composable
 private fun LogCard() {
     var open by rememberSaveable { mutableStateOf(false) }
-    Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+    val turn by animateFloatAsState(if (open) 180f else 0f, label = "chevron")
+    Card(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
         Row(
-            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("日志", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            Text(if (open) "▲" else "▼", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Ic(AppIcons.ExpandMore, Modifier.rotate(turn), size = 24.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (open) {
             SelectionContainer {
@@ -171,7 +203,7 @@ private fun LogCard() {
                     Controller.logs.takeLast(60).joinToString("\n").ifEmpty { "（还没有）" },
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
                 )
             }
         }

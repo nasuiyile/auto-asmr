@@ -7,8 +7,10 @@ cd "$(dirname "$0")/.."
 cargo build --release
 APP=target/release/auto-asmr.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/auto-asmr "$APP/Contents/MacOS/auto-asmr"
+# 应用图标：戴耳机的白色小猫（icon/make_icons.py 生成）
+cp assets/icon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -18,6 +20,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
     <key>CFBundleDisplayName</key><string>auto-asmr</string>
     <key>CFBundleIdentifier</key><string>local.auto-asmr</string>
     <key>CFBundleExecutable</key><string>auto-asmr</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>

@@ -179,8 +179,6 @@ pub struct Params {
     /// 降噪强度，0–100：底噪最多压低多少 dB；[`DENOISE_MAX_DB`]（100）= 不设上限。
     /// 界面上是一个 0–100 的滑条，拖到 0 就是关闭（`denoise` 置为 false）。
     pub denoise_db: f32,
-    /// 响应阈值：输入低于这个电平（dBFS）时当作静音；-90 = 关闭。
-    pub gate_db: f32,
     /// 去齿音最多压低多少 dB（0 = 关闭）。
     pub deess_db: f32,
     /// 强辅音柔化：只在约 5 kHz 的频带突出且较响时局部衰减，dB；0 = 关闭。
@@ -284,7 +282,6 @@ impl Default for Params {
             playback: Playback::Diffuse,
             denoise: false,
             denoise_db: DENOISE_MAX_DB,
-            gate_db: -90.0,
             deess_db: 0.0,
             sharp_soften_db: 0.0,
             soft_voice: 0.0,
@@ -308,7 +305,7 @@ impl Default for Params {
 
 impl Params {
     /// 把"风格"管的那些参数恢复成默认值（= 贴耳加强）：贴耳感、入耳、左右移动的方式和节奏、忽远忽近、上下、
-    /// 房间与回放、去齿音 / 轻声化、目标响度。其余的——降噪、响应阈值、耳廓、自动响度开关、输出增益、峰值上限、
+    /// 房间与回放、去齿音 / 轻声化、目标响度。其余的——降噪、耳廓、自动响度开关、输出增益、峰值上限、
     /// 随机种子、环绕 / 固定 / 手动模式的位置——保持不变。各风格都先做这一步，所以按哪个按钮结果都是确定的，
     /// 从"掏耳"切回人声的风格时不会留下"伸进耳道、每只耳朵停 40 秒"之类的设置。
     fn style_base(mut self) -> Self {
@@ -577,10 +574,10 @@ mod tests {
         assert!(e.inear_cm > 1.0 && e.hold_s >= 20.0 && e.isolation_db >= 40.0);
         assert!(e.breath_db == 0.0 && e.puff == 0.0 && e.sway == 0.0 && e.sway_follow == 0.0 && e.soft_near == 0.0);
         assert!(!e.room && e.target_lufs == EARCLEAN_LIVE_LUFS && EARCLEAN_LUFS < d.target_lufs);
-        // 风格不管的设置保持不变：降噪、响应阈值、耳廓、输出、随机种子、各模式的位置
-        let mine = Params { denoise: true, denoise_db: 12.0, gate_db: -50.0, pinna: "B".to_string(), out_gain_db: -3.0, ceiling_db: -2.0, auto_level: false, seed: 9, static_az: 45.0, orbit_radius: 0.5, manual_az: 10.0, ..d.clone() };
+        // 风格不管的设置保持不变：降噪、耳廓、输出、随机种子、各模式的位置
+        let mine = Params { denoise: true, denoise_db: 12.0, pinna: "B".to_string(), out_gain_db: -3.0, ceiling_db: -2.0, auto_level: false, seed: 9, static_az: 45.0, orbit_radius: 0.5, manual_az: 10.0, ..d.clone() };
         for q in [mine.clone().style_ear(), mine.clone().style_ku100(), mine.clone().style_breath(), mine.clone().style_earclean()] {
-            assert!(q.denoise && q.denoise_db == 12.0 && q.gate_db == -50.0 && q.pinna == "B");
+            assert!(q.denoise && q.denoise_db == 12.0 && q.pinna == "B");
             assert!(q.out_gain_db == -3.0 && q.ceiling_db == -2.0 && !q.auto_level && q.seed == 9);
             assert!(q.static_az == 45.0 && q.orbit_radius == 0.5 && q.manual_az == 10.0);
         }

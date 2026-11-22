@@ -1235,19 +1235,6 @@
    "items": [
     {
      "type": "slider",
-     "key": "gate_db",
-     "label": "响应阈值",
-     "label_en": "Gate threshold",
-     "tip": "输入低于这个电平时当作静音（−90 = 关闭）",
-     "tip_en": "Input below this level is muted (−90 = off)",
-     "min": -90.0,
-     "max": -20.0,
-     "decimals": 0,
-     "unit": "dB",
-     "unit_en": "dB"
-    },
-    {
-     "type": "slider",
      "key": "deess_db",
      "label": "去齿音",
      "label_en": "De-ess",

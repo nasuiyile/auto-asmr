@@ -1,48 +1,10 @@
-//! 人声预处理：噪声门（响应阈值）、输入降噪（RNNoise）、去齿音、轻声化、贴耳气声。都不改变嗓音本身。
+//! 人声预处理：输入降噪（RNNoise）、去齿音、轻声化、贴耳气声。都不改变嗓音本身。
 
 use super::filters::{ema_coef, interp_log, minphase_from_mag, Biquad, OnePoleLp, BUTTER_Q};
 use super::{db_to_lin, CTRL_DT, FS};
 use nnnoiseless::DenoiseState;
 
 const DT: f32 = 1.0 / FS;
-
-/// 噪声门：输入低于阈值时平滑地关掉（开 3 ms、保持 0.2 s、关 0.15 s），带 3 dB 回差。
-pub struct Gate {
-    env: f32,
-    open: bool,
-    hold: f32,
-    g: f32,
-}
-
-impl Gate {
-    pub fn new() -> Self {
-        Gate { env: 0.0, open: true, hold: 0.0, g: 1.0 }
-    }
-
-    #[inline]
-    pub fn process(&mut self, x: f32, thr_db: f32) -> f32 {
-        if thr_db <= -89.0 {
-            self.g = 1.0;
-            return x;
-        }
-        let a = x.abs();
-        self.env = if a > self.env { a } else { self.env + ema_coef(0.05, DT) * (a - self.env) };
-        let thr = db_to_lin(thr_db);
-        if self.env > thr {
-            self.open = true;
-            self.hold = 0.2;
-        } else if self.env < thr * 0.708 {
-            self.hold -= DT;
-            if self.hold <= 0.0 {
-                self.open = false;
-            }
-        }
-        let target = if self.open { 1.0 } else { 0.0 };
-        let tau = if target > self.g { 0.003 } else { 0.15 };
-        self.g += ema_coef(tau, DT) * (target - self.g);
-        x * self.g
-    }
-}
 
 /// RNNoise 一帧 480 个样本，内部还有一帧重叠，所以打开降噪会增加 960 个样本（20 ms）的延时。
 pub const DENOISE_DELAY: usize = 2 * DenoiseState::FRAME_SIZE;

@@ -185,7 +185,6 @@ export const GROUPS = [
     title: '人声处理',
     rows: [
       { key: 'denoise', derived: true, label: '降噪', min: 0, max: 100, dec: 0, fmt: (x) => (x < 0.5 ? '0 关' : x >= 99.5 ? '100 最大' : `${x.toFixed(0)} dB`), tip: '输入降噪（RNNoise）：数值 = 底噪最多压低多少分贝，0 = 关闭，100 = 不设上限。开启后多 20 ms 延时' },
-      { key: 'gate_db', label: '响应阈值', min: -90, max: -20, unit: 'dB', dec: 0, tip: '输入低于这个电平时当作静音（−90 = 关闭）' },
       { key: 'deess_db', label: '去齿音', min: 0, max: 10, unit: 'dB', dec: 1, tip: '只在 s / sh / x 出现时压低 4.5 kHz 以上，最多压这么多' },
       { key: 'sharp_soften_db', label: '强辅音柔化', min: 0, max: 8, unit: 'dB', dec: 1, tip: '强辅音突出时，最多压低 5 kHz 附近窄频带这么多，保留轻微呼吸的细节。0 = 关闭' },
       { key: 'soft_voice', label: '轻声化', min: 0, max: 1.5, dec: 2, tip: '把嗓音均衡成「压低声音说话」（只做均衡）' },

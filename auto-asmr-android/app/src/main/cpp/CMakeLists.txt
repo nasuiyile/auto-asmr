@@ -41,5 +41,6 @@ target_link_options(asmrhook PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--gc-sect
 add_library(asmrglobal SHARED global_jni.c)
 add_dependencies(asmrglobal rust_core)
 target_compile_options(asmrglobal PRIVATE -Wall -Wextra -O2)
-target_link_libraries(asmrglobal asmr_core log m dl)
+# Rust 层里有文件转换页试听用的 AAudio 输出（服务进程用不到，但同一个静态库要能链上）
+target_link_libraries(asmrglobal asmr_core aaudio log m dl)
 target_link_options(asmrglobal PRIVATE "-Wl,-z,max-page-size=16384" "-Wl,--gc-sections")

@@ -84,6 +84,12 @@ object NativeHook {
     /** 调试录音：下一个出声的流录 [seconds] 秒，处理前后各存一个 WAV 到 [dir]。返回 0 = 已开始。 */
     @JvmStatic external fun record(dir: String, seconds: Int): Int
 
+    /**
+     * 文件转换页（rust/src/files.rs）：一条命令（JSON，UTF-8 字节）进，整页状态（JSON，UTF-8 字节）出。
+     * 命令和状态的字段见 files.rs；出错时返回 null。
+     */
+    @JvmStatic external fun files(cmd: ByteArray): ByteArray?
+
     /** 调试：已 hook 的调用方和每个流此刻的统计。 */
     @JvmStatic external fun status(): String
 }

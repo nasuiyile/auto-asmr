@@ -54,6 +54,10 @@ fun EffectPanel(
     modifier: Modifier = Modifier,
     header: LazyListScope.() -> Unit = {},
     footer: LazyListScope.() -> Unit = {},
+    /** 显示「效果 / 原声」开关（文件转换页不显示：同电脑版，试听总是带效果）。 */
+    showDry: Boolean = true,
+    /** 换掉位置图（文件转换页的多音频合成 / 左右双人：几个声音的位置图）。 */
+    map: (@Composable () -> Unit)? = null,
 ) {
     val spec = Settings.spec
     val p = Settings.params
@@ -76,8 +80,10 @@ fun EffectPanel(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Text(if (p.optBoolean("dry")) "原声" else "效果", Modifier.padding(end = 8.dp))
-                Switch(checked = !p.optBoolean("dry"), onCheckedChange = { Settings.setDry(!it) })
+                if (showDry) {
+                    Text(if (p.optBoolean("dry")) "原声" else "效果", Modifier.padding(end = 8.dp))
+                    Switch(checked = !p.optBoolean("dry"), onCheckedChange = { Settings.setDry(!it) })
+                }
             }
             Spacer(Modifier.height(8.dp))
             Text("风格", style = MaterialTheme.typography.labelLarge)
@@ -87,7 +93,7 @@ fun EffectPanel(
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { PositionMap(p, tele, manual) }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { if (map != null) map() else PositionMap(p, tele, manual) }
             val m = spec.optJSONObject("manual")
             val toggleManual = { on: Boolean ->
                 val pose = if (tele.isNotEmpty() && tele[0] > 0f) floatArrayOf(tele[1], tele[2], tele[3]) else null

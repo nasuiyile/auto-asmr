@@ -91,13 +91,15 @@ pub fn update_params(f: impl FnOnce(&mut Params) -> Result<(), String>) -> Resul
     })
 }
 
-/// 改配置文件里 `params` 之外的一项（左右双人那几项，见 [`DOC_KEYS`]）；真的有变化才重新生成配置。
+/// 改配置文件里 `params` 之外的一项（左右双人、文件转换页的设置，见 [`DOC_KEYS`]）。左右双人那几项变了才重新生成
+/// 引擎配置（网页 / 全局模式的处理器要换）；文件转换页的设置只记下来（文件转换页每次轮询时自己读）。
 pub fn update_doc(key: &str, v: Value) -> Result<(), String> {
     with_global(|g| {
         let mut s = g.saved.clone();
         set_doc_field(&mut s, key, v)?;
-        if (s.duo_ms, s.mix_follow, s.mix_balance) != (g.saved.duo_ms, g.saved.mix_follow, g.saved.mix_balance) {
-            g.saved = s;
+        let duo_changed = (s.duo_ms, s.mix_follow, s.mix_balance) != (g.saved.duo_ms, g.saved.mix_follow, g.saved.mix_balance);
+        g.saved = s;
+        if duo_changed {
             commit(g);
         }
         Ok(())
@@ -178,15 +180,24 @@ pub fn export_config() -> Result<String, String> {
 /// 界面上的换算量：读写都走库里 `Params` 的同名方法（和桌面版界面一样）。
 pub const VIRTUAL: [&str; 4] = ["ear_cm", "manual_cm", "moves_per_min", "denoise_slider"];
 
-/// 配置文件里 `params` 之外、界面也按字段读写的设置：左右双人（和桌面版共用）。
-pub const DOC_KEYS: [&str; 3] = ["duo_ms", "mix_follow", "mix_balance"];
+/// 配置文件里 `params` 之外、界面也按字段读写的设置（和桌面版共用）：左右双人（排布、自动平衡也是多音频合成的），
+/// 以及文件转换页的设置（多音频合成、自动对齐、目标响度、取哪个声道、位深、同时转换几个）。
+pub const DOC_KEYS: [&str; 9] = ["duo_ms", "mix_follow", "mix_balance", "mix", "mix_align", "file_lufs", "file_channel", "bits", "jobs"];
 
-/// 改 [`DOC_KEYS`] 里的一项。范围和桌面版界面一样：延迟 0–300 ms（0 = 关），自动平衡 0–100 %。
+/// 改 [`DOC_KEYS`] 里的一项。范围和桌面版界面一样：延迟 0–300 ms（0 = 关），自动平衡 0–100 %，声道 0 自动 / 1 左 /
+/// 2 右 / 3 混合，位深 16 / 24，同时转换 0 = 自动（逻辑核数）。
 pub fn set_doc_field(s: &mut Saved, key: &str, v: Value) -> Result<(), String> {
+    let as_bool = |v: &Value| v.as_bool().ok_or_else(|| format!("{key} 要 true / false"));
     match key {
         "duo_ms" => s.duo_ms = as_f32(&v)?.clamp(0.0, DUO_MAX_MS),
-        "mix_follow" => s.mix_follow = v.as_bool().ok_or("mix_follow 要 true / false")?,
+        "mix_follow" => s.mix_follow = as_bool(&v)?,
         "mix_balance" => s.mix_balance = as_f32(&v)?.clamp(0.0, 100.0),
+        "mix" => s.mix = as_bool(&v)?,
+        "mix_align" => s.mix_align = as_bool(&v)?,
+        "file_lufs" => s.file_lufs = as_f32(&v)?.clamp(-40.0, 0.0),
+        "file_channel" => s.file_channel = (as_f32(&v)? as i64).clamp(0, 3) as u8,
+        "bits" => s.bits = if as_f32(&v)? < 20.0 { 16 } else { 24 },
+        "jobs" => s.jobs = (as_f32(&v)? as i64).clamp(0, 256) as usize,
         _ => return Err(format!("没有这个设置：{key}")),
     }
     Ok(())
@@ -199,6 +210,12 @@ pub fn saved_json(s: &Saved) -> Value {
         m.insert("duo_ms".into(), json!(s.duo_ms));
         m.insert("mix_follow".into(), json!(s.mix_follow));
         m.insert("mix_balance".into(), json!(s.mix_balance));
+        m.insert("mix".into(), json!(s.mix));
+        m.insert("mix_align".into(), json!(s.mix_align));
+        m.insert("file_lufs".into(), json!(s.file_lufs));
+        m.insert("file_channel".into(), json!(s.file_channel));
+        m.insert("bits".into(), json!(s.bits));
+        m.insert("jobs".into(), json!(s.jobs));
     }
     v
 }

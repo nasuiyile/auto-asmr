@@ -3,6 +3,7 @@ package io.github.nasuiyile.autoasmr
 import android.app.Application
 import android.util.Log
 import com.bytedance.android.bytehook.ByteHook
+import io.github.nasuiyile.autoasmr.files.FileSession
 import io.github.nasuiyile.autoasmr.global.Controller
 
 class AsmrApp : Application() {
@@ -27,6 +28,8 @@ class AsmrApp : Application() {
         Thread({ Settings.load(this) }, "asmr-init").start()
         // 全局模式：收到 Shizuku 的 binder 后，连回还在跑的服务进程（App 被杀后它继续处理声音）
         Controller.init(this)
+        // 文件转换页：清掉上次留下的输入链接
+        FileSession.init(this)
     }
 
     companion object {

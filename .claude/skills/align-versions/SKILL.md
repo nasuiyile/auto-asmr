@@ -1,11 +1,11 @@
 ---
 name: align-versions
-description: auto-asmr 仓库里新增或调整音频预设（风格按钮如贴耳加强 / KU100 实录 / 掏耳 / 呼吸音，背景音预设如雨夜）、新增 / 改名 / 删除效果参数、改参数的范围 / 默认值 / 标签 / 说明时，用它保证所有版本对齐：桌面版界面和命令行、安卓版（网页模式和全局模式）、浏览器插件、Python 版，以及对应的测试和文档。只要改动碰到 auto-asmr/src/dsp/params.rs、gui.rs 的参数控件、cli.rs 的 --style、ui_spec.json、schema.js、popup.html / options.html 的风格按钮、asmr_binaural.py 的 STYLES，就要用这个技能，即使用户只说"加个预设""调一下掏耳""加个参数"，没提"对齐"。
+description: auto-asmr 仓库里新增或调整音频预设（风格按钮如贴耳加强 / KU100 实录 / 掏耳 / 呼吸音，背景音预设如雨夜）、新增 / 改名 / 删除效果参数、改参数的范围 / 默认值 / 标签 / 说明时，用它保证所有版本对齐：桌面版界面和命令行、安卓版（网页模式和全局模式）、浏览器插件、Python 版，以及对应的测试和文档。只要改动碰到 auto-asmr/src/dsp/params.rs、gui.rs 的参数控件、cli.rs 的 --style、ui_spec.json、schema.js、popup.html / options.html 的风格按钮、asmr_binaural.py 的 STYLES，就要用这个技能，即使用户只说"加个预设""调一下掏耳""加个参数"，没提"对齐"。改桌面版 gui.rs 的文件转换页（列表、试听、批量、多音频合成、自动对齐、左右双人、输出选项）时也用它，同步安卓版的文件转换页（rust/src/files.rs、files/FilesScreen.kt）。
 ---
 
 # 各版本对齐：预设和参数
 
-auto-asmr 有一份 Rust 引擎和四个版本（安卓版有网页、全局两种模式）。预设和参数的数值都在共用库里，但每个版本都有自己的界面层：按钮列表、参数表、编号映射、帮助文字。配置文件（`.ron`）在桌面版、安卓版、插件之间通用。所以只改一处，常见的后果是：某个版本看不到新按钮或新参数；导入别人的配置后行为不一样；按钮编号错位，点「掏耳」出来的是「呼吸音」。
+auto-asmr 有一份 Rust 引擎和四个版本（安卓版有网页、全局两种模式，外加和桌面版一样的文件转换页）。预设和参数的数值都在共用库里，但每个版本都有自己的界面层：按钮列表、参数表、编号映射、帮助文字。配置文件（`.ron`）在桌面版、安卓版、插件之间通用。所以只改一处，常见的后果是：某个版本看不到新按钮或新参数；导入别人的配置后行为不一样；按钮编号错位，点「掏耳」出来的是「呼吸音」。
 
 做法：以共用库为准，把下面清单里每个版本都过一遍，跑对齐检查和各版本的测试，再同步文档。
 
@@ -16,7 +16,7 @@ auto-asmr 有一份 Rust 引擎和四个版本（安卓版有网页、全局两�
 | **共用库**（基准） | `auto-asmr/src/dsp/params.rs`：`Params` 的字段（`#[serde(default)]`），`style_*`、`bg_*` 预设方法；配置文件格式在 `auto-asmr/src/config.rs` | — |
 | 桌面版界面 | 调共用库的方法 | `auto-asmr/src/gui.rs`：风格按钮那一排（「恢复默认」旁边）、背景音预设按钮、右侧参数控件（标签和说明都写成 `t("中文", "English")`） |
 | 桌面版命令行 | 调共用库的方法 | `auto-asmr/src/cli.rs`：`--style` 的取值和帮助文字、各参数的选项；文件转换用的目标响度常量（`EARCLEAN_LUFS`、`BREATH_LUFS` 这类，在 params.rs） |
-| 安卓版（网页模式 + 全局模式） | `auto-asmr-android/rust`（依赖共用库）；全局模式的服务进程用同一个 Rust 层（`libasmrglobal.so`），参数表和网页模式共用，整份配置由 App 推过去 | `rust/src/settings.rs`：`action()` 的按钮名、`describe_config()` 的风格识别、换算项 `VIRTUAL` 和配置里 `params` 之外的 `DOC_KEYS`、`set_field` 的换算；`rust/src/lib.rs`：`asmr_set_style` 的编号；`rust/src/ui_spec.json`：`styles`（按钮）和 `groups`（参数表，标签、说明、范围、单位从 gui.rs 抄，另有 `label_en` / `tip_en`）；`app/src/main/cpp/asmr_core.h`、`NativeHook.kt` 注释里的按钮列表；`MainActivity.kt` 的 adb 风格列表；全局模式只有 `global/server/Engine.kt` 注释里的按钮列表要跟着改 |
+| 安卓版（网页模式 + 全局模式 + 文件转换页） | `auto-asmr-android/rust`（依赖共用库）；全局模式的服务进程用同一个 Rust 层（`libasmrglobal.so`），参数表和网页模式共用，整份配置由 App 推过去；文件转换页的逻辑在 `rust/src/files.rs`（照搬 gui.rs 的文件页），界面在 `app/src/main/java/…/files/`，效果面板和其它页面共用 | `rust/src/settings.rs`：`action()` 的按钮名、`describe_config()` 的风格识别、换算项 `VIRTUAL` 和配置里 `params` 之外的 `DOC_KEYS`、`set_field` 的换算；`rust/src/lib.rs`：`asmr_set_style` 的编号；`rust/src/ui_spec.json`：`styles`（按钮）和 `groups`（参数表，标签、说明、范围、单位从 gui.rs 抄，另有 `label_en` / `tip_en`）；`app/src/main/cpp/asmr_core.h`、`NativeHook.kt` 注释里的按钮列表；`MainActivity.kt` 的 adb 风格列表；全局模式只有 `global/server/Engine.kt` 注释里的按钮列表要跟着改 |
 | 浏览器插件 | `auto-asmr-chromium/wasm`（依赖共用库） | `wasm/src/lib.rs`：`change('style', 编号)`、`bg_preset`、`derived` 换算项；`extension/schema.js`：参数表；`extension/popup.html`、`options.html`：`data-style` 按钮 |
 | Python 版 | `asmr_binaural.py` **独立实现**：`STYLES` 只有 `ear`、`ku100`，参数名也不同 | 新东西要么移植过去，要么在 `doc/python-cli.md` 和 `doc/python-vs-rust.md` 里写明"只有 Rust 版有" |
 
@@ -40,6 +40,15 @@ auto-asmr 有一份 Rust 引擎和四个版本（安卓版有网页、全局两�
 5. **安卓全局模式**：不用改（参数表、配置和网页模式共用），重新打包就行。
 6. **Python 版**：Python 里有对应的算法就移植，没有就写进文档。
 7. **改范围、默认值、标签**：gui.rs、ui_spec.json、schema.js 三处一起改。改默认值还会影响所有从 `style_base()` 派生的预设，以及文档里写的默认值。
+
+## 改文件转换页
+
+安卓版的文件转换页是桌面版文件页的移植：`rust/src/files.rs` 的函数和 gui.rs 文件页的同名函数一一对应（`mix_setup`、`sync_mix`、`start_convert`、`duo_options`……），界面文字和说明从 gui.rs 抄。改了 gui.rs 的文件页（列表、试听、批量、多音频合成、自动对齐、左右双人、输出选项、完成后的说明），就要：
+
+1. **安卓 Rust 层**：`files.rs` 里对应的函数照着改；完成后的说明文字在共用库的 `offline::report_text` / `mix_report_text`，两边已经共用。新的设置项在配置文件里 `params` 之外时，加进 settings.rs 的 `DOC_KEYS`（带范围限制）和 `saved_json`，`files.rs` 的 `sync_saved` 处理它变了之后要做的事（同桌面版每帧检查的那些）。`files.rs` 的测试走命令接口，新功能能测的加断言。
+2. **安卓界面**：`files/FilesScreen.kt`（控件和说明）、`files/MixMap.kt`（合成 / 左右双人的位置图）。状态都从 `files.rs` 的 `state()` 读，新字段在那里加。
+3. **插件**没有文件转换，不用改；**Python 版**有自己的文件转换（命令行），做不到的写进文档。
+4. **文档**：`app-usage.md`（桌面版）和 `android-dev.md` 的「文件转换」一节。
 
 ## 只调整预设的数值
 
@@ -82,7 +91,7 @@ cd auto-asmr-chromium/wasm && cargo test --release    # 插件
 
 - `effects.md`：效果的做法、依据、预设的参数和标定。
 - `app-usage.md`、`app-cli.md`：桌面版界面、命令行。
-- `android-dev.md`：安卓版界面，Rust 层的测试个数和说明。
+- `android-dev.md`：安卓版界面（含文件转换页），Rust 层的测试个数和说明。
 - `chromium.md`：插件的测试个数和说明。
 - `shizuku.md`：安卓全局模式的行为变了时才改。
 - `development.md`：桌面版的测试个数。

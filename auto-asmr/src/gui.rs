@@ -2868,57 +2868,14 @@ fn job_progress(j: &Job) -> (f32, usize, usize) {
     ((sum / tot.max(1e-9)) as f32, done, run)
 }
 
-/// 单个文件转换完成后的说明。
+/// 单个文件转换完成后的说明（文字在库里，安卓版用同一份）。
 fn report_text(rep: &ConvertReport, out: &Path) -> String {
-    format!(
-        "{}：{}\n{:.1} s，{:.1} LUFS，{} {:.1} dBTP，{} {:.1} dB；{} {:.0}%，{} {}（{} {}），{} {}，{} {}{}；{} {:.1} s{}",
-        t("已保存", "Saved"),
-        out.display(),
-        rep.seconds,
-        rep.lufs,
-        t("真峰值", "true peak"),
-        rep.true_peak_db,
-        t("限制器最多压", "limiter max"),
-        rep.max_gr_db,
-        t("说话占", "speech"),
-        rep.speech_pct,
-        t("换耳", "switches"),
-        rep.n_moves,
-        t("从头顶绕", "over the head"),
-        rep.n_tops,
-        t("往后让", "lean-backs"),
-        rep.n_sways,
-        t("上下换位", "up / down moves"),
-        rep.n_updowns,
-        if rep.n_strokes > 0 { format!("，{} {}", t("伸进耳道", "strokes into the ear"), rep.n_strokes) } else { String::new() },
-        t("用时", "took"),
-        rep.elapsed_s,
-        if rep.channel_note.is_empty() { String::new() } else { format!("\n{}", rep.channel_note) }
-    ) + &if rep.duo_note.is_empty() { String::new() } else { format!("\n{}", rep.duo_note) }
-        + &if rep.balance_note.is_empty() { String::new() } else { format!("\n{}", rep.balance_note) }
-        + &if rep.bg_note.is_empty() { String::new() } else { format!("\n{}", rep.bg_note) }
+    crate::offline::report_text(rep, &out.display().to_string(), ENGLISH.load(Ordering::Relaxed))
 }
 
 /// 合成完成后的说明。`desc`：参与合成的音频和各自的位置。
 fn mix_report_text(rep: &ConvertReport, out: &Path, desc: &str) -> String {
-    format!(
-        "{}：{}\n{:.1} s，{:.1} LUFS，{} {:.1} dBTP，{} {:.1} dB；{} {:.1} s\n{}：{}{}",
-        t("已保存", "Saved"),
-        out.display(),
-        rep.seconds,
-        rep.lufs,
-        t("真峰值", "true peak"),
-        rep.true_peak_db,
-        t("限制器最多压", "limiter max"),
-        rep.max_gr_db,
-        t("用时", "took"),
-        rep.elapsed_s,
-        t("合成", "Mixed"),
-        desc,
-        if rep.channel_note.is_empty() { String::new() } else { format!("\n{}", rep.channel_note) }
-    ) + &if rep.align_note.is_empty() { String::new() } else { format!("\n{}", rep.align_note) }
-        + &if rep.balance_note.is_empty() { String::new() } else { format!("\n{}", rep.balance_note) }
-        + &if rep.bg_note.is_empty() { String::new() } else { format!("\n{}", rep.bg_note) }
+    crate::offline::mix_report_text(rep, &out.display().to_string(), desc, ENGLISH.load(Ordering::Relaxed))
 }
 
 /// 左右双人的延迟滑条（0–300 ms，0 = 关），文件页和实时页共用。

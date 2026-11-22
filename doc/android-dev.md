@@ -1,13 +1,14 @@
 # 安卓版（开发中）
 
-方案和各步的验证结果见[安卓版技术方案](android-plan.md)。安卓版有两种模式，在同一个 App 里，共用一份配置（参数、左右双人、原声开关）：
+方案和各步的验证结果见[安卓版技术方案](android-plan.md)。安卓版在同一个 App 里有三个页面，共用一份配置（参数、左右双人、原声开关、文件转换的设置）：
 
 - **网页模式**（下面大部分内容）：一个内嵌浏览器，网页里正在出声的那个标签页的声音，实时交给和桌面版同一份的 Rust 引擎处理，再播放出来。不需要任何权限，没有 Shizuku 时用它。
 - **全局模式**：有 Shizuku 或 root 时，把任意 App 的声音截下来处理后重新输出，见[全局模式](shizuku.md)。
+- **文件转换**：和电脑版的文件转换页一样，把音频文件转成双耳效果的 WAV，可以先试听、边听边调，见[文件转换](#文件转换)。
 
 ## 界面和操作
 
-- **两个页面**：网页模式、全局模式，两个页面最上面都有「网页模式 | 全局模式（Shizuku）」切换条，随时切换。第一次打开时 Shizuku 在运行就进全局页，否则进网页；之后记住上次用的页面。全局页的内容见[全局模式 · 使用](shizuku.md#使用)。
+- **三个页面**：网页模式、全局模式、文件转换，每个页面最上面都有「网页 | 全局（Shizuku） | 文件转换」切换条，随时切换。第一次打开时 Shizuku 在运行就进全局页，否则进网页；之后记住上次用的页面。全局页的内容见[全局模式 · 使用](shizuku.md#使用)，文件转换页见[文件转换](#文件转换)。
 - **顶栏**：后退、前进、地址栏（网址直接打开，其它文字用必应搜索）、刷新 / 停止。
 - **底栏**：
   - 开关：**ASMR 效果 / 原声**，就是电脑版的「输出效果 / 监听原声」，存在同一个配置项里。本身就是双耳录音的视频（很多 ASMR 视频是 KU100 录的）切到原声听。
@@ -28,6 +29,21 @@
 - **截不到声音时**：底栏上方会出现红色提示。先自动换成备用的截取方式（声音会停几秒再恢复）；还不行就提示这个 WebView 不支持——声音照常播放，只是没有效果。
 - **只放一个标签页的声音**（默认开）：其它标签页静音，引擎只处理当前标签页（或固定的那个）。关掉后所有标签页都出声、都处理；但看不见的标签页里的视频会被浏览器引擎自动暂停，只有纯音频会继续。
 - **网站兼容**：B 站的手机版网页不让在网页里播放，所以打开 B 站时自动用桌面版网页；其它网站可以在菜单里手动切「桌面版网站」。唤起 App 的链接（`bilibili://` 等）直接拦掉，留在网页里。网页视频可以全屏。
+
+## 文件转换
+
+切换条上的「文件转换」页和电脑版的[文件转换](app-usage.md#文件转换)页功能一一对应：Rust 层的 `files.rs` 照搬桌面版 `gui.rs` 文件页的逻辑，解码、两遍处理、批量、合成、对齐、自动平衡调用的都是共用库里同一份代码，所以同样的文件、同样的配置转出来的结果和电脑版一样。
+
+- **添加**：「添加文件…」打开系统的文件选择器，可以多选；「添加文件夹…」加入文件夹里的全部音频（不含子文件夹，跳过已转换的 `_asmr` 文件）。支持 wav / m4a / mp3 / flac / ogg 等常见格式。能直接读的文件原地读，不复制；读不了的（部分云盘等不能随机读的来源）复制一份到 App 缓存，下次启动时清掉。列表里点 × 去掉一个，点名字选中它（一个一个试听时听的是选中的那个），转换完点它看这个文件的结果说明。
+- **试听**：从手机的默认输出（媒体音量）播放处理后的声音，播放条点 / 拖到哪里就从哪里听；下面的效果面板边听边调，立刻生效（同电脑版）。多音频合成、左右双人时几个声音同时播放，位置图上是各声音此刻的位置。换风格、改参数时接着放；切到别的页面时试听不停。耳机拔掉等输出设备出错时自动停止并提示。
+- **转换并保存**：一个文件时是「转换并保存」，几个时「全部转换并保存（N）」，合成时「合成并保存」。每行显示等待中 / 进度 / 完成（用时）/ 失败，上面是总进度和剩余时间，可以「取消」（没写完的输出删掉）；完成后列表下面是结果说明（时长、响度、真峰值、存到了哪里，合成时还有各段的对齐和平衡前后的响度差），同电脑版。**同时转换** = 同时处理几个文件，默认 = 逻辑核数，长的先处理；整段读进内存，长音频每小时约 0.7 GB，内存小的手机调小。
+- **输出位置**：默认放在源文件所在的文件夹（用「添加文件夹…」加的，对应电脑版的"源文件旁边"），否则放进「音乐/auto-asmr」；名字加 `_asmr`，重名时加 `_2`、`_3`。一个文件或合成时可以用「输出到…」自己选文件名和位置；几个文件时可以用「输出文件夹…」选一个文件夹（会记住，「放回默认」取消）。
+- **多音频合成**：勾上后列表里的前 4 个音频各在一个位置同时播放，合成一个文件。每个音频可以选位置（左耳、右耳、正前、正后、左前……）和音量（±dB），也可以在位置图上拖；**排布**（各自固定 / 一起移动）、**自动平衡**、**自动对齐**（同一首歌的几个版本从一起开始唱的地方叠加，下面写出每段从哪里开始用、裁掉多少）都和电脑版一样，见[多音频合成](app-usage.md#多音频合成)。
+- **左右双人**：把一个音频当成两个人（第 2 个晚 0–300 ms，0 = 关），两个声音的位置、音量、排布、自动平衡都可以改；批量转换时每个文件都这样做，输出比原音频长出这段延迟。见[左右双人](app-usage.md#左右双人一个音频当成两个人)。和网页模式、全局模式的左右双人是同一个设置。
+- **位置图**：合成或左右双人时，效果面板里的位置图换成合成的位置图（同电脑版）：彩色实心点是各声音此刻的位置（试听中带一小段轨迹），旁边是编号，同色的圈是摆好的位置；右侧竖条是各声音的高度。各自固定时拖圈改那个声音的位置；一起移动 + 手动摆位时拖任意一个挪整组（其余的保持错开的角度），在竖条上拖高度，双击竖条回到与耳朵齐平。
+- **其它选项**：取哪个声道（自动（更响的）/ 左 / 右 / 混合）、位深（24 / 16 bit）、从第几秒 / 处理多少秒（0 = 到结尾）、目标响度（−24 … −10 LUFS）。
+- 这些设置（目标响度、声道、位深、同时转换、合成和自动对齐的开关、左右双人的延迟、排布、自动平衡）存在配置文件里，和电脑版通用；文件列表、合成的位置和音量和电脑版一样不存。
+- 和电脑版的差别：没有"把文件拖进窗口"（用选择器）；试听固定从默认输出放，不能选输出设备；转换、试听没有前台服务保护，切到后台久了有的手机会把 App 停掉，长的批量转换最好留在前台。
 
 ## 配置文件
 
@@ -87,10 +103,10 @@ export PATH="$HOME/Library/Android/sdk/platform-tools:$HOME/Library/Android/sdk/
 cd auto-asmr-android && ./gradlew assembleDebug
 ```
 
-生成 `app/build/outputs/apk/debug/app-debug.apk`。发布版用 `./gradlew assembleRelease`（R8 精简，约 20 MB），生成 `app/build/outputs/apk/release/app-release.apk`；签名见[发布](#发布)。
+生成 `app/build/outputs/apk/debug/app-debug.apk`。发布版用 `./gradlew assembleRelease`（R8 精简，约 23 MB），生成 `app/build/outputs/apk/release/app-release.apk`；签名见[发布](#发布)。
 
 - CPU 架构：`arm64-v8a` 和 `armeabi-v7a`（少数 32 位低端机）。Apple Silicon 上的模拟器是 arm64；32 位只编译过，没有设备实测。
-- KU100 / 耳廓数据（`auto-asmr/assets/ku100.bin`、`pinna.bin`，共 15.7 MB）作为 APK 资源，两种架构共用一份，App 启动时读进引擎。共用库为此打开了 `external-data`（数据不编进 .so）；`libasmrhook.so` 约 3.2 MB（arm64）/ 2.2 MB（32 位）。
+- KU100 / 耳廓数据（`auto-asmr/assets/ku100.bin`、`pinna.bin`，共 15.7 MB）作为 APK 资源，两种架构共用一份，App 启动时读进引擎。共用库为此打开了 `external-data`（数据不编进 .so），文件转换另外打开了 `files`（解码 symphonia、写 WAV hound）；`libasmrhook.so` 约 5.6 MB（arm64）/ 4.2 MB（32 位）。
 - Rust 部分不用单独编：`app/src/main/cpp/CMakeLists.txt` 每次构建都会按架构调用 `cargo build --release --target …`（在 `rust/` 下，没改动时很快），把静态库链进 `libasmrhook.so`，再链一份进全局模式服务进程用的 `libasmrglobal.so`（大小相近）。引擎一律按 release 编译，debug 版的 App 也一样。
 - 全局模式的服务进程按路径加载 .so，所以 .so 在安装时解压出来（`useLegacyPackaging = true`），见[全局模式 · 构建](shizuku.md#构建)。
 
@@ -100,7 +116,7 @@ Rust 层自己的测试在电脑上跑：
 cd auto-asmr-android/rust && cargo test --release
 ```
 
-共 10 个：44.1 / 48 / 32 kHz 的流在各种回调长度下不断流、确实被空间化、频率不跑偏；左右双人：打开后 1 号在左、2 号在右、左右两边差不多一样响（48 / 44.1 kHz 都不断流），播放中改延迟只换配置、换排布时重新建、拖回 0 回到单个引擎，值的类型不对时报错；网页声音里没有雨声（打开雨声后再改别的参数，网页没声音时输出仍是静音，左右双人时也一样）；44.1 / 48 / 32 kHz 的流在各种回调长度下不断流、确实被空间化、频率不跑偏；别的 App 传来的文件：电脑版 / 安卓版的配置能认出来并给出概要（风格能认出是哪个预设）、只有窗口状态的文件和普通文本认不出来、检查不改当前设置；单独输出的雨声响度和桌面版引擎里的一样、关掉后淡出停下、网页声音的配置里没有雨声；参数表逐项对得上 `Params`（键存在、范围两端设得上去、每个选项都能设）；按字段改参数和按钮走的是和电脑版相同的逻辑，未知参数、类型不对时报错且参数不变；电脑版配置导入后再导出，电脑版独有的设置都还在；播放中打开手动摆位时换算出的位置和运动模型互逆；参数 RON 读写和风格切换。
+共 11 个：文件转换走和界面相同的 JSON 命令：加入两个文件后播放条的长度对，全部转换后两个输出都在这次任务的暂存目录里、都等着交给界面，交好后列表里显示最终位置；合成时一左一右、改过的音量写进说明、输出一个文件（在下一次任务的目录里）；44.1 / 48 / 32 kHz 的流在各种回调长度下不断流、确实被空间化、频率不跑偏；左右双人：打开后 1 号在左、2 号在右、左右两边差不多一样响（48 / 44.1 kHz 都不断流），播放中改延迟只换配置、换排布时重新建、拖回 0 回到单个引擎，值的类型不对时报错；网页声音里没有雨声（打开雨声后再改别的参数，网页没声音时输出仍是静音，左右双人时也一样）；44.1 / 48 / 32 kHz 的流在各种回调长度下不断流、确实被空间化、频率不跑偏；别的 App 传来的文件：电脑版 / 安卓版的配置能认出来并给出概要（风格能认出是哪个预设）、只有窗口状态的文件和普通文本认不出来、检查不改当前设置；单独输出的雨声响度和桌面版引擎里的一样、关掉后淡出停下、网页声音的配置里没有雨声；参数表逐项对得上 `Params`（键存在、范围两端设得上去、每个选项都能设）；按字段改参数和按钮走的是和电脑版相同的逻辑，未知参数、类型不对时报错且参数不变；电脑版配置导入后再导出，电脑版独有的设置都还在；播放中打开手动摆位时换算出的位置和运动模型互逆；参数 RON 读写和风格切换。
 
 ### 性能基准
 
@@ -163,15 +179,24 @@ adb push target/aarch64-linux-android/release/examples/bench /data/local/tmp/asm
 | `--es mute 1` / `0` | 静音 / 取消静音这个 WebView |
 | `--es import <文件名>` / `--es export <文件名>` | 从 / 往 `/sdcard/Android/data/io.github.nasuiyile.autoasmr/files/` 导入 / 导出配置 |
 | `--es action <按钮>` | 效果面板上的按钮：`style_ear`、`style_ku100`、`style_earclean`、`style_breath`、`reset`、`bg_rain_night`、`bg_off` |
+| `--es page web` / `global` / `files` | 切到哪个页面 |
+| `--es files_add <文件名,…>` | 文件转换页加入 `/sdcard/Android/data/io.github.nasuiyile.autoasmr/files/` 里的这些文件（逗号分隔） |
+| `--es files_op '<JSON>'` | 文件转换页执行一条命令，和界面发给 Rust 的命令相同，例如 `{"op":"preview"}`、`{"op":"seek","s":20}`、`{"op":"stop"}`、`{"op":"convert"}`、`{"op":"cancel"}`；命令都在 `rust/src/files.rs` 的 `handle` 里 |
 
 ```bash
 adb shell am start -n io.github.nasuiyile.autoasmr/.MainActivity --es url "'https://appassets.androidplatform.net/assets/test.html?auto=hls'" --ei style 1
 ```
 
-日志标签：`AsmrHook`（hook 层、雨声流和 App）、`AsmrCore`（Rust 引擎）、`AsmrSettings`（设置）、`AsmrBrowser`（标签页、发声检测）、`AsmrPlayback`（前台服务、自检）、`AsmrPage`（网页的 console）。
+JSON 里有逗号，整条命令要用双引号包起来交给设备上的 shell（不然逗号会被展开）：
 
 ```bash
-adb logcat -s AsmrHook:V AsmrCore:V AsmrSettings:V AsmrBrowser:V AsmrPlayback:V AsmrPage:V
+adb shell "am start -n io.github.nasuiyile.autoasmr/.MainActivity --es page files --es files_op '{\"op\":\"seek\",\"s\":20}'"
+```
+
+日志标签：`AsmrHook`（hook 层、雨声流和 App）、`AsmrCore`（Rust 引擎）、`AsmrSettings`（设置）、`AsmrBrowser`（标签页、发声检测）、`AsmrPlayback`（前台服务、自检）、`AsmrPage`（网页的 console）、`AsmrFiles`（文件转换的读写）。
+
+```bash
+adb logcat -s AsmrHook:V AsmrCore:V AsmrSettings:V AsmrBrowser:V AsmrPlayback:V AsmrPage:V AsmrFiles:V
 ```
 
 **测截取方式**：App 私有目录里的 `files/hook_mode` 决定启动时装哪种 hook——没有这个文件 = PLT hook（ByteHook，默认）；`inline` = 只用备用的 inline hook（ShadowHook）；`both` = 两种都装；`none` = 都不装（用来测自检：网页出声 4 秒后自检会自动换成 inline hook）。只有调试版能写（`run-as`），改完重启 App：
@@ -202,10 +227,11 @@ cd auto-asmr-android && tools/hook_test.sh
 
 | 路径 | 内容 |
 |---|---|
-| `app/src/main/java/…/MainActivity.kt` | 主界面（Compose）：网页 / 全局两个页面的切换，网页页面的顶栏、WebView、底栏、标签页列表、菜单、视频全屏，两个页面共用的文件选择器导入导出和提示；adb 参数 |
+| `app/src/main/java/…/MainActivity.kt` | 主界面（Compose）：网页 / 全局 / 文件转换三个页面的切换，网页页面的顶栏、WebView、底栏、标签页列表、菜单、视频全屏，两个页面共用的文件选择器导入导出和提示；adb 参数 |
 | `app/src/main/java/…/global/` | 全局模式（Shizuku / root）：全局页、起服务进程和连接、前台服务、悬浮球，以及 `server/`（服务进程），见[全局模式 · 代码结构](shizuku.md#代码结构) |
+| `app/src/main/java/…/files/` | 文件转换页：`FilesScreen.kt`（界面：文件列表、合成 / 左右双人、输出位置、选项、按钮、播放条，下面是效果面板）、`MixMap.kt`（合成 / 左右双人的位置图）、`FileSession.kt`（把操作交给 Rust、轮询状态；用系统选择器选的文件交给 Rust 读——能原地读的建符号链接指向打开的文件描述符，不能的复制到缓存；转换结果从暂存目录存到最终位置：选的文件、选的文件夹、源文件所在的文件夹或「音乐/auto-asmr」） |
 | `app/src/main/java/…/Browser.kt` | 标签页和 WebView：UA、拦截唤起 App 的跳转、B 站用桌面版、发声检测和暂停 / 继续的脚本（文档开始时注入，经 WebMessageListener 收发）、只放一个标签页的声音（`setAudioMuted`）、固定标签页、正在出声的标签页在后台仍对 Chromium 报告可见、重开音频流 |
-| `app/src/main/java/…/EffectPanel.kt` | 效果面板：按参数表生成分组、滑条、勾选、选项、种子 |
+| `app/src/main/java/…/EffectPanel.kt` | 效果面板：按参数表生成分组、滑条、勾选、选项、种子（文件转换页也用它，不显示原声开关、位置图换成合成的） |
 | `app/src/main/java/…/PositionMap.kt` | 位置图和高度竖条（刻度和电脑版相同），手动摆位时点 / 拖 |
 | `app/src/main/java/…/Settings.kt` | 设置（两种模式共用）：后台线程里调用 Rust 改参数（同一个参数连续改只送最新值）、读回全部参数、1 秒后自动保存、导入导出、手动摆位开关的逻辑；全局模式连着时把整份配置推给服务进程；雨声由谁放 |
 | `app/src/main/java/…/SharedImport.kt` | 别的 App「用其他应用打开」传来的 `.ron` 文件：读出、只检查不导入、弹窗确认后导入 |
@@ -221,12 +247,14 @@ cd auto-asmr-android && tools/hook_test.sh
 | `app/src/main/cpp/global_jni.c` | 全局模式服务进程的 JNI 层（`global/server/Engine.kt`） |
 | `app/proguard-rules.pro` | 发布版 R8 的保留规则（JNI 类名、方法名不能改；全局模式服务进程按名字加载的 `global.server` 包） |
 | `app/src/main/res/` | 图标（启动图标、通知栏小图标） |
-| `rust/src/lib.rs` | Rust 层的 C 接口和每个流的处理器（下混 → 必要时重采样到 48 kHz → `Engine::process`，左右双人时是共用库的 `LiveMix` → 转回原采样率）；导出函数都 `catch_unwind`，出错的流改成直通 |
-| `rust/src/settings.rs` | 全局设置：整份桌面版格式的配置（`Saved`）、两份引擎配置（完整的给雨声，去掉背景音的给网页声音）、左右双人的合成配置、按字段读写参数（含界面换算的虚拟字段和左右双人那几项）、按钮、导入导出、参数表 |
+| `rust/src/lib.rs` | Rust 层的 C 接口和每个流的处理器（下混 → 必要时重采样到 48 kHz → `Engine::process`，左右双人时是共用库的 `LiveMix` → 转回原采样率）；文件转换的命令入口 `asmr_files`；导出函数都 `catch_unwind`，出错的流改成直通 |
+| `rust/src/settings.rs` | 全局设置：整份桌面版格式的配置（`Saved`）、两份引擎配置（完整的给雨声，去掉背景音的给网页声音）、左右双人的合成配置、按字段读写参数（含界面换算的虚拟字段，左右双人、合成和文件转换那几项）、按钮、导入导出、参数表 |
+| `rust/src/files.rs` | 文件转换：照搬桌面版 `gui.rs` 文件页的逻辑（文件列表、试听、批量转换、合成、自动对齐、左右双人、结果说明），界面通过 JSON 命令（`asmr_files`）操作它、读回整页状态；设置读写和配置文件同一份（`settings.rs`） |
+| `rust/src/aout.rs` | 文件转换试听用的输出流（AAudio），回调里调用共用库的 `live::Pump`（和桌面版试听的声卡回调做的是同一件事） |
 | `rust/src/rain.rs` | 背景雨声单独输出：和桌面版引擎同样的 `sync_rain` + `Rain::render` + 限制器，关掉时淡出 |
 | `rust/src/ui_spec.json` | 参数表：分组、标签、说明、范围、单位，取自桌面版界面；耳廓和耳机型号的选项运行时填 |
 | `rust/examples/bench.rs` | 性能基准 |
 | `tools/hook_test.sh` | 自动验证（网页模式） |
 | `tools/global_server.sh` | 用 adb 直接跑全局模式的服务进程（调试） |
 
-引擎和设置文件格式在 `auto-asmr/src/`（桌面版的库：`dsp/`、`config.rs`，见[构建、发布与开发](development.md#代码结构)）。参数表里的标签和说明是从桌面版 `gui.rs` 抄过来的：改了桌面版的参数界面时，同步改 `ui_spec.json`（`cargo test` 会查出参数表里不存在的参数）。
+引擎和设置文件格式在 `auto-asmr/src/`（桌面版的库：`dsp/`、`config.rs`，文件转换用的 `offline.rs`、`batch.rs`、试听用的 `live.rs`，见[构建、发布与开发](development.md#代码结构)）。文件转换页照搬桌面版 `gui.rs` 文件页的逻辑：改了桌面版文件页的功能时，同步改 `rust/src/files.rs` 和 `files/` 下的界面。参数表里的标签和说明是从桌面版 `gui.rs` 抄过来的：改了桌面版的参数界面时，同步改 `ui_spec.json`（`cargo test` 会查出参数表里不存在的参数）。

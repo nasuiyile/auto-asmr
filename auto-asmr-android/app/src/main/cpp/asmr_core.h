@@ -57,6 +57,10 @@ void asmr_rain_free(void *p);
 int asmr_rain_render(void *p, float *data, int frames);
 void asmr_rain_set_on(void *p, int on);
 
+// 文件转换页：一条命令（JSON，UTF-8）进，整页状态（JSON，UTF-8）出；返回的字节用 asmr_free_bytes 释放
+uint8_t *asmr_files(const uint8_t *cmd, size_t len, size_t *out_len);
+void asmr_free_bytes(uint8_t *p, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

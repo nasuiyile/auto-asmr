@@ -43,7 +43,7 @@ cargo test --release
 
 ## 代码结构
 
-本包分成库和程序两部分：库（`src/lib.rs`）是信号处理 `dsp` 和设置文件格式 `config`，安卓版（`auto-asmr-android/rust`，打开 `external-data`：数据文件不编进库，运行时由 `dsp::data::provide` 提供）和浏览器插件（`auto-asmr-chromium/wasm`，见[浏览器插件](chromium.md)）也依赖它；程序（`src/main.rs`）是桌面版的界面和命令行，音频设备、界面、解码这些依赖都在默认开启的 `desktop` feature 里。只编译库（不带桌面依赖）：
+本包分成库和程序两部分：库（`src/lib.rs`）是信号处理 `dsp`、设置文件格式 `config`、和音频设备无关的实时核心 `live`（试听、实时模式的处理泵）和 `spsc`，打开 `files` feature 时还有文件转换 `offline`（解码、两遍处理、写 WAV）和 `batch`（批量）。安卓版（`auto-asmr-android/rust`，打开 `external-data`：数据文件不编进库，运行时由 `dsp::data::provide` 提供；和 `files`：文件转换页）和浏览器插件（`auto-asmr-chromium/wasm`，见[浏览器插件](chromium.md)）也依赖它；程序（`src/main.rs`）是桌面版的界面和命令行，音频设备（cpal）、界面这些依赖在默认开启的 `desktop` feature 里（它也打开 `files`）。只编译库（不带桌面依赖）：
 
 ```bash
 cargo build --release --lib --no-default-features
@@ -51,13 +51,15 @@ cargo build --release --lib --no-default-features
 
 | 路径 | 内容 |
 |---|---|
-| `src/lib.rs` | 库的入口，导出 `dsp` 和 `config` |
+| `src/lib.rs` | 库的入口，导出 `dsp`、`config`、`live`、`spsc`，打开 `files` 时还有 `offline`、`batch` |
 | `src/config.rs` | 设置文件：关闭时自动保存、「导出 / 导入配置」用的 `Saved` 和读写函数（键值表 `{"app": …}`）。安卓版和浏览器插件读写同一个格式，所以配置文件几边通用 |
 | `src/dsp/testsig.rs` | 合成的测试信号（人声、刮擦声、歌）和积分响度，库和程序的测试、性能测试共用 |
 | `src/dsp/` | 信号处理：数据表、直达声渲染、房间、运动、语音分析、人声处理、响度与限制器、引擎；`mix.rs` 是多音频合成（每个音源一个引擎、位置、响度对齐、相加；左右双人是同一个音频当两个音源、第 2 个晚一点；`LiveMix` 是边播边处理的左右双人：一路输入留一小段历史，第 2 个声音从里面晚一点取，安卓版和浏览器插件处理网页声音用它）；`align.rs` 是合成前的自动对齐（色度 / 频带粗找、起音包络细找、波形逐样本）；`balance.rs` 是合成的自动平衡（短时响度 + 位置增益，往平均拉；主播模式的左右双人边听边算输入响度）；`rain.rs` 是背景音（实时生成的雨声：雨滴谱、撞击脉冲卷 HRIR、流动（8D 环绕的重心）、落地声、屋檐滴水、隔窗、按期望功率定响度），`thunder.rs` 是可选的雷声（曲折闪电通道上的 N 波、空气吸收、天上各方向的 HRIR、回声） |
-| `src/realtime.rs` | 设备枚举、输入输出流、时钟漂移补偿；主播模式的左右双人（麦克风输入记进一小段环形历史，第 2 个声音从里面晚一点取，交给 `mix.rs` 的合成器） |
-| `src/offline.rs` | 文件解码、两遍处理、写 WAV |
-| `src/gui.rs` | 界面 |
+| `src/live.rs` | 和音频设备无关的实时核心（库）：设备回调里调用的处理泵 `Pump`（输入环形缓冲 → 重采样 → 引擎 / 合成 → 输出），试听的音源（单个文件、合成、左右双人）、跳转，主播模式的左右双人（麦克风输入记进一小段环形历史，第 2 个声音从里面晚一点取，交给 `mix.rs` 的合成器），和界面共享的状态 `Shared`。安卓版文件转换页的试听也用它（输出换成 AAudio） |
+| `src/realtime.rs` | 设备枚举、输入输出流（cpal）、时钟漂移补偿，回调里调用 `live.rs` |
+| `src/offline.rs` | 文件解码、两遍处理、写 WAV、转换完成后的说明文字（库，安卓版也用） |
+| `src/batch.rs` | 批量转换：多个文件并行、进度、取消（库，安卓版也用） |
+| `src/gui.rs` | 界面。安卓版的文件转换页（`auto-asmr-android/rust/src/files.rs`）照搬这里文件页的逻辑，改文件页时一起改 |
 | `assets/ku100.bin` | 内嵌数据（10.9 MB） |
 | `tools/export_assets.py` | 从 Python 版的预处理结果重新导出 `assets/ku100.bin` |
 | `tools/bundle_macos.sh` | 打包 macOS 应用 |

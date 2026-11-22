@@ -58,6 +58,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import io.github.nasuiyile.autoasmr.files.FilesScreen
 import io.github.nasuiyile.autoasmr.global.Controller
 import io.github.nasuiyile.autoasmr.global.GlobalScreen
 import io.github.nasuiyile.autoasmr.global.GlobalUi
@@ -82,7 +83,8 @@ import java.io.File
  * 主界面，两个页面：
  * - **网页**：浏览器（地址栏、标签页）+ 底栏（ASMR 开关、处理状态、标签页、效果面板、菜单）。没有 Shizuku 时用它听效果。
  * - **全局**（global/GlobalScreen.kt）：有 Shizuku 或 root 时处理任意 App 的声音。
- * 两个页面共用一份参数（[Settings]），顶上都有「网页模式 | 全局模式」切换条（[ModeSwitch]）。
+ * - **文件转换**（files/FilesScreen.kt）：和电脑版的文件转换页一样，把音频文件转成双耳效果，可以试听。
+ * 三个页面共用一份参数（[Settings]），顶上都有「网页 | 全局（Shizuku） | 文件转换」切换条（[ModeSwitch]）。
  * 第一次打开时，有 Shizuku 就进全局页，否则进网页；之后记住用户上次选的页面。
  *
  * 也可以用 adb 驱动（tools/hook_test.sh）：
@@ -91,7 +93,7 @@ import java.io.File
  * --es action <按钮>（style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off）；
  * --es params '<RON>'；--ei rec <秒>（录下处理前后的声音）；--es ua desktop|mobile；--es mute 1|0；
  * --es import <文件名> / --es export <文件名>（在 /sdcard/Android/data/<包名>/files/ 里，导入 / 导出配置）。
- * 全局模式：--es page global|web；--es launch shizuku|root；--es intercept 1|0；--es dry 1|0；--es ball 1|0；--es exit 1。
+ * 页面：--es page web|global|files。文件转换：--es files_add <文件名,…>（外部文件目录里的）；--es files_op '<JSON 命令>'。全局模式：--es launch shizuku|root；--es intercept 1|0；--es dry 1|0；--es ball 1|0；--es exit 1。
  */
 class MainActivity : ComponentActivity() {
     private lateinit var browser: Browser
@@ -138,7 +140,15 @@ class MainActivity : ComponentActivity() {
         when (intent.getStringExtra("page")) {
             "global" -> setPage(this, Page.GLOBAL)
             "web" -> setPage(this, Page.WEB)
+            "files" -> setPage(this, Page.FILES)
         }
+        // 文件转换页的测试入口（adb）：files_add = 外部文件目录里的文件名（逗号分隔），files_op = 一条命令（JSON）
+        intent.getStringExtra("files_add")?.let { names ->
+            setPage(this, Page.FILES)
+            val dir = getExternalFilesDir(null)
+            io.github.nasuiyile.autoasmr.files.FileSession.addPaths(names.split(',').map { File(dir, it.trim()).path })
+        }
+        intent.getStringExtra("files_op")?.let { io.github.nasuiyile.autoasmr.files.FileSession.cmdJson(it) }
         // 带网址打开的（adb、别的入口）：要看网页，切到网页页面
         if (intent.getStringExtra("url") != null) setPage(this, Page.WEB)
         when (intent.getStringExtra("launch")) {
@@ -187,7 +197,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class Page { WEB, GLOBAL }
+enum class Page { WEB, GLOBAL, FILES }
 
 /** 当前页面；用户选过就记在 ui 偏好里（键 page），没选过时按有没有 Shizuku 决定（见 [Root]）。 */
 var currentPage by mutableStateOf(Page.WEB)
@@ -198,12 +208,15 @@ fun setPage(ctx: android.content.Context, p: Page) {
     ctx.getSharedPreferences("ui", 0).edit().putString("page", p.name).apply()
 }
 
-/** 两个页面顶上的切换条：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）。 */
+/**
+ * 页面顶上的切换条：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）/
+ * 文件转换（和电脑版的文件转换页一样）。
+ */
 @Composable
 fun ModeSwitch(modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
     SingleChoiceSegmentedButtonRow(modifier.fillMaxWidth()) {
-        val pages = listOf(Page.WEB to "网页模式", Page.GLOBAL to "全局模式（Shizuku）")
+        val pages = listOf(Page.WEB to "网页", Page.GLOBAL to "全局（Shizuku）", Page.FILES to "文件转换")
         pages.forEachIndexed { i, (p, label) ->
             SegmentedButton(
                 selected = currentPage == p,
@@ -263,6 +276,10 @@ private fun Root(b: Browser, record: (Int) -> Unit) {
         Page.GLOBAL -> {
             BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
             GlobalScreen(onImport = onImport, onExport = onExport)
+        }
+        Page.FILES -> {
+            BackHandler { (ctx as? ComponentActivity)?.moveTaskToBack(true) }
+            FilesScreen(onImport = onImport, onExport = onExport)
         }
     }
 

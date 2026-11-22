@@ -11,10 +11,15 @@ name = "asmr_android"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-# external-data：KU100 / 耳廓数据不编进 .so，启动时从 APK 资源读入（各 CPU 架构共用一份）
-auto-asmr = { path = "../../auto-asmr", default-features = false, features = ["external-data"] }
+# external-data：KU100 / 耳廓数据不编进 .so，启动时从 APK 资源读入（各 CPU 架构共用一份）；
+# files：文件转换（解码、转换、批量、多音频合成，和桌面版同一份代码），给文件转换页用
+auto-asmr = { path = "../../auto-asmr", default-features = false, features = ["external-data", "files"] }
 ron = "0.12"
 serde_json = "1"
+
+[dev-dependencies]
+# 测试里写测试用的 WAV
+hound = "3.5"
 
 [profile.release]
 opt-level = 3

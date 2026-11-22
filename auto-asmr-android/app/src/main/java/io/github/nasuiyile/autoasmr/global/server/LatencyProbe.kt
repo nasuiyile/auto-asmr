@@ -2,8 +2,12 @@ package io.github.nasuiyile.autoasmr.global.server
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTimestamp
 import android.media.AudioTrack
+import android.os.Binder
+import android.os.IBinder
+import android.os.Process
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -14,8 +18,11 @@ import kotlin.math.sin
  * 不拦截时 present − write = 正常播放的延迟；拦截时用服务进程报的 onset present − 这里的 write = 拦截后的延迟。
  * 要以和服务进程不同的身份运行（服务进程是 shell 时用 root 跑它，反之亦然），否则会被当成服务自己的声音排除掉。
  *
+ * 第二个参数是 `voice` 时模拟语音通话类 App（QQ 通话、语音房）：先把音频模式设成 MODE_IN_COMMUNICATION，
+ * 再用"语音通话"用途（USAGE_VOICE_COMMUNICATION）播放，用来验证全局模式截得到这类声音。
+ *
  * ```
- * CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.LatencyProbe [短音个数]
+ * CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.LatencyProbe [短音个数] [voice]
  * ```
  */
 object LatencyProbe {
@@ -23,9 +30,17 @@ object LatencyProbe {
     fun main(args: Array<String>) {
         val sr = 48_000
         val clicks = args.firstOrNull()?.toIntOrNull() ?: 10
+        val voice = args.getOrNull(1) == "voice"
         val block = 480
+        // 通话模式由持有这个 token 的进程占着，进程退出时系统自动恢复
+        val modeToken = if (voice) setCommunicationMode() else null
+        val attrs = if (voice) {
+            AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+        } else {
+            AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build()
+        }
         val t = AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
+            .setAudioAttributes(attrs)
             .setAudioFormat(
                 AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setSampleRate(sr)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build()
@@ -68,8 +83,24 @@ object LatencyProbe {
         t.stop()
         t.release()
         for (k in 0 until clicks) println("click $k write_ns=${writeNs[k]} present_ns=${presentNs[k]}")
+        if (modeToken != null) println("usage=VOICE_COMMUNICATION")
         System.out.flush()
         // AudioTrack 会留下非守护线程，main 返回后 app_process 不会自己退出
         kotlin.system.exitProcess(0)
     }
+
+    /** 直接调 AudioService.setMode(MODE_IN_COMMUNICATION)（app_process 里没有 App 的 Context），返回占着模式的 token。 */
+    private fun setCommunicationMode(): IBinder? = runCatching {
+        val b = Class.forName("android.os.ServiceManager").getMethod("getService", String::class.java).invoke(null, "audio") as IBinder
+        val svc = Class.forName("android.media.IAudioService\$Stub").getMethod("asInterface", IBinder::class.java).invoke(null, b)!!
+        val token = Binder()
+        val pkg = if (Process.myUid() == 0) "root" else "com.android.shell"
+        val m = svc.javaClass.methods.first { it.name == "setMode" }
+        when (m.parameterTypes.size) {
+            3 -> m.invoke(svc, AudioManager.MODE_IN_COMMUNICATION, token, pkg)
+            else -> m.invoke(svc, AudioManager.MODE_IN_COMMUNICATION, token)
+        }
+        println("mode=${svc.javaClass.getMethod("getMode").invoke(svc)}（3 = MODE_IN_COMMUNICATION）")
+        token
+    }.onFailure { println("setMode 失败：$it") }.getOrNull()
 }

@@ -1,15 +1,12 @@
 //! auto-asmr：KU100 双耳 ASMR 空间化。一个程序两个功能——实时（主播用）和音频文件转换。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod batch;
 mod cli;
 mod gui;
-mod offline;
 mod realtime;
-mod spsc;
 
-// 信号处理和设置文件格式在库里（src/lib.rs），这里引进来，其余模块照旧用 `crate::dsp::…` / `crate::config::…`
-use auto_asmr::{config, dsp};
+// 信号处理、设置文件格式、实时处理核心、文件转换在库里（src/lib.rs），这里引进来，其余模块照旧用 `crate::dsp::…` 等
+use auto_asmr::{batch, config, dsp, live, offline, spsc};
 
 /// Windows 图形程序默认没有控制台：从命令行带参数启动时，接到父进程的控制台上才能看到输出。
 #[cfg(windows)]

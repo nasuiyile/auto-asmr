@@ -949,6 +949,22 @@ JNIEXPORT void JNICALL JNI_FN(setDry)(JNIEnv *env, jclass cls, jboolean dry) {
     atomic_store(&g_mode, dry ? MODE_BYPASS : MODE_ASMR);
 }
 
+// 文件转换页（rust/src/files.rs）：命令和状态都按 UTF-8 字节传（文件名里可能有 JNI 字符串处理不了的字符）
+JNIEXPORT jbyteArray JNICALL JNI_FN(files)(JNIEnv *env, jclass cls, jbyteArray cmd) {
+    (void)cls;
+    jsize n = (*env)->GetArrayLength(env, cmd);
+    jbyte *c = (*env)->GetByteArrayElements(env, cmd, NULL);
+    if (!c) return NULL;
+    size_t out_len = 0;
+    uint8_t *out = asmr_files((const uint8_t *)c, (size_t)n, &out_len);
+    (*env)->ReleaseByteArrayElements(env, cmd, c, JNI_ABORT);
+    if (!out) return NULL;
+    jbyteArray a = (*env)->NewByteArray(env, (jsize)out_len);
+    if (a) (*env)->SetByteArrayRegion(env, a, 0, (jsize)out_len, (const jbyte *)out);
+    asmr_free_bytes(out, out_len);
+    return a;
+}
+
 JNIEXPORT jfloatArray JNICALL JNI_FN(manualFromPose)(JNIEnv *env, jclass cls, jfloat az, jfloat el, jfloat r) {
     (void)cls;
     float out[3];

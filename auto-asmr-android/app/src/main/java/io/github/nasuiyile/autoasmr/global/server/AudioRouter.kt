@@ -7,16 +7,27 @@ import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.os.HandlerThread
 import android.os.Process
+import android.os.SystemClock
 import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * 拦截 → 处理 → 重新输出。
+ * 拦截 → 处理 → 重新输出。分两路，各按原来的音量和去向放，和没拦截时一样：
+ * - 媒体一路：媒体 / 游戏 / 未知用途的播放 → 媒体用途的输出流（跟媒体音量）；
+ * - 通话一路：语音通话用途的播放（QQ / 微信通话、语音房里对方的声音）→ 语音通话用途的输出流
+ *   （跟通话音量，去向和通话一样：听筒 / 免提 / 耳机 / 蓝牙）。
  *
- * 1. 先建自己的输出流（AudioTrack，用途 = 媒体，正常走耳机 / 扬声器）。
- * 2. 注册动态音频策略：用途是媒体 / 游戏 / 未知的播放，排除自己的 UID 和输出流的会话号，只回环（ROUTE_FLAG_LOOP_BACK）。
- * 3. 从策略建录音端并开始录：这一刻起，匹配到的 App 的声音改送进 remote submix，不再出现在耳机里。
- * 4. 音频线程：读一块（10 ms）→ 引擎处理（监听原声时不处理，同安卓版）→ 写进自己的输出流。
+ * 为什么分两路：截到的是调音量之前的声音，放出来时按输出流的用途决定用哪个音量、走哪个设备。合成一路只能挑一种，
+ * 另一种声音的音量就不对了（例如通话时按音量键调不了对方的声音，或者调通话音量时音乐也跟着变）。
+ *
+ * 1. 先建两条输出流（拿到会话号）。
+ * 2. 注册动态音频策略，里面两个混音（一路一个），按用途分；都排除自己的 UID 和两条输出流的会话号，只回环（ROUTE_FLAG_LOOP_BACK）。
+ * 3. 从策略给每个混音建录音端并开始录：这一刻起，匹配到的 App 的声音改送进 remote submix，不再出现在耳机里。
+ * 4. 每路一个音频线程：读一块（10 ms）→ 引擎处理（每路一个处理器，参数共用；监听原声时不处理，同安卓版）→ 写进这一路的输出流。
+ *    连续 2 秒全是静音就暂停这一路的输出流，所以没有通话时通话一路不占输出。
+ *
+ * 通话一路的输出是浮点立体声，和通话专用的直通输出（VOIP_RX，常是 16 位单声道）格式对不上，系统会退回普通混音输出，
+ * 立体声保得住。开始放时查一次它所在输出的声道数，万一是单声道就换成媒体用途（立体声保住，代价是音量跟媒体走）。
  *
  * 停止时反过来：先停录音（各 App 的声音自动回到原来的设备），再注销策略。
  * 进程被杀时系统发现策略的回调 binder 断了，也会自动注销，声音恢复原样。
@@ -27,102 +38,111 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
         const val CH = 2
         /** 每块 10 ms。 */
         const val BLOCK = 480
-        val USAGES = intArrayOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN)
+        /** 媒体一路截的用途（闹钟、通知、铃声、导航语音、系统提示音不截）。 */
+        val MEDIA_USAGES = intArrayOf(AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN)
+        /** 通话一路截的用途。 */
+        val VOICE_USAGES = intArrayOf(AudioAttributes.USAGE_VOICE_COMMUNICATION)
         /** 连续这么多帧全零就暂停输出流（没有 App 在出声时不占着输出）。 */
         const val GATE_FRAMES = SR * 2L
         /** 输出缓冲的起始大小（毫秒）。 */
         const val START_OUT_MS = 30
+        /** 通话一路两次查声道数至少隔这么久（毫秒）。 */
+        const val CHECK_GAP_MS = 30_000L
     }
 
     private val policyThread = HandlerThread("asmr-policy").apply { start() }
     private var policy: Any? = null
-    private var record: AudioRecord? = null
-    private var track: AudioTrack? = null
-    private var proc = 0L
-    private var worker: Thread? = null
+    /** [0] 媒体一路，[1] 通话一路；没在拦截时为空。 */
+    @Volatile private var lanes: List<Lane> = emptyList()
     @Volatile private var running = false
     /** 监听原声：不经过引擎，原样放出（和安卓版一样是直接切换）。 */
     @Volatile var dry = false
     /** 测延迟时打开（--onset）：每个声音的开头放出来时发一行 onset。 */
     @Volatile var reportOnsets = false
 
-    // ---- 统计：音频线程写，统计线程读
-    @Volatile var peakIn = 0f
-    @Volatile var peakOut = 0f
-    @Volatile var framesIn = 0L
-    @Volatile var procNs = 0L
-    @Volatile var gated = true
-    @Volatile var lagInMs = Float.NaN
-    @Volatile var lagOutMs = Float.NaN
-    @Volatile var outBufMs = 0f
-    @Volatile var readErrors = 0
+    // ---- 统计：两路合起来（音频线程写，统计线程读）
+    var peakIn: Float
+        get() = lanes.maxOfOrNull { it.peakIn } ?: 0f
+        set(v) = lanes.forEach { it.peakIn = v }
+    var peakOut: Float
+        get() = lanes.maxOfOrNull { it.peakOut } ?: 0f
+        set(v) = lanes.forEach { it.peakOut = v }
+    val framesIn: Long get() = lanes.maxOfOrNull { it.framesIn } ?: 0L
+    val procNs: Long get() = lanes.sumOf { it.procNs }
+    val gated: Boolean get() = lanes.all { it.gated }
+    val lagInMs: Float get() = shown()?.lagInMs ?: Float.NaN
+    val lagOutMs: Float get() = shown()?.lagOutMs ?: Float.NaN
+    val outBufMs: Float get() = shown()?.outBufMs ?: 0f
+    val readErrors: Int get() = lanes.sumOf { it.readErrors }
+    val underruns: Int get() = lanes.sumOf { it.underruns }
     var engineLatencyMs = 0f
         private set
-    val underruns: Int get() = runCatching { track?.underrunCount ?: 0 }.getOrDefault(0)
     val isRunning: Boolean get() = running
 
-    /** 处理器此刻的状态（见 [Engine.procTele]）；没在拦截时为空。和 [stop] 互斥，处理器不会在读的时候被释放。 */
+    /** 界面上显示哪一路：在出声的那路（两路都在出声时显示通话一路），都没出声时显示媒体一路。 */
+    private fun shown(): Lane? {
+        val ls = lanes
+        return ls.lastOrNull { !it.gated } ?: ls.firstOrNull()
+    }
+
+    /** 处理器此刻的状态（见 [Engine.procTele]，取 [shown] 那一路）；没在拦截时为空。和 [stop] 互斥，处理器不会在读的时候被释放。 */
     @Synchronized
-    fun tele(): FloatArray? = if (proc != 0L) Engine.procTele(proc) else null
+    fun tele(): FloatArray? {
+        val p = shown()?.proc ?: 0L
+        return if (p != 0L) Engine.procTele(p) else null
+    }
 
     /** 开始拦截；返回出错原因，成功时 null。[onlyUids] 不空时只拦这些 App。 */
     @Synchronized
     fun start(excludeUids: IntArray, onlyUids: IntArray): String? {
         if (running) return null
         try {
-            val outFmt = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                .setSampleRate(SR)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                .build()
-            val minOut = AudioTrack.getMinBufferSize(SR, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
-            val t = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build()
-                )
-                .setAudioFormat(outFmt)
-                .setBufferSizeInBytes(max(minOut, BLOCK * CH * 4 * 4))
-                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            track = t
-            if (t.state != AudioTrack.STATE_INITIALIZED) return fail("输出流初始化失败")
-
-            val rule = HiddenAudio.buildRule(USAGES, excludeUids, onlyUids, intArrayOf(t.audioSessionId), emit)
+            val ls = listOf(Lane("媒体", false, MEDIA_USAGES), Lane("通话", true, VOICE_USAGES))
+            lanes = ls
+            for (l in ls) {
+                val t = buildTrack(l.voice, 0) ?: return fail("${l.name}一路的输出流初始化失败")
+                l.track = t
+                l.session = t.audioSessionId
+            }
+            val sessions = ls.map { it.session }.toIntArray()
             val mixFmt = AudioFormat.Builder()
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setSampleRate(SR)
                 .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                 .build()
-            val mix = HiddenAudio.loopbackMix(rule, mixFmt)
-            val p = HiddenAudio.buildPolicy(ProcessEnv.context(), mix, policyThread.looper)
+            for (l in ls) {
+                val rule = HiddenAudio.buildRule(l.usages, excludeUids, onlyUids, sessions, emit)
+                l.mix = HiddenAudio.loopbackMix(rule, mixFmt)
+            }
+            val p = HiddenAudio.buildPolicy(ProcessEnv.context(), ls.map { it.mix!! }, policyThread.looper)
             val r = HiddenAudio.register(p)
             if (r != 0) return fail("registerAudioPolicy 返回 $r（这个身份没有 MODIFY_AUDIO_ROUTING？）")
             policy = p
 
-            val rec = HiddenAudio.recordSink(p, mix) ?: return fail("createAudioRecordSink 返回空")
-            record = rec
-            if (rec.state != AudioRecord.STATE_INITIALIZED) return fail("录音端初始化失败")
-
-            proc = Engine.procNew(SR, CH)
-            if (proc == 0L) emit("warn 引擎处理器建不起来，只做直通")
-            engineLatencyMs = if (proc != 0L) Engine.procLatencyMs(proc) else 0f
-
-            resetStats()
-            running = true
-            HiddenAudio.startRecording(rec)?.let { emit("warn startRecording 出错（$it），已绕开厂商代码直接开始录音") }
-            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                running = false
-                return fail("录音端开不起来")
+            for (l in ls) {
+                val rec = HiddenAudio.recordSink(p, l.mix!!) ?: return fail("createAudioRecordSink 返回空")
+                l.record = rec
+                if (rec.state != AudioRecord.STATE_INITIALIZED) return fail("${l.name}一路的录音端初始化失败")
+                l.proc = Engine.procNew(SR, CH)
+                if (l.proc == 0L) emit("warn ${l.name}一路的引擎处理器建不起来，只做直通")
             }
-            worker = Thread(::loop, "asmr-route").apply { start() }
+            engineLatencyMs = ls[0].proc.let { if (it != 0L) Engine.procLatencyMs(it) else 0f }
+
+            running = true
+            for (l in ls) {
+                val rec = l.record!!
+                HiddenAudio.startRecording(rec)?.let { emit("warn startRecording 出错（$it），已绕开厂商代码直接开始录音") }
+                if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    running = false
+                    return fail("${l.name}一路的录音端开不起来")
+                }
+            }
+            for (l in ls) l.worker = Thread(l::loop, if (l.voice) "asmr-route-voice" else "asmr-route").apply { start() }
             emit(
                 "log 拦截开始：" +
                     (if (onlyUids.isNotEmpty()) "只拦 UID ${onlyUids.joinToString(",")}" else "排除 UID ${excludeUids.joinToString(",")}") +
-                    "；输出会话 ${t.audioSessionId}，输出缓冲 ${t.bufferSizeInFrames} 帧，录音缓冲 ${rec.bufferSizeInFrames} 帧"
+                    "；分两路：" + ls.joinToString("，") { "${it.name}（输出会话 ${it.session}）" } +
+                    "；输出缓冲 ${ls[0].track?.bufferSizeInFrames} 帧，录音缓冲 ${ls[0].record?.bufferSizeInFrames} 帧"
             )
             return null
         } catch (e: Throwable) {
@@ -134,9 +154,12 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
     @Synchronized
     fun stop() {
         running = false
-        record?.let { r -> runCatching { HiddenAudio.stopRecording(r) } } // 让阻塞在 read 里的音频线程返回
-        worker?.join(2000)
-        worker = null
+        val ls = lanes
+        for (l in ls) l.record?.let { r -> runCatching { HiddenAudio.stopRecording(r) } } // 让阻塞在 read 里的音频线程返回
+        for (l in ls) {
+            l.worker?.join(2000)
+            l.worker = null
+        }
         release()
     }
 
@@ -150,147 +173,275 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
 
     private fun release() {
         running = false
-        record?.let { r -> runCatching { HiddenAudio.stopRecording(r) }; runCatching { r.release() } }
-        record = null
+        val ls = lanes
+        for (l in ls) {
+            l.record?.let { r -> runCatching { HiddenAudio.stopRecording(r) }; runCatching { r.release() } }
+            l.record = null
+        }
         policy?.let { p -> runCatching { HiddenAudio.unregister(p) }.onFailure { emit("warn 注销策略失败：${HiddenAudio.describe(it)}") } }
         policy = null
-        track?.let { t -> runCatching { t.pause(); t.flush() }; runCatching { t.release() } }
-        track = null
-        if (proc != 0L) Engine.procFree(proc)
-        proc = 0L
-    }
-
-    private fun resetStats() {
-        peakIn = 0f; peakOut = 0f; framesIn = 0L; procNs = 0L; gated = true
-        lagInMs = Float.NaN; lagOutMs = Float.NaN; outBufMs = 0f; readErrors = 0
-    }
-
-    /** 音频线程。出错时报出来（不然线程里没接住的异常会让整个服务进程崩掉，App 那边只看到进程退出）。 */
-    private fun loop() {
-        try {
-            loopInner()
-        } catch (e: Throwable) {
-            android.util.Log.e("AsmrShizuku", "loop", e)
-            if (running) emit("error 音频线程出错：${HiddenAudio.describe(e)}（${stackOf(e)}）")
+        for (l in ls) {
+            l.track?.let { t -> runCatching { t.pause(); t.flush() }; runCatching { t.release() } }
+            l.track = null
+            if (l.proc != 0L) Engine.procFree(l.proc)
+            l.proc = 0L
         }
+        lanes = emptyList()
     }
 
-    private fun loopInner() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val rec = record ?: return
-        val t = track ?: return
-        val s16 = ShortArray(BLOCK * CH)
-        val buf = FloatArray(BLOCK * CH)
-        val tsIn = AudioTimestamp()
-        val tsOut = AudioTimestamp()
-        var silentFrames = GATE_FRAMES
-        var playing = false
-        var written = 0L
-        var nextMeasure = 0L
-        var lastUnderruns = t.underrunCount
-        var quietRun = 0L
-        var onsetFrame = -1L
-        // 输出缓冲先压到 START_OUT_MS：写满就阻塞，所以这就是输出这一段的延迟上限；断流时再往上加
-        t.bufferSizeInFrames = minOf(t.bufferCapacityInFrames, SR * START_OUT_MS / 1000)
-        while (running) {
-            val n = rec.read(s16, 0, s16.size, AudioRecord.READ_BLOCKING)
-            if (n < 0) {
-                readErrors++
-                if (n == AudioRecord.ERROR_DEAD_OBJECT) {
-                    emit("error 录音端失效（$n）")
-                    break
-                }
-                continue
-            }
-            if (n == 0) continue
-            val frames = n / CH
-            var pk = 0f
-            for (i in 0 until n) {
-                val v = s16[i] * (1f / 32768f)
-                buf[i] = v
-                val a = abs(v)
-                if (a > pk) pk = a
-            }
-            framesIn += frames
-            if (pk > peakIn) peakIn = pk
+    /**
+     * 建输出流。[voice] = 语音通话用途（音量跟通话音量，去向和通话一样），否则媒体用途。
+     * [session] 不为 0 时沿用这个会话号（策略按它排除自己的声音，换流时不能变）。建不起来时为空。
+     */
+    private fun buildTrack(voice: Boolean, session: Int): AudioTrack? {
+        val fmt = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+            .setSampleRate(SR)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .build()
+        val attrs = if (voice) {
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        } else {
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+        }
+        val minOut = AudioTrack.getMinBufferSize(SR, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
+        val b = AudioTrack.Builder()
+            .setAudioAttributes(attrs)
+            .setAudioFormat(fmt)
+            .setBufferSizeInBytes(max(minOut, BLOCK * CH * 4 * 4))
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+        if (session != 0) b.setSessionId(session)
+        val t = b.build()
+        if (t.state != AudioTrack.STATE_INITIALIZED) {
+            t.release()
+            return null
+        }
+        return t
+    }
 
-            // 每 0.5 s 量一次两端的积压
-            val now = System.nanoTime()
-            if (now >= nextMeasure) {
-                nextMeasure = now + 500_000_000L
-                if (rec.getTimestamp(tsIn, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
-                    // 刚读到的最后一帧是什么时候录下的
-                    val capturedAt = tsIn.nanoTime + (framesIn - tsIn.framePosition) * 1_000_000_000L / SR
-                    lagInMs = (now - capturedAt) / 1e6f
-                }
-                if (playing && t.getTimestamp(tsOut)) {
-                    val presented = tsOut.framePosition + (now - tsOut.nanoTime) * SR / 1_000_000_000L
-                    lagOutMs = (written - presented) * 1000f / SR
-                }
-                // 断流了就把输出缓冲加大一块（每次 +5 ms，最多到建流时的容量）
-                val u = t.underrunCount
-                if (u > lastUnderruns) {
-                    lastUnderruns = u
-                    val want = minOf(t.bufferCapacityInFrames, t.bufferSizeInFrames + BLOCK / 2)
-                    if (want > t.bufferSizeInFrames) t.bufferSizeInFrames = want
-                }
-                outBufMs = t.bufferSizeInFrames * 1000f / SR
-            }
+    /** 一路：一个混音 → 录音端 → 处理器 → 输出流。 */
+    private inner class Lane(val name: String, val voice: Boolean, val usages: IntArray) {
+        var mix: Any? = null
+        var record: AudioRecord? = null
+        @Volatile var track: AudioTrack? = null
+        var session = 0
+        @Volatile var proc = 0L
+        var worker: Thread? = null
+        /** 输出流现在是不是语音通话用途；[wantVoice] 和它不一样时音频线程换流（通话一路在单声道输出上时换成媒体用途）。 */
+        @Volatile var outVoice = voice
+        @Volatile var wantVoice = voice
+        private var lastCheck = -CHECK_GAP_MS
+        private var lastChannels: Int? = null
 
-            silentFrames = if (pk == 0f) silentFrames + frames else 0
-            if (silentFrames >= GATE_FRAMES) {
-                if (playing) {
-                    t.pause()
-                    playing = false
-                    gated = true
+        @Volatile var peakIn = 0f
+        @Volatile var peakOut = 0f
+        @Volatile var framesIn = 0L
+        @Volatile var procNs = 0L
+        @Volatile var gated = true
+        @Volatile var lagInMs = Float.NaN
+        @Volatile var lagOutMs = Float.NaN
+        @Volatile var outBufMs = 0f
+        @Volatile var readErrors = 0
+        val underruns: Int get() = runCatching { track?.underrunCount ?: 0 }.getOrDefault(0)
+
+        /** 音频线程。出错时报出来（不然线程里没接住的异常会让整个服务进程崩掉，App 那边只看到进程退出）。 */
+        fun loop() {
+            try {
+                loopInner()
+            } catch (e: Throwable) {
+                android.util.Log.e("AsmrShizuku", "loop $name", e)
+                if (running) emit("error ${name}一路的音频线程出错：${HiddenAudio.describe(e)}（${stackOf(e)}）")
+            }
+        }
+
+        /**
+         * 通话一路开始放时，在另一个线程里查一次它所在输出的声道数（读 dumpsys 要几十毫秒，不放在音频线程上做；
+         * 等 0.5 s 让系统把路由定下来）。单声道就让音频线程换成媒体用途。
+         */
+        private fun checkChannels() {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastCheck < CHECK_GAP_MS) return
+            lastCheck = now
+            Thread({
+                try {
+                    Thread.sleep(500)
+                } catch (e: InterruptedException) {
+                    return@Thread
                 }
-                continue
+                if (!running || !outVoice) return@Thread
+                val ch = HiddenAudio.outputChannels(session)
+                if (ch == 1) {
+                    wantVoice = false
+                    emit("warn 这台手机把语音通话用途的声音放在单声道输出上，通话一路改用媒体用途（处理后的通话声音跟媒体音量走）")
+                } else if (ch != lastChannels) {
+                    emit("log 通话一路的输出：${ch?.let { "$it 声道" } ?: "声道数查不到"}")
+                }
+                lastChannels = ch
+            }, "asmr-check").apply { isDaemon = true; start() }
+        }
+
+        /**
+         * 换输出流的用途（音频线程上调用）。同一个会话号里的播放流必须是同一类用途（AudioFlinger 会拒绝，
+         * 日志 `mismatched strategy`），所以先放掉旧的再建新的；正在放的旧流要等混音线程下一轮才撤下来，
+         * 建不起来时隔 10 ms 再试，最多试 0.3 s。还是建不起来返回空。
+         */
+        private fun swapTrack(old: AudioTrack, toVoice: Boolean): AudioTrack? {
+            runCatching { old.pause(); old.flush() }
+            runCatching { old.release() }
+            var err: Throwable? = null
+            for (i in 0 until 30) {
+                val t = try {
+                    buildTrack(toVoice, session)
+                } catch (e: Throwable) {
+                    err = e
+                    null
+                }
+                if (t != null) {
+                    track = t
+                    outVoice = toVoice
+                    emit("log ${name}一路的输出改用${if (toVoice) "语音通话" else "媒体"}用途")
+                    return t
+                }
+                Thread.sleep(10)
             }
-            if (!playing) {
-                t.play()
-                playing = true
-                gated = false
-            }
-            // 测延迟（配合 LatencyProbe）：静了 ≥ 0.2 s 后第一个超过 0.01 的样本算一个声音的开头，
-            // 记下它会落在输出流的第几帧，等输出流放到那一帧时报出放出来的时刻
-            if (reportOnsets && onsetFrame < 0) {
-                if (pk < 0.01f) {
-                    quietRun += frames
-                } else {
-                    if (quietRun >= SR / 5) {
-                        var i = 0
-                        while (i < n && abs(buf[i]) < 0.01f) i++
-                        onsetFrame = written + i / CH
+            track = null
+            emit("error ${name}一路的输出流建不起来" + (err?.let { "：${HiddenAudio.describe(it)}" } ?: ""))
+            return null
+        }
+
+        private fun loopInner() {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            val rec = record ?: return
+            var t = track ?: return
+            val s16 = ShortArray(BLOCK * CH)
+            val buf = FloatArray(BLOCK * CH)
+            val tsIn = AudioTimestamp()
+            val tsOut = AudioTimestamp()
+            var silentFrames = GATE_FRAMES
+            var playing = false
+            var written = 0L
+            var nextMeasure = 0L
+            var lastUnderruns = t.underrunCount
+            var quietRun = 0L
+            var onsetFrame = -1L
+            // 输出缓冲先压到 START_OUT_MS：写满就阻塞，所以这就是输出这一段的延迟上限；断流时再往上加
+            t.bufferSizeInFrames = minOf(t.bufferCapacityInFrames, SR * START_OUT_MS / 1000)
+            while (running) {
+                val n = rec.read(s16, 0, s16.size, AudioRecord.READ_BLOCKING)
+                if (n < 0) {
+                    readErrors++
+                    if (n == AudioRecord.ERROR_DEAD_OBJECT) {
+                        emit("error ${name}一路的录音端失效（$n）")
+                        break
                     }
-                    quietRun = 0
+                    continue
                 }
-            }
-            if (proc != 0L && !dry) {
-                val t0 = System.nanoTime()
-                Engine.procProcess(proc, buf, frames)
-                procNs += System.nanoTime() - t0
-            }
-            var po = 0f
-            for (i in 0 until n) {
-                val a = abs(buf[i])
-                if (a > po) po = a
-            }
-            if (po > peakOut) peakOut = po
-            var off = 0
-            while (off < n && running) {
-                val w = t.write(buf, off, n - off, AudioTrack.WRITE_BLOCKING)
-                if (w < 0) {
-                    emit("warn 写输出流出错（$w）")
-                    break
+                if (n == 0) continue
+                if (wantVoice != outVoice) {
+                    t = swapTrack(t, wantVoice) ?: break
+                    playing = false
+                    written = 0
+                    onsetFrame = -1
+                    lastUnderruns = t.underrunCount
+                    t.bufferSizeInFrames = minOf(t.bufferCapacityInFrames, SR * START_OUT_MS / 1000)
                 }
-                off += w
-            }
-            written += frames
-            if (onsetFrame >= 0 && t.getTimestamp(tsOut) && tsOut.framePosition >= onsetFrame) {
-                val presentNs = tsOut.nanoTime - (tsOut.framePosition - onsetFrame) * 1_000_000_000L / SR +
-                    (engineLatencyMs * 1e6f).toLong()
-                emit("onset present_ns=$presentNs")
-                onsetFrame = -1
+                val frames = n / CH
+                var pk = 0f
+                for (i in 0 until n) {
+                    val v = s16[i] * (1f / 32768f)
+                    buf[i] = v
+                    val a = abs(v)
+                    if (a > pk) pk = a
+                }
+                framesIn += frames
+                if (pk > peakIn) peakIn = pk
+
+                // 每 0.5 s 量一次两端的积压
+                val now = System.nanoTime()
+                if (now >= nextMeasure) {
+                    nextMeasure = now + 500_000_000L
+                    if (rec.getTimestamp(tsIn, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
+                        // 刚读到的最后一帧是什么时候录下的
+                        val capturedAt = tsIn.nanoTime + (framesIn - tsIn.framePosition) * 1_000_000_000L / SR
+                        lagInMs = (now - capturedAt) / 1e6f
+                    }
+                    if (playing && t.getTimestamp(tsOut)) {
+                        val presented = tsOut.framePosition + (now - tsOut.nanoTime) * SR / 1_000_000_000L
+                        lagOutMs = (written - presented) * 1000f / SR
+                    }
+                    // 断流了就把输出缓冲加大一块（每次 +5 ms，最多到建流时的容量）
+                    val u = t.underrunCount
+                    if (u > lastUnderruns) {
+                        lastUnderruns = u
+                        val want = minOf(t.bufferCapacityInFrames, t.bufferSizeInFrames + BLOCK / 2)
+                        if (want > t.bufferSizeInFrames) t.bufferSizeInFrames = want
+                    }
+                    outBufMs = t.bufferSizeInFrames * 1000f / SR
+                }
+
+                silentFrames = if (pk == 0f) silentFrames + frames else 0
+                if (silentFrames >= GATE_FRAMES) {
+                    if (playing) {
+                        t.pause()
+                        playing = false
+                        gated = true
+                    }
+                    continue
+                }
+                if (!playing) {
+                    t.play()
+                    playing = true
+                    gated = false
+                    if (outVoice) checkChannels()
+                }
+                // 测延迟（配合 LatencyProbe）：静了 ≥ 0.2 s 后第一个超过 0.01 的样本算一个声音的开头，
+                // 记下它会落在输出流的第几帧，等输出流放到那一帧时报出放出来的时刻
+                if (reportOnsets && onsetFrame < 0) {
+                    if (pk < 0.01f) {
+                        quietRun += frames
+                    } else {
+                        if (quietRun >= SR / 5) {
+                            var i = 0
+                            while (i < n && abs(buf[i]) < 0.01f) i++
+                            onsetFrame = written + i / CH
+                        }
+                        quietRun = 0
+                    }
+                }
+                if (proc != 0L && !dry) {
+                    val t0 = System.nanoTime()
+                    Engine.procProcess(proc, buf, frames)
+                    procNs += System.nanoTime() - t0
+                }
+                var po = 0f
+                for (i in 0 until n) {
+                    val a = abs(buf[i])
+                    if (a > po) po = a
+                }
+                if (po > peakOut) peakOut = po
+                var off = 0
+                while (off < n && running) {
+                    val w = t.write(buf, off, n - off, AudioTrack.WRITE_BLOCKING)
+                    if (w < 0) {
+                        emit("warn ${name}一路写输出流出错（$w）")
+                        break
+                    }
+                    off += w
+                }
+                written += frames
+                if (onsetFrame >= 0 && t.getTimestamp(tsOut) && tsOut.framePosition >= onsetFrame) {
+                    val presentNs = tsOut.nanoTime - (tsOut.framePosition - onsetFrame) * 1_000_000_000L / SR +
+                        (engineLatencyMs * 1e6f).toLong()
+                    emit("onset present_ns=$presentNs")
+                    onsetFrame = -1
+                }
             }
         }
     }

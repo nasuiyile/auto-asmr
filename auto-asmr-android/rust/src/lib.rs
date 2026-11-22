@@ -27,6 +27,8 @@ const CHUNK: usize = 1024;
 /// 不是 48 kHz 时，输出端先垫多少帧静音（原采样率），保证两次重采样的延时攒够之前不会断流。
 const PRIME: usize = 128;
 
+pub mod aout;
+pub mod files;
 pub mod rain;
 pub mod settings;
 use settings::{current_cfg, update_params, with_global, CFG_VER, GLOBAL};
@@ -620,6 +622,41 @@ pub unsafe extern "C" fn asmr_rain_render(p: *mut rain::RainOut, data: *mut f32,
 #[no_mangle]
 pub extern "C" fn asmr_rain_set_on(_p: *mut rain::RainOut, on: c_int) {
     rain::set_wanted(on != 0);
+}
+
+// ------------------------------------------------------------------ 文件转换页
+
+/// 文件转换页的命令（JSON，UTF-8，`len` 字节），返回整页状态（JSON，UTF-8）：指针和长度写在 `out_len`，
+/// 用完交给 [`asmr_free_bytes`]。出错时返回空指针。命令见 [`files`]。
+///
+/// # Safety
+/// `cmd` 指向 `len` 字节；`out_len` 可写。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_files(cmd: *const u8, len: usize, out_len: *mut usize) -> *mut u8 {
+    let text = if cmd.is_null() { String::new() } else { String::from_utf8_lossy(std::slice::from_raw_parts(cmd, len)).into_owned() };
+    match catch_unwind(AssertUnwindSafe(|| files::handle(&text))) {
+        Ok(s) => {
+            let b = s.into_bytes().into_boxed_slice();
+            *out_len = b.len();
+            Box::into_raw(b) as *mut u8
+        }
+        Err(_) => {
+            set_error("文件转换页出错了".into());
+            *out_len = 0;
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// 释放 [`asmr_files`] 返回的字节。
+///
+/// # Safety
+/// `p`、`len` 来自 [`asmr_files`]，只释放一次。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_free_bytes(p: *mut u8, len: usize) {
+    if !p.is_null() {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, len)));
+    }
 }
 
 #[cfg(test)]

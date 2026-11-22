@@ -68,9 +68,11 @@ internal object HiddenAudio {
         return call { clsMixBuilder.getMethod("build").invoke(b) }!!
     }
 
-    fun buildPolicy(context: Context, mix: Any, looper: Looper): Any {
+    /** 一个策略里可以放几个混音（全局模式按用途分两路，见 [AudioRouter]），各有各的 remote submix 和录音端。 */
+    fun buildPolicy(context: Context, mixes: List<Any>, looper: Looper): Any {
         val b = clsPolicyBuilder.getConstructor(Context::class.java).newInstance(context)
-        call { clsPolicyBuilder.getMethod("addMix", clsMix).invoke(b, mix) }
+        val add = clsPolicyBuilder.getMethod("addMix", clsMix)
+        for (mix in mixes) call { add.invoke(b, mix) }
         call { clsPolicyBuilder.getMethod("setLooper", Looper::class.java).invoke(b, looper) }
         return call { clsPolicyBuilder.getMethod("build").invoke(b) }!!
     }
@@ -130,6 +132,44 @@ internal object HiddenAudio {
             runCatching { c.getDeclaredMethod("native_stop").apply { isAccessible = true }.invoke(rec) }
             runCatching { c.getDeclaredField("mRecordingState").apply { isAccessible = true }.setInt(rec, AudioRecord.RECORDSTATE_STOPPED) }
         }
+    }
+
+    /**
+     * 本进程会话号为 [session] 的播放流所在的输出线程有几个声道（从 dumpsys media.audio_flinger 里找）；
+     * 找不到时为空。用来发现系统把输出流放到了单声道的输出上（有的手机通话类声音走单声道输出）。
+     */
+    fun outputChannels(session: Int): Int? {
+        val text = runCatching {
+            val p = ProcessBuilder("/system/bin/dumpsys", "media.audio_flinger").redirectErrorStream(true).start()
+            p.inputStream.bufferedReader().use { it.readText() }.also { p.waitFor() }
+        }.getOrNull() ?: return null
+        val pid = Process.myPid()
+        // 播放流那一行：[类型] 编号 yes/no 进程号[/UID] 会话号 …（各版本的列大体一样）
+        val row = Regex("""^\s+\S*\s*\d+\s+(?:yes|no)\s+(\d+)(?:/\s*\d+)?\s+(\d+)\s""")
+        val count = Regex("""^\s+Channel count:\s*(\d+)""")
+        var inOutput = false
+        var channels: Int? = null
+        for (line in text.lineSequence()) {
+            if (line.startsWith("Output thread")) {
+                inOutput = true
+                channels = null
+                continue
+            }
+            // 录音线程、以"- "开头的（已经关掉的线程）不看；线程中间也有不缩进的说明行，不能拿它当结尾
+            if (line.startsWith("Input thread") || line.startsWith("Mmap") || line.startsWith("- ") || line.startsWith("##")) {
+                inOutput = false
+                continue
+            }
+            if (!inOutput) continue
+            val c = count.find(line)
+            if (c != null) {
+                if (channels == null) channels = c.groupValues[1].toInt()
+                continue
+            }
+            val m = row.find(line) ?: continue
+            if (m.groupValues[1].toInt() == pid && m.groupValues[2].toInt() == session) return channels
+        }
+        return null
     }
 
     private fun findMethod(c: Class<*>, name: String, vararg p: Class<*>): Method? =

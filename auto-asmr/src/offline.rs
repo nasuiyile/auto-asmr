@@ -162,6 +162,61 @@ pub struct ConvertReport {
     pub elapsed_s: f64,
 }
 
+/// 单个文件转换完成后的说明（桌面版界面和安卓版文件转换页共用）。`out`：输出文件的位置。
+pub fn report_text(rep: &ConvertReport, out: &str, english: bool) -> String {
+    let t = |zh: &'static str, en: &'static str| if english { en } else { zh };
+    format!(
+        "{}：{}\n{:.1} s，{:.1} LUFS，{} {:.1} dBTP，{} {:.1} dB；{} {:.0}%，{} {}（{} {}），{} {}，{} {}{}；{} {:.1} s{}",
+        t("已保存", "Saved"),
+        out,
+        rep.seconds,
+        rep.lufs,
+        t("真峰值", "true peak"),
+        rep.true_peak_db,
+        t("限制器最多压", "limiter max"),
+        rep.max_gr_db,
+        t("说话占", "speech"),
+        rep.speech_pct,
+        t("换耳", "switches"),
+        rep.n_moves,
+        t("从头顶绕", "over the head"),
+        rep.n_tops,
+        t("往后让", "lean-backs"),
+        rep.n_sways,
+        t("上下换位", "up / down moves"),
+        rep.n_updowns,
+        if rep.n_strokes > 0 { format!("，{} {}", t("伸进耳道", "strokes into the ear"), rep.n_strokes) } else { String::new() },
+        t("用时", "took"),
+        rep.elapsed_s,
+        if rep.channel_note.is_empty() { String::new() } else { format!("\n{}", rep.channel_note) }
+    ) + &if rep.duo_note.is_empty() { String::new() } else { format!("\n{}", rep.duo_note) }
+        + &if rep.balance_note.is_empty() { String::new() } else { format!("\n{}", rep.balance_note) }
+        + &if rep.bg_note.is_empty() { String::new() } else { format!("\n{}", rep.bg_note) }
+}
+
+/// 合成完成后的说明（同上）。`desc`：参与合成的音频和各自的位置。
+pub fn mix_report_text(rep: &ConvertReport, out: &str, desc: &str, english: bool) -> String {
+    let t = |zh: &'static str, en: &'static str| if english { en } else { zh };
+    format!(
+        "{}：{}\n{:.1} s，{:.1} LUFS，{} {:.1} dBTP，{} {:.1} dB；{} {:.1} s\n{}：{}{}",
+        t("已保存", "Saved"),
+        out,
+        rep.seconds,
+        rep.lufs,
+        t("真峰值", "true peak"),
+        rep.true_peak_db,
+        t("限制器最多压", "limiter max"),
+        rep.max_gr_db,
+        t("用时", "took"),
+        rep.elapsed_s,
+        t("合成", "Mixed"),
+        desc,
+        if rep.channel_note.is_empty() { String::new() } else { format!("\n{}", rep.channel_note) }
+    ) + &if rep.align_note.is_empty() { String::new() } else { format!("\n{}", rep.align_note) }
+        + &if rep.balance_note.is_empty() { String::new() } else { format!("\n{}", rep.balance_note) }
+        + &if rep.bg_note.is_empty() { String::new() } else { format!("\n{}", rep.bg_note) }
+}
+
 /// 逐包解码，把每个包交给 `sink(通道数, 采样率, 交织样本)`；返回 false 时提前停止。
 fn decode(path: &Path, mut sink: impl FnMut(usize, u32, &[f32]) -> bool) -> Result<(), String> {
     let file = File::open(path).map_err(|e| format!("打不开 {}：{e}", path.display()))?;
@@ -722,7 +777,7 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::test_voice;
+    use crate::dsp::testsig::test_voice;
 
     #[test]
     fn aligned_mix_trims_intro_and_preview_uses_the_same_audio() {

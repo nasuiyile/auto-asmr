@@ -3,9 +3,9 @@
 use realfft::{num_complex::Complex32, ComplexToReal, RealFftPlanner, RealToComplex};
 use std::sync::{Arc, OnceLock};
 
-pub const AMBIENCE_DELAY: usize = 512;
-const N: usize = AMBIENCE_DELAY;
+const N: usize = 512;
 const HOP: usize = N / 4;
+pub const AMBIENCE_DELAY: usize = 2 * HOP;
 const BINS: usize = N / 2 + 1;
 // 六段共约 1.54 秒。保存每段的最低平滑功率，乐句中间短暂的气息不会立即变成背景。
 const SECTION_HOPS: usize = 96;
@@ -36,7 +36,8 @@ impl NoiseBand {
 pub struct AmbienceSeparator {
     forward: Arc<dyn RealToComplex<f32>>,
     inverse: Arc<dyn ComplexToReal<f32>>,
-    window: Vec<f32>,
+    analysis_window: Vec<f32>,
+    synthesis_window: Vec<f32>,
     input: Vec<f32>,
     overlap: Vec<f32>,
     time: Vec<f32>,
@@ -58,8 +59,20 @@ impl AmbienceSeparator {
             (planner.plan_fft_forward(N), planner.plan_fft_inverse(N))
         }).clone();
         let scratch_len = forward.get_scratch_len().max(inverse.get_scratch_len());
-        // 周期性正弦窗，四帧重叠时窗平方之和为 2。
-        let window = (0..N).map(|i| (std::f32::consts::PI * (i as f32 + 0.5) / N as f32).sin()).collect();
+        // 整帧分析，只合成最近两个步长。分析窗慢起快落，峰值落在合成段中央，
+        // 让渐入底噪的估计及时跟上。两窗乘积为 Hann 窗，相邻两帧权重之和恒为 1。
+        let analysis_window: Vec<_> = (0..N).map(|i| {
+            let phase = if i < N - HOP {
+                (i as f32 + 0.5) / (N - HOP) as f32
+            } else {
+                (N as f32 - i as f32 - 0.5) / HOP as f32
+            };
+            (std::f32::consts::FRAC_PI_2 * phase).sin()
+        }).collect();
+        let synthesis_window = (0..AMBIENCE_DELAY).map(|i| {
+            let phase = std::f32::consts::PI * (i as f32 + 0.5) / AMBIENCE_DELAY as f32;
+            phase.sin().powi(2) / (analysis_window[N - AMBIENCE_DELAY + i] * N as f32)
+        }).collect();
         let mut bands = Vec::new();
         let mut start = 0;
         while start < BINS {
@@ -69,7 +82,7 @@ impl AmbienceSeparator {
             start = end;
         }
         Self {
-            forward, inverse, window, input: vec![0.0; N], overlap: vec![0.0; N], time: vec![0.0; N],
+            forward, inverse, analysis_window, synthesis_window, input: vec![0.0; N], overlap: vec![0.0; AMBIENCE_DELAY], time: vec![0.0; N],
             spectrum: vec![Complex32::default(); BINS], scratch: vec![Complex32::default(); scratch_len],
             bands, head: 0, hops: 0, section: 0, silent_hops: 0, onset_power: 0.0, startup_rejection: 0.0,
         }
@@ -97,9 +110,10 @@ impl AmbienceSeparator {
     /// 返回（随声源运动的前景，留在房间的底响）。两路均延迟 AMBIENCE_DELAY 个采样。
     #[inline]
     pub fn process(&mut self, input: f32) -> (f32, f32) {
-        let delayed = self.input[self.head];
-        let bed = self.overlap[self.head];
-        self.overlap[self.head] = 0.0;
+        let delayed = self.input[(self.head + N - AMBIENCE_DELAY) % N];
+        let output_pos = self.head % AMBIENCE_DELAY;
+        let bed = self.overlap[output_pos];
+        self.overlap[output_pos] = 0.0;
         self.input[self.head] = input;
         self.head = (self.head + 1) % N;
         if self.head % HOP == 0 {
@@ -108,9 +122,27 @@ impl AmbienceSeparator {
         (delayed - bed, bed)
     }
 
+    /// 在刚送入的原声里取一个分数延时样本。开关过渡时沿这条声轨移动读指针。
+    pub(super) fn dry_at_delay(&self, delay: f32) -> f32 {
+        let whole = delay as usize;
+        let frac = delay - whole as f32;
+        let past = |d: usize| self.input[(self.head + N - 1 - d) % N];
+        let a = past(whole);
+        let b = past(whole + 1);
+        if whole == 0 {
+            return a + frac * (b - a);
+        }
+        // 相邻四点的三次插值，减小读指针经过半个样本时对气声高频的衰减。
+        let slope_a = 0.5 * (b - past(whole - 1));
+        let slope_b = 0.5 * (past(whole + 2) - a);
+        let delta = b - a;
+        a + frac * (slope_a + frac * (3.0 * delta - 2.0 * slope_a - slope_b
+            + frac * (slope_a + slope_b - 2.0 * delta)))
+    }
+
     fn analyze(&mut self) {
         let ring = self.input[self.head..].iter().chain(&self.input[..self.head]);
-        for ((sample, weight), x) in self.time.iter_mut().zip(&self.window).zip(ring) {
+        for ((sample, weight), x) in self.time.iter_mut().zip(&self.analysis_window).zip(ring) {
             *sample = x * weight;
         }
         self.forward.process_with_scratch(&mut self.time, &mut self.spectrum, &mut self.scratch).unwrap();
@@ -134,10 +166,11 @@ impl AmbienceSeparator {
             band.quiet = band.smooth.min(band.quiet + 0.012 * (band.smooth - band.quiet));
             band.loud = band.smooth.max(band.loud * 0.993);
         }
-        // 跳过无信号的帧。静音不能作为房间的功率估计，重新开始播放也要重新判断开场。
+        // 一次门限闭合可能正好隔开两个音节。沿用上次观察到的房间底声，
+        // 否则开麦后的第一口气会被拿来初始化整个底噪谱。静音超过估计窗口才按新片段处理。
         if frame_power < 1e-15 {
-            self.silent_hops += 1;
-            if self.silent_hops == 32 {
+            self.silent_hops = self.silent_hops.saturating_add(1);
+            if self.hops > 0 && self.silent_hops == SECTION_HOPS * SECTIONS {
                 self.clear_estimate();
             }
             return;
@@ -261,8 +294,8 @@ impl AmbienceSeparator {
             *bin *= left_gain;
         }
         self.inverse.process_with_scratch(&mut self.spectrum, &mut self.time, &mut self.scratch).unwrap();
-        for i in 0..N {
-            self.overlap[(self.head + i) % N] += self.time[i] * self.window[i] * (0.5 / N as f32);
+        for (i, (&sample, &weight)) in self.time[N - AMBIENCE_DELAY..].iter().zip(&self.synthesis_window).enumerate() {
+            self.overlap[(self.head + i) % AMBIENCE_DELAY] += sample * weight;
         }
     }
 }
@@ -282,7 +315,7 @@ mod tests {
         for i in 0..input.len() {
             input[i] = rng.uniform(-0.01, 0.01);
             let (voice, bed) = splitter.process(input[i]);
-            let delayed = if i >= N { input[i - N] } else { 0.0 };
+            let delayed = if i >= AMBIENCE_DELAY { input[i - AMBIENCE_DELAY] } else { 0.0 };
             assert!((voice + bed - delayed).abs() < 1e-8);
             if i > 48000 {
                 residual += voice * voice;
@@ -317,8 +350,8 @@ mod tests {
             }
             last = wind;
             let (moving, _) = splitter.process(noise + signal[i]);
-            if i < N { continue; }
-            let s = signal[i - N];
+            if i < AMBIENCE_DELAY { continue; }
+            let s = signal[i - AMBIENCE_DELAY];
             if s != 0.0 {
                 let kind = usize::from(i > 4 * 48000);
                 desired[kind] += s * s;
@@ -408,6 +441,48 @@ mod tests {
         assert!(bed_energy < 0.03 * input_energy, "开头持续元音泄漏 {}", bed_energy / input_energy);
     }
 
+    #[test]
+    fn short_mic_gate_preserves_the_next_breath() {
+        let mut split = AmbienceSeparator::new();
+        let mut rng = Rng::new(428);
+        let mut air = crate::dsp::filters::Biquad::bandpass(1800.0, 0.7);
+        let mut target = vec![0.0; 3 * 48000];
+        let (mut target_power, mut projection) = (0.0, 0.0);
+        // 先听两秒房间声，门限关 240 ms，麦克风再次打开时说话人轻轻送气。
+        let start = 96000 + 11520;
+        for i in 0..target.len() {
+            let room = 0.00012 * rng.uniform(-1.0, 1.0);
+            let breath = air.process(rng.uniform(-1.0, 1.0));
+            if (start..start + 12000).contains(&i) {
+                let phase = (i - start) as f32 / 12000.0;
+                target[i] = 0.006 * (std::f32::consts::PI * phase).sin().powi(2) * breath;
+            }
+            let input = if (96000..start).contains(&i) { 0.0 } else { room + target[i] };
+            let (moving, _) = split.process(input);
+            if (start + AMBIENCE_DELAY..start + AMBIENCE_DELAY + 12000).contains(&i) {
+                let voice = target[i - AMBIENCE_DELAY];
+                target_power += voice * voice;
+                projection += voice * moving;
+            }
+        }
+        let gain = projection / target_power;
+        assert!(gain > 0.85, "短暂关麦后气声振幅保留 {gain:.3}");
+
+        // 长静音后接另一段录音，较响的房间声仍要能从开场固定下来。
+        for _ in 0..2 * 48000 {
+            split.process(0.0);
+        }
+        let (mut residual, mut total) = (0.0, 0.0);
+        for i in 0..12000 {
+            let (moving, fixed) = split.process(0.004 * rng.uniform(-1.0, 1.0));
+            if i > AMBIENCE_DELAY + 1200 {
+                residual += moving * moving;
+                total += (moving + fixed).powi(2);
+            }
+        }
+        assert!(residual < 0.05 * total, "长静音后新底噪的移动残留 {}", residual / total);
+    }
+
     // 先量单独底噪在移动支路的残留，再用混合段与已知干净前景的投影量前景增益。
     // 从移动支路减去干净前景，剩下的背景泄漏和前景失真都计入误差。
     fn measure_mixed_stems(noise: &[f32], target: &[f32], active: std::ops::Range<usize>) -> (f64, f64, f64) {
@@ -416,8 +491,8 @@ mod tests {
         let (mut mixed_noise, mut mixed_error, mut target_power, mut correlation) = (0.0, 0.0, 0.0, 0.0);
         for i in 0..noise.len() {
             let (moving, _) = separator.process(noise[i] + target[i]);
-            if i < N { continue; }
-            let j = i - N;
+            if i < AMBIENCE_DELAY { continue; }
+            let j = i - AMBIENCE_DELAY;
             let noise = f64::from(noise[j]);
             let target = f64::from(target[j]);
             let moving = f64::from(moving);

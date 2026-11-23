@@ -186,12 +186,15 @@ struct FixedAmbience {
     pos: usize,
     phase: [[Biquad; 2]; 2],
     gain: f32,
-    wet: f32,
-    warmup: usize,
+    transition: usize,
     tail: usize,
 }
 
-const AMBIENCE_FADE: f32 = 1.0 / (0.020 * FS);
+// 开启时先连续移到分离器的时间点（读速只差 1/64），再用 20 ms 分配前景与底声。
+// 关闭时按相反顺序走，同一进度也能在快速拨动开关时原路折返。
+const AMBIENCE_ALIGN: usize = AMBIENCE_DELAY * 64;
+const AMBIENCE_FADE: usize = (0.020 * FS) as usize;
+const AMBIENCE_ON: usize = AMBIENCE_ALIGN + AMBIENCE_FADE;
 
 impl FixedAmbience {
     fn new(lookahead: usize, enabled: bool, gain: f32) -> Self {
@@ -206,27 +209,34 @@ impl FixedAmbience {
             pos: 0,
             phase: [[allpass(1850.0), allpass(6800.0)], [allpass(2500.0), allpass(9050.0)]],
             gain,
-            wet: if enabled { 1.0 } else { 0.0 },
-            warmup: AMBIENCE_DELAY,
+            transition: if enabled { AMBIENCE_ON } else { 0 },
             tail: 0,
         }
     }
 
     fn separate(&mut self, x: f32, enabled: bool) -> (f32, f32) {
-        let (voice, bed) = self.split.process(x);
-        if self.warmup > 0 {
-            self.warmup -= 1;
-        } else if enabled {
-            self.wet = (self.wet + AMBIENCE_FADE).min(1.0);
+        if !enabled && self.transition == 0 {
+            return (x, 0.0);
         }
-        if !enabled {
-            self.wet = (self.wet - AMBIENCE_FADE).max(0.0);
-            if self.wet == 0.0 {
+        let (voice, bed) = self.split.process(x);
+        if enabled {
+            self.transition = (self.transition + 1).min(AMBIENCE_ON);
+        } else {
+            self.transition -= 1;
+            if self.transition == 0 {
                 self.split.reset();
-                self.warmup = AMBIENCE_DELAY;
+                return (x, 0.0);
             }
         }
-        if self.wet == 1.0 { (voice, bed) } else { (x + self.wet * (voice - x), self.wet * bed) }
+        if self.transition == AMBIENCE_ON {
+            return (voice, bed);
+        }
+        if self.transition <= AMBIENCE_ALIGN {
+            let delay = self.transition as f32 * AMBIENCE_DELAY as f32 / AMBIENCE_ALIGN as f32;
+            return (self.split.dry_at_delay(delay), 0.0);
+        }
+        let wet = (self.transition - AMBIENCE_ALIGN) as f32 / AMBIENCE_FADE as f32;
+        (voice + (1.0 - wet) * bed, wet * bed)
     }
 
     fn render(&mut self, bed: f32) -> [f32; 2] {
@@ -756,9 +766,7 @@ impl Engine {
             if p.denoise {
                 v = self.denoiser.process(v, dn_mix);
             }
-            if p.static_ambience || self.fixed_ambience.wet > 0.0 {
-                (v, bed[i]) = self.fixed_ambience.separate(v, p.static_ambience);
-            }
+            (v, bed[i]) = self.fixed_ambience.separate(v, p.static_ambience);
             if p.deess_db > 0.0 {
                 v = self.deess.process(v, p.deess_db);
             }
@@ -912,21 +920,32 @@ mod tests {
             assert!(side * moving.0 > 10.0 && fixed.0.abs() < 1.0, "方位 {az}° 的底响声级差：原来 {moving:?}，固定后 {fixed:?}");
             assert!(side * fixed.1 > 10.0 && (fixed.1 - moving.1).abs() < 2.0, "方位 {az}° 的话音声级差：原来 {moving:?}，固定后 {fixed:?}");
         }
-        // 已开机的流动态切换。验证启用时先填足延迟，关闭后返回逐样本旁通，
-        // 再开启时不会重播上一次分离的残余样本。
+    }
+
+    #[test]
+    fn toggling_recorded_ambience_preserves_tone_level_and_returns_to_bypass() {
+        // 延迟支路恰好比直通晚半整数个周期。若直接交叉淡化，两路在过渡中点会抵消。
         let mut fixed = FixedAmbience::new(0, false, 1.0);
-        for _ in 0..AMBIENCE_DELAY {
-            assert_eq!(fixed.separate(0.5, true), (0.5, 0.0));
-        }
-        for &v in &x[..fs] {
-            fixed.separate(v, true);
-        }
-        for &v in &x[..1024] {
-            if fixed.wet > 0.0 {
-                fixed.separate(v, false);
+        let omega = std::f64::consts::TAU * 5.5 / AMBIENCE_DELAY as f64;
+        let mut sample = 0;
+        let mut energy = 0.0;
+        for (enabled, duration) in [
+            (false, 512), (true, AMBIENCE_ON), (false, AMBIENCE_FADE / 2),
+            (true, AMBIENCE_FADE), (false, AMBIENCE_ON / 2), (true, 512), (false, AMBIENCE_ON),
+        ] {
+            for _ in 0..duration {
+                let x = (omega * sample as f64).sin() as f32;
+                let (voice, bed) = fixed.separate(x, enabled);
+                energy += (voice + bed).powi(2);
+                sample += 1;
+                if sample % 128 == 0 {
+                    assert!((48.0..80.0).contains(&energy), "切换时第 {sample} 个采样处的短窗能量 {energy}，期望约 64");
+                    energy = 0.0;
+                }
             }
         }
-        assert_eq!(fixed.wet, 0.0);
+        assert_eq!(fixed.separate(0.371, false), (0.371, 0.0));
+        // 清空刚才的信号后再开启，旧底声和延迟干声都不能重播。
         for _ in 0..2 * AMBIENCE_DELAY {
             assert_eq!(fixed.separate(0.0, true), (0.0, 0.0));
         }

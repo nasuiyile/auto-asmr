@@ -188,12 +188,13 @@ pub unsafe extern "C" fn asmr_doc_load(p: *const u8, n: usize) -> i32 {
     }
 }
 
-/// 全部效果参数恢复默认、切回「输出效果」；桌面版专用的设置（音频设备、文件转换……）不动。
+/// 全部效果参数恢复默认、切回「输出效果」、关掉左右双人；桌面版专用的设置（音频设备、文件转换……）不动。
 #[no_mangle]
 pub extern "C" fn asmr_doc_reset_params() {
     with(|st| {
         st.doc.params = Params::default();
         st.doc.dry = false;
+        st.doc.duo_ms = 0.0;
     });
 }
 
@@ -284,7 +285,9 @@ fn set_field(doc: &mut Saved, key: &str, v: serde_json::Value) -> Result<(), Str
                 Some(2) => p.clone().style_earclean(),
                 Some(3) => p.clone().style_breath(),
                 _ => return Err("style 只能是 0、1、2、3".into()),
-            }
+            };
+            // 各风格的默认状态都是一个声音：按风格按钮时关掉左右双人（同桌面版）
+            doc.duo_ms = 0.0;
         }
         "bg_preset" => match v.as_str() {
             Some("rain_night") => *p = p.clone().bg_rain_night(),
@@ -613,6 +616,15 @@ mod tests {
         assert_eq!(set("style", "3"), 0);
         assert_eq!(with(|st| st.doc.params.clone()), expected);
         assert_eq!(set("style", "5"), -1);
+        // 风格按钮和恢复默认都关掉左右双人
+        for style in ["0", "1", "2", "3"] {
+            assert_eq!(set("duo_ms", "80"), 0);
+            assert_eq!(set("style", style), 0);
+            assert_eq!(with(|st| st.doc.duo_ms), 0.0, "style {style}");
+        }
+        assert_eq!(set("duo_ms", "80"), 0);
+        asmr_doc_reset_params();
+        assert_eq!(with(|st| st.doc.duo_ms), 0.0);
         assert_eq!(set("bg_preset", "\"rain_night\""), 0);
         assert!(ui()["derived"]["bg_db"].as_f64().is_some());
         assert_eq!(set("bg_preset", "\"off\""), 0);

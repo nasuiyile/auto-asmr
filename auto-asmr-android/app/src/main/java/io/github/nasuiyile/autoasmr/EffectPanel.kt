@@ -45,6 +45,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -76,6 +78,8 @@ fun EffectPanel(
     val spec = Settings.spec
     val p = Settings.params
     val groups = if (spec != null) SpecUi.items(spec.optJSONArray("groups")) else emptyList()
+    // 输出增益从「输出」组里拿出来，放到降噪下面（同电脑版左下角）
+    val outGain = groups.firstNotNullOfOrNull { g -> SpecUi.items(g.optJSONArray("items")).firstOrNull { it.optString("key") == OUT_GAIN } }
     val manual = p.optString("mode") == "Manual"
     LazyColumn(modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         header()
@@ -88,31 +92,41 @@ fun EffectPanel(
             // 效果开关和状态：开着时用主色的卡片，一眼看出是不是在加效果
             val on = !showDry || !p.optBoolean("dry")
             Card(
-                Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 shape = MaterialTheme.shapes.large,
                 colors = CardDefaults.cardColors(
                     containerColor = if (on) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
                 ),
             ) {
                 Row(
-                    Modifier.fillMaxWidth().let { m -> if (showDry) m.clickable { Settings.setDry(on) } else m }.padding(horizontal = 16.dp, vertical = 14.dp),
+                    Modifier.fillMaxWidth().let { m -> if (showDry) m.clickable { Settings.setDry(on) } else m }.padding(horizontal = 14.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(if (on) "ASMR 效果" else "原声（不加效果）", style = MaterialTheme.typography.titleMedium)
-                        Text(status, style = MaterialTheme.typography.bodySmall, modifier = Modifier.alpha(0.8f))
+                    Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(if (on) "ASMR 效果" else "原声（不加效果）", style = MaterialTheme.typography.titleSmall)
+                        Text(status, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.alpha(0.8f))
                     }
                     if (showDry) Switch(checked = on, onCheckedChange = { Settings.setDry(!it) })
                 }
             }
         }
         item {
-            Section("风格", subtitle = "一键套用一组参数，之后还可以细调") {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+            // 「恢复默认」放在标题行右边，几个风格排成一行
+            val styles = SpecUi.items(spec.optJSONArray("styles"))
+            val reset = styles.firstOrNull { it.optString("action") == "reset" }
+            Section("风格", actions = {
+                if (reset != null) {
+                    TextButton(onClick = { Settings.action("reset") }, modifier = Modifier.height(32.dp), contentPadding = PaddingValues(horizontal = 10.dp)) {
+                        Text(reset.optString("label"))
+                    }
+                }
+            }) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     // 选中的风格（参数和它一致）标出来；手动调过风格管的参数后都不标
                     val active = p.optString("active_style")
-                    for (s in SpecUi.items(spec.optJSONArray("styles"))) {
+                    for (s in styles) {
                         val action = s.optString("action")
+                        if (action == "reset") continue
                         val sel = action == active
                         FilterChip(
                             selected = sel,
@@ -131,34 +145,53 @@ fun EffectPanel(
                 Settings.setManual(on, pose)
             }
             Section("声源位置") {
-                Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) { if (map != null) map() else PositionMap(p, tele, manual) }
+                Box(Modifier.fillMaxWidth().padding(top = 2.dp), contentAlignment = Alignment.Center) { if (map != null) map() else PositionMap(p, tele, manual) }
                 Row(
-                    Modifier.fillMaxWidth().clickable { toggleManual(!manual) }.padding(top = 8.dp),
+                    Modifier.fillMaxWidth().clickable { toggleManual(!manual) }.padding(top = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(m?.optString("label") ?: "手动摆位", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).padding(end = 12.dp))
+                    // 标签是「手动摆位：说明」：冒号前面当标题，后面小字
+                    val label = m?.optString("label") ?: "手动摆位"
+                    Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(label.substringBefore("："), style = MaterialTheme.typography.bodyMedium)
+                        if (label.contains("：")) {
+                            Text(label.substringAfter("："), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                     Switch(checked = manual, onCheckedChange = { toggleManual(it) })
                 }
             }
         }
-        spec.optJSONObject("denoise")?.let { d -> item { Section { SliderItem(d, p, true) } } }
+        item {
+            // 降噪和输出增益放在一起：都是随手要调的。输出增益只管实时听到的音量（文件转换不用它），所以不放在「输出」组里
+            Section {
+                spec.optJSONObject("denoise")?.let { SliderItem(it, p, true) }
+                outGain?.let {
+                    SliderItem(it, p, true)
+                    Text(
+                        "只在实时 / 试听时起作用（相当于耳机音量）；转换文件不用它",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
         item {
             Text(
                 "全部参数",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(start = 4.dp, top = 14.dp, bottom = 2.dp),
+                modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 2.dp),
             )
         }
         items(groups, key = { it.optString("id") }) { g -> Group(g, p, tele) }
         item {
-            Section("配置文件", modifier = Modifier.padding(top = 8.dp)) {
+            Section("配置文件", modifier = Modifier.padding(top = 4.dp)) {
                 Text(
-                    "和电脑版通用：电脑版「导出配置」的 .ron 可以直接导入；这里导出的文件也能在电脑版里导入。" +
-                        "电脑版独有的设置（音频设备、文件转换等）会原样保留。",
+                    "和电脑版通用（.ron），电脑版独有的设置会原样保留",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 8.dp),
+                    modifier = Modifier.padding(top = 2.dp, bottom = 6.dp),
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
@@ -179,6 +212,9 @@ fun EffectPanel(
         item { Spacer(Modifier.height(32.dp)) }
     }
 }
+
+/** 输出增益的参数名：效果面板里放在降噪下面，不在「输出」组里重复。 */
+private const val OUT_GAIN = "out_gain_db"
 
 /** 项目的 GitHub 和研发人的 B 站主页（同电脑版右下角）：GitHub 用系统浏览器打开，B 站优先唤起 B 站 App（见 [AppLinks]）。 */
 @Composable
@@ -218,19 +254,19 @@ private fun Group(g: JSONObject, p: JSONObject, tele: FloatArray) {
     val enabled = SpecUi.cond(g.optJSONObject("enable_if"), p)
     val turn by animateFloatAsState(if (open) 180f else 0f, label = "chevron")
     Card(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        Modifier.fillMaxWidth().padding(vertical = 3.dp),
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
     ) {
         Row(
-            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 16.dp, vertical = 14.dp),
+            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 14.dp, vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(SpecUi.groupTitle(g, p), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
             Ic(AppIcons.ExpandMore, Modifier.rotate(turn), size = 24.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (open) {
-            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp).alpha(if (enabled) 1f else 0.45f)) {
+            Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp).alpha(if (enabled) 1f else 0.45f)) {
                 val actions = SpecUi.items(g.optJSONArray("actions")).filter { SpecUi.cond(it.optJSONObject("show_if"), p) }
                 if (actions.isNotEmpty()) {
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -238,7 +274,7 @@ private fun Group(g: JSONObject, p: JSONObject, tele: FloatArray) {
                     }
                 }
                 for (it in SpecUi.items(g.optJSONArray("items"))) {
-                    if (!SpecUi.cond(it.optJSONObject("show_if"), p)) continue
+                    if (!SpecUi.cond(it.optJSONObject("show_if"), p) || it.optString("key") == OUT_GAIN) continue
                     val en = enabled && SpecUi.cond(it.optJSONObject("enable_if"), p)
                     when (it.optString("type")) {
                         "slider" -> SliderItem(it, p, en)

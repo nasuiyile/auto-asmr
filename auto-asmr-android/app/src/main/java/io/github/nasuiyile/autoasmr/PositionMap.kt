@@ -67,7 +67,7 @@ fun PositionMap(p: JSONObject, tele: FloatArray, manual: Boolean) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Canvas(
-                Modifier.size(230.dp)
+                Modifier.size(200.dp)
                     .pointerInput(manual) {
                         if (!manual) return@pointerInput
                         val set = { o: Offset ->
@@ -130,7 +130,7 @@ fun PositionMap(p: JSONObject, tele: FloatArray, manual: Boolean) {
             Spacer(Modifier.width(6.dp))
             // 高度竖条：-80° … 85°，中间 = 与耳朵齐平
             Canvas(
-                Modifier.size(width = 22.dp, height = 200.dp)
+                Modifier.size(width = 22.dp, height = 180.dp)
                     .pointerInput(manual) {
                         if (!manual) return@pointerInput
                         detectTapGestures(onDoubleTap = { Settings.setNumber("manual_tilt", 0.0) }, onTap = { o ->

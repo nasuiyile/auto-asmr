@@ -91,6 +91,24 @@ pub fn update_params(f: impl FnOnce(&mut Params) -> Result<(), String>) -> Resul
     })
 }
 
+/// 按钮（风格、恢复默认、背景音预设，见 [`action`]）。风格按钮和恢复默认还会关掉左右双人：各风格的默认状态都是一个声音
+/// （同桌面版）。
+pub fn run_action(name: &str) -> Result<(), String> {
+    let resets_duo = name == "reset" || Params::STYLES.contains(&name);
+    with_global(|g| {
+        let mut s = g.saved.clone();
+        action(&mut s.params, name)?;
+        if resets_duo {
+            s.duo_ms = 0.0;
+        }
+        if s.params != g.saved.params || s.duo_ms != g.saved.duo_ms {
+            g.saved = s;
+            commit(g);
+        }
+        Ok(())
+    })
+}
+
 /// 改配置文件里 `params` 之外的一项（左右双人、文件转换页的设置，见 [`DOC_KEYS`]）。左右双人那几项变了才重新生成
 /// 引擎配置（网页 / 全局模式的处理器要换）；文件转换页的设置只记下来（文件转换页每次轮询时自己读）。
 pub fn update_doc(key: &str, v: Value) -> Result<(), String> {
@@ -433,6 +451,25 @@ mod tests {
         assert_eq!(p.bg_level, 0.0);
         action(&mut p, "reset").unwrap();
         assert_eq!(p, Params::default());
+    }
+
+    /// 各风格的默认状态都是一个声音：风格按钮和恢复默认都关掉左右双人，背景音按钮不动它。
+    #[test]
+    fn style_buttons_turn_two_voices_off() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        provide_repo_data();
+        assert_eq!(Saved::default().duo_ms, 0.0);
+        for name in Params::STYLES.into_iter().chain(["reset"]) {
+            update_doc("duo_ms", json!(80.0)).unwrap();
+            run_action(name).unwrap();
+            assert_eq!(with_global(|g| g.saved.duo_ms), 0.0, "{name}");
+            assert!(with_global(|g| g.duo.is_none()), "{name}");
+        }
+        update_doc("duo_ms", json!(80.0)).unwrap();
+        run_action("bg_rain_night").unwrap();
+        assert_eq!(with_global(|g| g.saved.duo_ms), 80.0);
+        run_action("reset").unwrap();
+        assert!(run_action("no_such").is_err());
     }
 
     /// 导入桌面版的配置后再导出：参数和桌面版独有的设置都还在。

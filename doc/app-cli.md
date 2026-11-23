@@ -10,7 +10,7 @@ KU100 实录风格下，`--breath` 控制原声里轻微送气的最大提升量
 
 `--sharp-soften` 控制强辅音在 5 kHz 附近的最大衰减，范围为 0–8 dB，0 为关闭。较大的值适合个别字音偏尖的录音。需要整体控制宽带齿音时可另调 `--deess`。
 
-`--static-ambience on|off` 控制录音里的持续底噪是否留在固定位置。选择 `--style ku100` 时自动开启；例如 `auto-asmr convert 输入.wav --style ku100 --static-ambience off -o 对照.wav` 可听关闭效果。实时模拟 `rt-sim` 使用同一选项。房间反射用 `--room` 调节，输入降噪用 `--denoise` 调节，合成雨声仍用 `--bg` 调节。
+`--static-ambience on|off` 控制录音里的持续底噪是否留在固定位置。默认关闭，各风格（包括 `--style ku100`）都不开启；例如 `auto-asmr convert 输入.wav --style ku100 --static-ambience on -o 对照.wav` 可听打开后的效果。实时模拟 `rt-sim` 使用同一选项。房间反射用 `--room` 调节，输入降噪用 `--denoise` 调节，合成雨声仍用 `--bg` 调节。
 
 `--style` 有四个内置预设：`ear`（贴耳加强，默认）、`ku100`（近耳轻语）、`breath`（呼吸音）和 `earclean`（掏耳）。风格先生效，显式参数可覆盖预设。处理单声道呼吸录音、保留原来的吸气和呼气节奏：
 

@@ -966,7 +966,7 @@ mod tests {
             let noise = 0.00085 * fade * (colored + 0.08 * white);
             noise + i.checked_sub(2 * fs).and_then(|j| voice.get(j)).copied().unwrap_or(0.0)
         }).collect();
-        let params = Params { mode: MotionMode::Manual, manual_az: 270.0, manual_dist: 0.115, ..Params::default().style_ku100() };
+        let params = Params { mode: MotionMode::Manual, manual_az: 270.0, manual_dist: 0.115, static_ambience: true, ..Params::default().style_ku100() };
         let (left, right) = render(params, &input);
         let levels = |ms: usize, end_ms: usize| {
             let span = ms * fs / 1000..end_ms * fs / 1000;

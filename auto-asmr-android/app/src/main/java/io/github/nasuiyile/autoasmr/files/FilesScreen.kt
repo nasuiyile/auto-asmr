@@ -54,6 +54,7 @@ import io.github.nasuiyile.autoasmr.EffectPanel
 import io.github.nasuiyile.autoasmr.AppIcons
 import io.github.nasuiyile.autoasmr.Ic
 import io.github.nasuiyile.autoasmr.PageHeader
+import io.github.nasuiyile.autoasmr.HelpItem
 import io.github.nasuiyile.autoasmr.Section
 import io.github.nasuiyile.autoasmr.Stepper
 import io.github.nasuiyile.autoasmr.TipText
@@ -120,10 +121,10 @@ fun FilesScreen(onImport: () -> Unit, onExport: () -> Unit) {
         showDry = false,
         map = if (mixing) ({ MixMap(st) }) else null,
         header = {
-            item { PageHeader("文件转换", "把音频文件转成 KU100 双耳 ASMR 效果的 WAV，可以先试听、边听边调参数；支持批量、多音频合成、左右双人（同电脑版）。") }
+            item { PageHeader("文件转换", help = FILES_HELP) }
             item { FileList(st, busy, multi, onAddFiles = { addFiles.launch(arrayOf("audio/*", "video/*", "application/ogg", "application/octet-stream")) }, onAddFolder = { addFolder.launch(null) }) }
             item {
-                Section("多人声音", subtitle = "几个音频各在一个位置，或者一个音频当成左右两个人") {
+                Section("多人声音") {
                     MixBlock(st, busy)
                     DuoBlock(st, busy)
                 }
@@ -147,6 +148,14 @@ fun FilesScreen(onImport: () -> Unit, onExport: () -> Unit) {
         },
     )
 }
+
+/** 文件转换页的说明：收在标题右边的「?」里。 */
+private val FILES_HELP = listOf(
+    HelpItem("文件转换是什么", "把音频文件转成 KU100 双耳 ASMR 效果的 WAV，可以先试听、边听边调参数；支持批量、多音频合成、左右双人（同电脑版）。"),
+    HelpItem("添加文件", "「添加文件」可以一次多选；「添加文件夹」加入文件夹里的全部音频（不含子文件夹，跳过已转换的 _asmr 文件）。支持 wav / m4a / mp3 / flac / ogg 等常见格式。"),
+    HelpItem("多人声音", "多音频合成：几个音频各在一个位置，同时播放。左右双人：同一个音频当成左右两个人，第 2 个声音晚一点。"),
+    HelpItem("音量", "转换出来的文件精确归一化到「目标响度」；效果参数里的「输出增益」只调试听时的音量，不影响文件。"),
+)
 
 @Composable
 private fun Note(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
@@ -189,7 +198,7 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
         actions = { if (n > 0) TextButton(onClick = { FileSession.cmd("clear") }, enabled = !busy) { Text("清空") } },
     ) {
         Column {
-            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilledTonalButton(onClick = onAddFiles, enabled = !busy, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Ic(AppIcons.Add, size = 18.dp)
                     Spacer(Modifier.width(6.dp))
@@ -201,9 +210,7 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
                     Text("添加文件夹")
                 }
             }
-            if (n == 0) {
-                Note("「添加文件」可以一次多选；「添加文件夹」加入文件夹里的全部音频（不含子文件夹，跳过已转换的 _asmr 文件）。支持 wav / m4a / mp3 / flac / ogg 等常见格式。")
-            }
+            if (n == 0) Note("支持 wav / m4a / mp3 / flac / ogg 等常见格式")
             val voices = st.optJSONArray("voices")
             val offsets = st.optJSONArray("follow_offsets")
             val follow = Settings.params.optBoolean("mix_follow")

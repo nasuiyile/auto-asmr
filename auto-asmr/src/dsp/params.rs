@@ -338,7 +338,6 @@ impl Params {
     /// 低频气流集中在耳侧。距离、走位与人声参数的整轨对照见 doc/effects.md。
     pub fn style_ku100(self) -> Self {
         let mut p = self.style_base();
-        p.static_ambience = true;
         p.ear_dist = 0.115;
         p.isolation_db = 0.0;
         p.far_lf_cut_db = 0.0;
@@ -569,7 +568,7 @@ mod tests {
         // 默认和 KU100 实录不进耳道；掏耳进耳道、每只耳朵停得久、人声用的几项关掉
         assert_eq!(d.inear_cm, 0.0);
         assert_eq!(d.clone().style_ku100().inear_cm, 0.0);
-        assert!(d.clone().style_ku100().static_ambience);
+        assert!(!d.clone().style_ku100().static_ambience);
         let e = d.clone().style_earclean();
         assert!(e.inear_cm > 1.0 && e.hold_s >= 20.0 && e.isolation_db >= 40.0);
         assert!(e.breath_db == 0.0 && e.puff == 0.0 && e.sway == 0.0 && e.sway_follow == 0.0 && e.soft_near == 0.0);

@@ -169,7 +169,7 @@ pub extern "C" fn asmr_set_style(style: c_int) -> c_int {
         3 => "style_breath",
         _ => return -1,
     };
-    report(catch_unwind(|| update_params(|p| settings::action(p, name))))
+    report(catch_unwind(|| settings::run_action(name)))
 }
 
 /// 按钮：`style_ear` / `style_ku100` / `style_earclean` / `style_breath` / `reset` / `bg_rain_night` / `bg_off`。返回 0 = 成功。
@@ -179,7 +179,7 @@ pub extern "C" fn asmr_set_style(style: c_int) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn asmr_action(name: *const c_char) -> c_int {
     let name = from_c(name);
-    report(catch_unwind(|| update_params(|p| settings::action(p, &name))))
+    report(catch_unwind(|| settings::run_action(&name)))
 }
 
 /// 改一个参数：`key` 是 `Params` 的字段名或虚拟字段（`ear_cm`、`manual_cm`、`moves_per_min`、`denoise_slider`），

@@ -74,6 +74,10 @@ fn radar_pick(d: egui::Vec2, rmax: f32) -> (f32, f32) {
 /// 位置图边缘对应的距离（米）。
 const RADAR_MAX_R: f32 = 0.8;
 
+/// 输出增益的说明（左下角降噪下面那一行）。
+const OUT_GAIN_TIP_ZH: &str = "在自动响度之后、峰值限制器之前整体加减音量，相当于耳机音量旋钮。只在实时 / 试听时起作用；转换文件不用它，文件的响度精确归一化到「目标响度」。往上推到峰值上限后只会被限制器压扁，不会更响";
+const OUT_GAIN_TIP_EN: &str = "Overall gain after auto level and before the peak limiter, like a headphone volume knob. Real-time / preview only; file conversion ignores it and normalizes exactly to the target loudness. Above the ceiling the limiter only squashes it, it won't get louder";
+
 /// 参数表的一行：滑轨用常用范围，手输或拖动数值可以超出该范围。
 fn row(ui: &mut egui::Ui, label: &str, tip: &str, w: egui::Slider<'_>) -> bool {
     let l = ui.label(label);
@@ -2138,7 +2142,7 @@ impl App {
         }
     }
 
-    /// 左下角：输入降噪。一个 0–100 的滑条：数值 = 底噪最多压低多少分贝，0 = 关闭，100 = 不设上限。
+    /// 左下角：输入降噪（一个 0–100 的滑条：数值 = 底噪最多压低多少分贝，0 = 关闭，100 = 不设上限），下面是输出增益。
     fn ui_denoise(ui: &mut egui::Ui, p: &mut Params) {
         ui.add_space(5.0);
         let mut v = p.denoise_slider();
@@ -2173,15 +2177,26 @@ impl App {
             format!("{} {:.0} dB{}", t("底噪最多压低", "Noise lowered by at most"), p.denoise_db, t("，人声音量不变。数值越大越干净，气声的高频也会被削掉一点。延迟增加 20 ms", "; the voice keeps its level. Higher = cleaner, but breathy highs lose a little. Adds 20 ms of latency"))
         };
         ui.add(egui::Label::new(RichText::new(note).small().weak()).wrap());
+        ui.add_space(4.0);
+        // 输出增益：只是监听音量（实时 / 试听），放在降噪旁边随手可调；文件转换不用它，响度由目标响度决定
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(t("输出增益", "Output gain")).strong()).on_hover_text(t(OUT_GAIN_TIP_ZH, OUT_GAIN_TIP_EN));
+            ui.spacing_mut().slider_width = 260.0;
+            ui.add(egui::Slider::new(&mut p.out_gain_db, -60.0..=12.0).clamping(egui::SliderClamping::Never).suffix(" dB").fixed_decimals(1))
+                .on_hover_text(t(OUT_GAIN_TIP_ZH, OUT_GAIN_TIP_EN));
+        });
+        ui.add(egui::Label::new(RichText::new(t("只在实时 / 试听时起作用（相当于耳机音量）；转换文件不用它，文件的响度由「目标响度」决定", "Real-time / preview only (like a headphone volume); file conversion ignores it, the file loudness follows the target")).small().weak()).wrap());
         ui.add_space(3.0);
     }
 
     /// 右侧第一栏：风格、贴耳感、左右移动。`mix`：多音频合成中时是 Some(是否一起移动)——各自固定时左右移动不起作用，
     /// 一起移动时几个音频按这里的方式一起走。
     ///
-    /// 按下风格按钮时，返回需同步的文件转换目标响度。
-    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<f32> {
+    /// 按下风格按钮或「恢复默认」时返回 Some(需同步的文件转换目标响度)：调用方据此同步目标响度、关掉左右双人
+    /// （各风格的默认状态都是一个声音）。
+    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<Option<f32>> {
         let mut file_lufs = None;
+        let mut pressed = false;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(t("风格", "Style")).strong());
             // 从掏耳切回人声的风格：文件转换的目标响度也恢复成 −16
@@ -2192,22 +2207,27 @@ impl App {
             if style_button(ui, "style_ear", t("贴耳加强", "Close to ear")).on_hover_text(t("嘴离耳约 1.7 cm，另一只耳朵几乎听不到，不加房间，左右耳慢慢穿梭", "Mouth ≈1.7 cm from the ear, far ear almost silent, no room, slow sweeps between the ears")).clicked() {
                 *p = p.clone().style_ear();
                 file_lufs = back;
+                pressed = true;
             }
             if style_button(ui, "style_ku100", t("KU100 实录", "KU100 natural")).on_hover_text(t("模拟 KU100 近耳轻语。贴近时带出原声里细微的呼吸，控制响齿音和低频气流。声源在耳边和身前随机停留，远耳保留实测房间声。", "Models close whispers on a KU100. Brings out quiet breath as the voice draws near, with controlled sibilance and low-frequency air pulses. The voice pauses near either ear or in front, with measured room sound in the far ear.")).clicked() {
                 *p = p.clone().style_ku100();
                 file_lufs = back;
+                pressed = true;
             }
             if style_button(ui, "style_breath", t("呼吸音", "Breathing")).on_hover_text(t("处理录音中的吸气和呼气。用带自然停顿的单声道呼吸录音试听。", "Use a recording of breathing with its natural pauses.")).clicked() {
                 *p = p.clone().style_breath();
                 file_lufs = Some(crate::dsp::params::BREATH_LUFS);
+                pressed = true;
             }
             if style_button(ui, "style_earclean", t("掏耳", "Ear cleaning")).on_hover_text(t("给棉签、挖耳勺、刮擦这类触发音用（不是给人声用的）：声源伸进耳道进进出出，带耳道共鸣、耳内低频和堵耳的闷感，另一只耳朵基本听不到，每只耳朵约 40 秒才换边。按两段 KU100 掏耳实录标定。降噪会把这类声音当噪声压掉，请把降噪关掉或调低", "For trigger sounds such as cotton swabs, ear picks and scratching (not for voice): the source moves in and out of the ear canal with canal resonance, in-ear rumble and an occluded tone; the other ear is almost silent and the ear changes about every 40 s. Calibrated to two KU100 ear-cleaning recordings. Denoise treats such sounds as noise: turn it off or down")).clicked() {
                 *p = p.clone().style_earclean();
                 file_lufs = Some(crate::dsp::params::EARCLEAN_LUFS);
+                pressed = true;
             }
             if ui.button(t("恢复默认", "Reset")).clicked() {
                 *p = Params::default();
                 file_lufs = back;
+                pressed = true;
             }
         });
         egui::CollapsingHeader::new(RichText::new(t("贴耳感", "Closeness")).strong()).default_open(true).show(ui, |ui| {
@@ -2270,7 +2290,7 @@ impl App {
                 ui.add(egui::Label::new(RichText::new(t("手动：声源停在你摆的位置，在左边的位置图上拖动。忽远忽近、上下、自然晃动此时不起作用", "Manual: the source stays where you put it; drag it on the map at the left. Near / far sway, up / down and micro motion are inactive")).weak().small()).wrap());
             }
         });
-        file_lufs
+        pressed.then_some(file_lufs)
     }
 
     /// "左右移动"里的模式按钮和各模式的参数（合成时整块变灰）。
@@ -2462,7 +2482,6 @@ impl App {
                 ui.add_enabled_ui(p.auto_level, |ui| ui.label(t("目标响度", "Target")));
                 ui.add_enabled(p.auto_level, egui::Slider::new(&mut p.target_lufs, -30.0..=-10.0).clamping(egui::SliderClamping::Never).suffix(" LUFS").fixed_decimals(0));
                 ui.end_row();
-                row(ui, t("输出增益", "Output gain"), "", egui::Slider::new(&mut p.out_gain_db, -60.0..=12.0).suffix(" dB").fixed_decimals(1));
                 row(ui, t("峰值上限", "Ceiling"), t("限制器的真峰值上限", "True-peak ceiling of the limiter"), egui::Slider::new(&mut p.ceiling_db, -6.0..=-0.1).suffix(" dBTP").fixed_decimals(1));
                 ui.label(t("随机种子", "Seed")).on_hover_text(t("换一个数字就换一套走位（下次开始时生效）", "A different number gives a different path (applies on next start)"));
                 ui.add(egui::DragValue::new(&mut p.seed).speed(0.1));
@@ -2768,7 +2787,12 @@ impl eframe::App for App {
                     Self::params_right(&mut c[1], p, layout == Some(false));
                 });
                 if let Some(l) = style_lufs {
-                    self.s.file_lufs = l;
+                    if let Some(l) = l {
+                        self.s.file_lufs = l;
+                    }
+                    // 各风格的默认状态都是一个声音：按风格按钮 / 恢复默认时关掉左右双人（文件转换页和实时页的都关）
+                    self.set_duo(0.0);
+                    self.set_rt_duo(0.0);
                 }
             });
         });

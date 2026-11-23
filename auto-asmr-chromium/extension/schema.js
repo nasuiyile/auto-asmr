@@ -195,7 +195,7 @@ export const GROUPS = [
     rows: [
       { type: 'check', key: 'auto_level', label: '自动响度（慢慢把音量拉到目标）' },
       { key: 'target_lufs', label: '目标响度', min: -30, max: -10, unit: 'LUFS', dec: 0, on: (p) => p.auto_level },
-      { key: 'out_gain_db', label: '输出增益', min: -60, max: 12, unit: 'dB', dec: 1 },
+      { key: 'out_gain_db', label: '输出增益', min: -60, max: 12, unit: 'dB', dec: 1, tip: '在自动响度之后、峰值限制器之前整体加减音量，相当于耳机音量旋钮。只在实时播放时起作用（电脑版、安卓版转换文件时不用它，文件的响度由目标响度决定）。往上推到峰值上限后只会被限制器压扁，不会更响' },
       { key: 'ceiling_db', label: '峰值上限', min: -6, max: -0.1, unit: 'dBTP', dec: 1, tip: '限制器的真峰值上限' },
       { type: 'int', key: 'seed', label: '随机种子', tip: '换一个数字就换一套走位（下次开始处理时生效）' },
     ],

@@ -21,6 +21,16 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -103,6 +113,10 @@ object AppIcons {
     )
     val Star = icon("star", "M12,17.27L18.18,21l-1.64,-7.03L22,9.24l-7.19,-0.61L12,2 9.19,8.63 2,9.24l5.46,4.73L5.82,21z")
     val Check = icon("check", "M9,16.17L4.83,12l-1.42,1.41L9,19 21,7l-1.41,-1.41z")
+    val Help = icon(
+        "help",
+        "M11,18h2v-2h-2v2zM12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM12,20c-4.41,0 -8,-3.59 -8,-8s3.59,-8 8,-8 8,3.59 8,8 -3.59,8 -8,8zM12,6c-2.21,0 -4,1.79 -4,4h2c0,-1.1 0.9,-2 2,-2s2,0.9 2,2c0,2 -3,1.75 -3,5h2c0,-2.25 3,-2.5 3,-5 0,-2.21 -1.79,-4 -4,-4z",
+    )
 }
 
 /** 图标（默认 20 dp，跟随内容颜色）。 */
@@ -111,7 +125,7 @@ fun Ic(v: ImageVector, modifier: Modifier = Modifier, size: Dp = 20.dp, tint: Co
     if (tint == Color.Unspecified) Icon(v, null, modifier.size(size)) else Icon(v, null, modifier.size(size), tint = tint)
 }
 
-/** 页面的分区：圆角卡片，上面一行标题（可选右边的操作），下面是内容。 */
+/** 页面的分区：圆角卡片，上面一行标题（可选右边的操作），下面是内容。排得紧凑些，第一屏能放下更多东西。 */
 @Composable
 fun Section(
     title: String? = null,
@@ -121,15 +135,15 @@ fun Section(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Card(
-        modifier.fillMaxWidth().padding(vertical = 6.dp),
+        modifier.fillMaxWidth().padding(vertical = 4.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         shape = MaterialTheme.shapes.large,
     ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             if (title != null) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.heightIn(min = 28.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(title, style = MaterialTheme.typography.titleMedium)
+                        Text(title, style = MaterialTheme.typography.titleSmall)
                         if (subtitle != null) {
                             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -142,11 +156,44 @@ fun Section(
     }
 }
 
-/** 页面顶上的大标题和一行说明（全局页、文件转换页）。 */
+/** 说明对话框里的一段：小标题 + 正文。 */
+class HelpItem(val title: String, val text: String)
+
+/**
+ * 页面顶上的标题行：标题、一行很短的提示（可选），右边一个「?」按钮。
+ * 页面上的说明文字都收进点「?」打开的对话框里，页面本身只留控件。
+ */
 @Composable
-fun PageHeader(title: String, note: String) {
-    Column(Modifier.padding(top = 12.dp, bottom = 6.dp)) {
-        Text(title, style = MaterialTheme.typography.headlineMedium)
-        Text(note, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+fun PageHeader(title: String, hint: String? = null, help: List<HelpItem> = emptyList(), trailing: @Composable RowScope.() -> Unit = {}) {
+    var open by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleLarge)
+            if (hint != null) Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        trailing()
+        if (help.isNotEmpty()) {
+            IconButton(onClick = { open = true }) { Ic(AppIcons.Help, size = 24.dp, tint = MaterialTheme.colorScheme.primary) }
+        }
     }
+    if (open) HelpDialog(title, help) { open = false }
+}
+
+/** 「?」打开的说明：可滚动的几段文字。 */
+@Composable
+fun HelpDialog(title: String, help: List<HelpItem>, onClose: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = { TextButton(onClick = onClose) { Text("知道了") } },
+        icon = { Ic(AppIcons.Help, size = 24.dp) },
+        title = { Text(title) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                for ((i, h) in help.withIndex()) {
+                    Text(h.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = if (i == 0) 0.dp else 12.dp))
+                    Text(h.text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+                }
+            }
+        },
+    )
 }

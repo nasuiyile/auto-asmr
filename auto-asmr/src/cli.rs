@@ -107,7 +107,7 @@ convert 的选项（括号里是默认值）：
   --over-top <0–1>        换耳时从头顶绕过去的概率（0）
  房间与回放
   --room none|real        KU100 实测真实房间（none）    --wet <dB>（-3）
-  --static-ambience on|off  固定原声底噪。KU100 预设开启；其他预设默认关闭
+  --static-ambience on|off  固定原声底噪。所有预设默认关闭
   --headphone diffuse|native|<型号>   回放补偿（diffuse）；--headphone list 列出型号
  人声处理
   --denoise [0–100]       输入降噪 RNNoise（关）。数值 = 底噪最多压低多少 dB，如 12；不写数值或 100 = 降到最干净

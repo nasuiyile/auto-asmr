@@ -6,9 +6,6 @@
 //! - **一起移动**：几个音源都按总参数里的移动方式（穿梭、随机走位、环绕……）走，用同一个随机种子和同一个说话时钟
 //!   （任何一个音源在说话时按真实时间走），所以走位一模一样；位置再整体绕头错开 360°/N。两个音源时正好相对：
 //!   一个贴左耳时另一个贴右耳，换边时一个从脸前、一个从脑后绕过去，不会撞在一起。
-//! - **镜像**（只用于两个音源）：和一起移动一样共用一套走位，但 1 号折到头的左半边、2 号折到右半边，两个人左右对称
-//!   （[`super::motion::fold_half`]）：同时贴两耳、同时凑到脸前两侧，离正中面至少 30°，所以永远不会撞上。
-//!   换边的路线变成"朝脸前（或脑后）靠过去再退回这一侧"，两个人各守一边、不换边。三个以上音源时按一起移动。
 //!
 //! **左右双人**：同一段音频当成两个声音（默认一个在左耳、一个在右耳），第 2 个整体晚几十毫秒（[`MixSetup::delays`]），
 //! 听起来是两个人一前一后、一左一右地说。延迟在读输入时加（输入第 k 段的第 t 个样本 = 原音频的第 t − 延迟 个），
@@ -23,7 +20,6 @@ use super::dynamics::{Leveler, Limiter, LoudnessMeter};
 use super::engine::{sync_rain, Engine, EngineConfig, PostMode, Telemetry};
 use super::rain::Rain;
 use super::filters::ema_coef;
-use super::motion::Half;
 use super::params::{MotionMode, Params};
 use super::{db_to_lin, lin_to_db, CTRL, FS, R_MAX, R_MIN};
 use serde::{Deserialize, Serialize};
@@ -162,86 +158,6 @@ pub fn voice_params(base: &Params, v: &Voice, k: usize) -> Params {
     p
 }
 
-/// 合成的排布。配置文件里是两个开关 `mix_follow`、`mix_mirror`（见 [`Layout::from_flags`]），旧版只认得前一个：
-/// 镜像时两个都打开，旧版读到的就是"一起移动"。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Layout {
-    /// 各自固定在自己的位置。
-    #[default]
-    Fixed,
-    /// 一起移动，彼此错开 360°/N。
-    Follow,
-    /// 镜像：两个声音左右对称，各守一边（只用于两个音源）。
-    Mirror,
-}
-
-impl Layout {
-    pub const ALL: [Layout; 3] = [Layout::Fixed, Layout::Follow, Layout::Mirror];
-
-    /// 由配置文件里的两个开关得出：镜像优先。
-    pub fn from_flags(follow: bool, mirror: bool) -> Self {
-        if mirror {
-            Layout::Mirror
-        } else if follow {
-            Layout::Follow
-        } else {
-            Layout::Fixed
-        }
-    }
-
-    /// 写回配置文件的两个开关（`mix_follow`, `mix_mirror`）。
-    pub fn flags(self) -> (bool, bool) {
-        (self != Layout::Fixed, self == Layout::Mirror)
-    }
-
-    /// 安卓版、浏览器插件的界面和命令接口里用的名字。
-    pub fn key(self) -> &'static str {
-        match self {
-            Layout::Fixed => "fixed",
-            Layout::Follow => "follow",
-            Layout::Mirror => "mirror",
-        }
-    }
-
-    pub fn from_key(k: &str) -> Option<Self> {
-        Layout::ALL.into_iter().find(|l| l.key() == k)
-    }
-
-    /// 几个音源共用一套走位（一起移动、镜像）。
-    pub fn moves(self) -> bool {
-        self != Layout::Fixed
-    }
-
-    /// `n` 个音源时实际用的排布：镜像只用于两个音源，其余按一起移动。
-    pub fn for_voices(self, n: usize) -> Self {
-        if self == Layout::Mirror && n != 2 {
-            Layout::Follow
-        } else {
-            self
-        }
-    }
-
-    /// 第 `k` 个音源的走位折到哪一侧：镜像时 1 号在左、2 号在右，其余不折。
-    pub fn half(self, k: usize) -> Half {
-        match (self, k) {
-            (Layout::Mirror, 0) => Half::Left,
-            (Layout::Mirror, _) => Half::Right,
-            _ => Half::Whole,
-        }
-    }
-
-    /// 由领头的位置（1 号的方位角）得出第 `k` 个音源的方位角（共 `n` 个，`self` 已按 [`Layout::for_voices`]）：
-    /// 一起移动绕头转 360°·k/N，镜像时 2 号左右翻过来，各自固定原样返回。
-    pub fn place(self, n: usize, k: usize, az: f32) -> f32 {
-        match self {
-            Layout::Fixed => az,
-            Layout::Follow => (az + 360.0 * k as f32 / n.max(1) as f32).rem_euclid(360.0),
-            Layout::Mirror if k == 0 => az,
-            Layout::Mirror => (360.0 - az).rem_euclid(360.0),
-        }
-    }
-}
-
 /// 交给引擎（音频线程）的一份合成配置。
 pub struct MixSetup {
     /// 每个音源的引擎配置。
@@ -250,10 +166,8 @@ pub struct MixSetup {
     pub gains: Vec<f32>,
     /// 每个音源的方位角偏移（度）：一起移动时是 0、360/N、2·360/N……；各自固定时全是 0。
     pub offsets: Vec<f32>,
-    /// 一起移动：几个音源共用一个说话时钟、同一套走位，位置按 `offsets` 错开。镜像时也为 true。
+    /// 一起移动：几个音源共用一个说话时钟、同一套走位，位置按 `offsets` 错开。
     pub follow: bool,
-    /// 镜像（只在两个音源时）：1 号的走位折到左半边，2 号折到右半边（`offsets` 全是 0）。
-    pub mirror: bool,
     /// 自动平衡：各音源事先由整段算好的输入响度（None = 不平衡）和强度（0–1）。主播模式（[`Mixer::set_live`]）
     /// 的输入响度由混音器边听边算，不看 `balance`，只看强度。
     pub balance: Option<Arc<BalanceData>>,
@@ -264,25 +178,13 @@ pub struct MixSetup {
 }
 
 impl MixSetup {
-    /// 由总配置、各音源的位置和音量、各音源的响度（对齐用）、排布算出合成配置。镜像只用于两个音源，其余按一起移动。
+    /// 由总配置、各音源的位置和音量、各音源的响度（对齐用）算出合成配置。`follow`：一起移动，否则各自固定。
     /// `prev` 里参数没变的音源配置原样复用。
-    pub fn new(base: &Arc<EngineConfig>, voices: &[Voice], lufs: &[Option<f32>], layout: Layout, prev: Option<&MixSetup>) -> Self {
+    pub fn new(base: &Arc<EngineConfig>, voices: &[Voice], lufs: &[Option<f32>], follow: bool, prev: Option<&MixSetup>) -> Self {
         let n = voices.len();
-        let layout = layout.for_voices(n);
-        let follow = layout.moves();
-        // 一起移动、镜像：每个音源都直接用总配置（同一个移动方式、同一个随机种子）
+        // 一起移动：每个音源都直接用总配置（同一个移动方式、同一个随机种子）
         let cfgs = if follow { vec![base.clone(); n] } else { voice_configs(base, voices, prev) };
-        let offsets = follow_offsets(n, layout == Layout::Follow);
-        MixSetup { cfgs, gains: balance_gains(lufs, voices), offsets, follow, mirror: layout == Layout::Mirror, balance: None, balance_strength: 0.0, delays: vec![0; n] }
-    }
-
-    /// 实际的排布（音源数已经算进去了）。
-    pub fn layout(&self) -> Layout {
-        if self.mirror {
-            Layout::Mirror
-        } else {
-            Layout::from_flags(self.follow, false)
-        }
+        MixSetup { cfgs, gains: balance_gains(lufs, voices), offsets: follow_offsets(n, follow), follow, balance: None, balance_strength: 0.0, delays: vec![0; n] }
     }
 
     /// 设各音源的延迟（样本；少给的按 0）。
@@ -361,8 +263,6 @@ pub struct Mixer {
     post: PostMode,
     /// 一起移动：几个引擎按控制块同步推进，共用说话时钟。`phase`：当前控制块里已经处理了多少样本（各引擎相同）。
     follow: bool,
-    /// 镜像（构造时定的）。
-    mirror: bool,
     phase: usize,
     /// 收尾用的参数（自动响度、目标响度、输出增益、峰值上限）取第 0 个音源的配置——各音源这几项都相同。
     cfg: Arc<EngineConfig>,
@@ -388,7 +288,7 @@ pub struct Mixer {
 
 impl Mixer {
     /// `lookahead_s`：分析预读（实时 0，文件约 1 s）。各音源的引擎都不做响度和限幅，相加之后统一做。
-    /// 排布方式（各自固定 / 一起移动 / 镜像）和音源数以这里为准，之后不能改（要改就重新开始）。
+    /// 排布方式（各自固定 / 一起移动）和音源数以这里为准，之后不能改（要改就重新开始）。
     pub fn new(setup: &MixSetup, post: PostMode, lookahead_s: f32) -> Self {
         assert!(!setup.cfgs.is_empty(), "合成至少要有一个音源");
         let n = setup.cfgs.len();
@@ -397,19 +297,12 @@ impl Mixer {
         for (e, &o) in engines.iter_mut().zip(&setup.offsets) {
             e.az_offset = o;
         }
-        let mirror = setup.mirror && n == 2;
-        if mirror {
-            for (k, e) in engines.iter_mut().enumerate() {
-                e.set_half(Layout::Mirror.half(k));
-            }
-        }
         Mixer {
             engines,
             target: gains.clone(),
             gains,
             post,
             follow: setup.follow && n > 1,
-            mirror,
             phase: 0,
             cfg: setup.cfgs[0].clone(),
             leveler: Leveler::new(),
@@ -465,24 +358,9 @@ impl Mixer {
         self.live_lv = on.then(LiveLevels::new);
     }
 
-    /// 是不是"一起移动"（构造时定的，之后不变；镜像也算）。
+    /// 是不是"一起移动"（构造时定的，之后不变）。
     pub fn is_follow(&self) -> bool {
         self.follow
-    }
-
-    /// 排布（构造时定的，之后不变）。
-    pub fn layout(&self) -> Layout {
-        if self.mirror {
-            Layout::Mirror
-        } else {
-            Layout::from_flags(self.follow, false)
-        }
-    }
-
-    /// 能不能直接换成 `setup`（[`Mixer::set_setup`]）：排布和音源数都没变。不能时要重新建一个。
-    pub fn accepts(&self, setup: &MixSetup) -> bool {
-        let n = setup.cfgs.len();
-        n == self.engines.len() && self.follow == (setup.follow && n > 1) && self.mirror == (setup.mirror && n == 2)
     }
 
     /// 换配置（在各引擎的控制块边界生效）：参数、位置、音量。不分配内存，可以在音频线程里调用；
@@ -681,9 +559,9 @@ impl Mixer {
 pub const DUO_VOICES: [Voice; 2] = [Voice { az: PRESETS[0].2, dist: None, gain_db: 0.0 }, Voice { az: PRESETS[1].2, dist: None, gain_db: 0.0 }];
 
 /// 边播边处理的左右双人用的合成配置：两个声音（`voices`）都是同一路输入，所以不做响度对齐；第 2 个晚 `delay_ms`；
-/// `layout`：排布；`balance`：自动平衡强度（0–1，输入响度由合成器边听边算）。`prev` 里没变的配置原样复用。
-pub fn duo_setup(base: &Arc<EngineConfig>, voices: &[Voice; 2], delay_ms: f32, layout: Layout, balance: f32, prev: Option<&MixSetup>) -> MixSetup {
-    MixSetup::new(base, voices, &[None, None], layout, prev).with_balance(None, balance.clamp(0.0, 1.0)).with_delays(&[0, delay_samples(delay_ms)])
+/// `follow`：一起移动；`balance`：自动平衡强度（0–1，输入响度由合成器边听边算）。`prev` 里没变的配置原样复用。
+pub fn duo_setup(base: &Arc<EngineConfig>, voices: &[Voice; 2], delay_ms: f32, follow: bool, balance: f32, prev: Option<&MixSetup>) -> MixSetup {
+    MixSetup::new(base, voices, &[None, None], follow, prev).with_balance(None, balance.clamp(0.0, 1.0)).with_delays(&[0, delay_samples(delay_ms)])
 }
 
 /// 边播边处理时输入留多少历史（样本，2 的幂）：要装得下最长的延迟（300 ms）再加一段 [`SCRATCH`]。
@@ -763,12 +641,11 @@ impl LiveMix {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsp::params::Via;
     use crate::dsp::testsig::test_voice;
 
     fn setup(voices: &[Voice], gains: Vec<f32>) -> MixSetup {
         let base = EngineConfig::new(Params::default(), None);
-        MixSetup { cfgs: voice_configs(&base, voices, None), gains, offsets: vec![0.0; voices.len()], follow: false, mirror: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()] }
+        MixSetup { cfgs: voice_configs(&base, voices, None), gains, offsets: vec![0.0; voices.len()], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()] }
     }
 
     #[test]
@@ -896,7 +773,7 @@ mod tests {
         // 滤波器直接共用总参数里算好的，不重算
         assert!(Arc::ptr_eq(cfgs[1].derived.ear_eq.as_ref().unwrap(), base.derived.ear_eq.as_ref().unwrap()));
         // 参数没变的音源原样复用
-        let prev = MixSetup { cfgs: cfgs.clone(), gains: vec![1.0; 2], offsets: vec![0.0; 2], follow: false, mirror: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()] };
+        let prev = MixSetup { cfgs: cfgs.clone(), gains: vec![1.0; 2], offsets: vec![0.0; 2], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()] };
         let again = voice_configs(&base, &voices, Some(&prev));
         assert!(Arc::ptr_eq(&again[0], &cfgs[0]) && Arc::ptr_eq(&again[1], &cfgs[1]));
     }
@@ -909,7 +786,7 @@ mod tests {
         let half = n / 2;
         let b: Vec<f32> = a.iter().enumerate().map(|(i, &v)| if i >= half { 0.7 * v } else { 0.0 }).collect();
         let base = Arc::new(EngineConfig::new(Params::default(), None));
-        let st = MixSetup::new(&base, &[Voice::preset(0), Voice::preset(1)], &[None, None], Layout::Follow, None);
+        let st = MixSetup::new(&base, &[Voice::preset(0), Voice::preset(1)], &[None, None], true, None);
         assert_eq!(st.offsets, vec![0.0, 180.0]);
         assert!(Arc::ptr_eq(&st.cfgs[0], &base) && Arc::ptr_eq(&st.cfgs[1], &base));
         let mut mx = Mixer::new(&st, PostMode::Offline, 0.0);
@@ -944,95 +821,10 @@ mod tests {
     }
 
     #[test]
-    fn mirror_mode_stays_symmetric_and_on_its_own_side() {
-        // 镜像：每种移动方式下两个声音始终左右对称（输入相同时逐块精确对称），1 号在左、2 号在右，离正前 / 正后至少 30°；
-        // 穿梭、随机走位、环绕时 1 号确实在动：既贴过耳朵，也靠到过脸前（或脑后）。第 2 个晚 80 ms（左右双人）时同样各守一边
-        let x = test_voice(40.0);
-        let n = x.len();
-        let delayed: Vec<f32> = std::iter::repeat(0.0).take(3840).chain(x.iter().copied()).take(n).collect();
-        for mode in [MotionMode::Sweep, MotionMode::Random, MotionMode::Orbit, MotionMode::Static, MotionMode::Manual] {
-            let p = Params { mode, via: Via::Alternate, over_top: 0.3, static_az: 10.0, manual_az: 60.0, ..Params::default() };
-            let base = Arc::new(EngineConfig::new(p, None));
-            let st = MixSetup::new(&base, &DUO_VOICES, &[None, None], Layout::Mirror, None);
-            assert!(st.mirror && st.follow && st.offsets == vec![0.0, 0.0]);
-            assert_eq!(st.layout(), Layout::Mirror);
-            for (second, exact) in [(&x, true), (&delayed, false)] {
-                let mut mx = Mixer::new(&st, PostMode::Offline, 0.0);
-                let (mut l, mut r) = (vec![0f32; 1000], vec![0f32; 1000]);
-                let (mut margin, mut asym, mut th_min, mut th_max) = (90f32, 0f32, 180f32, 0f32);
-                for o in (0..n).step_by(1000) {
-                    let e = (o + 1000).min(n);
-                    mx.process(&[&x[o..e], &second[o..e]], &mut l[..e - o], &mut r[..e - o]);
-                    let (a, b) = (mx.engine(0).tele, mx.engine(1).tele);
-                    // 离正前多少度（0–180），左边的按左边算
-                    let (ta, tb) = ((360.0 - a.az).rem_euclid(360.0), b.az.rem_euclid(360.0));
-                    for t in [ta, tb] {
-                        margin = margin.min(t.min(180.0 - t));
-                    }
-                    assert!(ta < 180.0 && tb < 180.0, "{mode:?}：1 号在 {:.0}°、2 号在 {:.0}°，跑到了另一侧", a.az, b.az);
-                    asym = asym.max(ang_diff(b.az, 360.0 - a.az)).max((a.r - b.r).abs() * 100.0).max((a.el - b.el).abs());
-                    (th_min, th_max) = (th_min.min(ta), th_max.max(ta));
-                }
-                assert!(margin > 29.0, "{mode:?}：离正中面最近只有 {margin:.1}°");
-                if exact {
-                    assert!(asym < 0.01, "{mode:?}：两个声音不对称，最多差 {asym:.3}（° / cm）");
-                    if matches!(mode, MotionMode::Sweep | MotionMode::Random | MotionMode::Orbit) {
-                        assert!(th_max - th_min > 40.0, "{mode:?}：1 号只在 {th_min:.0}°–{th_max:.0}° 之间动");
-                        assert!(mx.engine(0).tele.n_moves == mx.engine(1).tele.n_moves, "同一套走位");
-                    }
-                    match mode {
-                        MotionMode::Sweep => assert!(th_min < 40.0, "穿梭：换边变成靠向脸前，应当到过脸前 30° 附近：{th_min:.0}°–{th_max:.0}°"),
-                        MotionMode::Static => assert!((ta_last(&mx) - 30.0).abs() < 8.0, "固定在正前 10°：折到 30° 附近"),
-                        MotionMode::Manual => assert!((ta_last(&mx) - 60.0).abs() < 3.0, "手动摆在右前 60°：1 号在左前 60°"),
-                        _ => {}
-                    }
-                }
-            }
-        }
-        // 穿梭「从脑后绕」：靠过去的是脑后（离正前 150° 附近）
-        let back = Arc::new(EngineConfig::new(Params { via: Via::Back, approach: 0.0, ..Params::default() }, None));
-        let mut mx = Mixer::new(&MixSetup::new(&back, &DUO_VOICES, &[None, None], Layout::Mirror, None), PostMode::Offline, 0.0);
-        let (mut l, mut r) = (vec![0f32; 1000], vec![0f32; 1000]);
-        let mut th_max = 0f32;
-        for o in (0..n).step_by(1000) {
-            let e = (o + 1000).min(n);
-            mx.process(&[&x[o..e], &x[o..e]], &mut l[..e - o], &mut r[..e - o]);
-            th_max = th_max.max(ta_last(&mx));
-        }
-        assert!(th_max > 140.0, "从脑后绕时应当靠到脑后：最远 {th_max:.0}°");
-        // 镜像只用于两个音源：四个音源时按一起移动
-        let base = Arc::new(EngineConfig::new(Params::default(), None));
-        let voices: Vec<Voice> = (0..4).map(Voice::preset).collect();
-        let st = MixSetup::new(&base, &voices, &[None; 4], Layout::Mirror, None);
-        assert!(!st.mirror && st.follow && st.offsets == vec![0.0, 90.0, 180.0, 270.0]);
-        // 换排布要重新建混音器
-        let mx = Mixer::new(&st, PostMode::Offline, 0.0);
-        assert!(mx.accepts(&st) && !mx.accepts(&MixSetup::new(&base, &voices, &[None; 4], Layout::Fixed, None)));
-        assert_eq!(mx.layout(), Layout::Follow);
-        let two = Mixer::new(&MixSetup::new(&base, &DUO_VOICES, &[None, None], Layout::Mirror, None), PostMode::Offline, 0.0);
-        assert!(!two.accepts(&MixSetup::new(&base, &DUO_VOICES, &[None, None], Layout::Follow, None)));
-        assert_eq!(two.layout(), Layout::Mirror);
-        // 由领头的位置换算各声音的位置（界面没在试听时画队形用）
-        assert_eq!(Layout::Mirror.place(2, 1, 300.0), 60.0);
-        assert_eq!(Layout::Follow.place(2, 1, 300.0), 120.0);
-        assert_eq!(Layout::Fixed.place(2, 1, 300.0), 300.0);
-        for l in Layout::ALL {
-            assert_eq!(Layout::from_key(l.key()), Some(l));
-            let (f, m) = l.flags();
-            assert_eq!(Layout::from_flags(f, m), l);
-        }
-    }
-
-    /// 1 号此刻离正前多少度（左边）。
-    fn ta_last(mx: &Mixer) -> f32 {
-        (360.0 - mx.engine(0).tele.az).rem_euclid(360.0)
-    }
-
-    #[test]
     fn follow_mode_spreads_more_voices_evenly() {
         let base = Arc::new(EngineConfig::new(Params { mode: MotionMode::Orbit, ..Params::default() }, None));
         let voices: Vec<Voice> = (0..4).map(Voice::preset).collect();
-        let st = MixSetup::new(&base, &voices, &[None; 4], Layout::Follow, None);
+        let st = MixSetup::new(&base, &voices, &[None; 4], true, None);
         assert_eq!(st.offsets, vec![0.0, 90.0, 180.0, 270.0]);
         let x = test_voice(10.0);
         let mut mx = Mixer::new(&st, PostMode::Offline, 0.0);
@@ -1044,7 +836,7 @@ mod tests {
             assert!((gap - 90.0).abs() < 15.0, "音源 {k} 与下一个相隔 {gap:.0}°");
         }
         // 各自固定时没有偏移
-        assert_eq!(MixSetup::new(&base, &voices, &[None; 4], Layout::Fixed, None).offsets, vec![0.0; 4]);
+        assert_eq!(MixSetup::new(&base, &voices, &[None; 4], false, None).offsets, vec![0.0; 4]);
     }
 
     #[test]
@@ -1053,7 +845,7 @@ mod tests {
         // 两个声音一左一右；一次给多长（128、1000、4096…）输出都一样
         let x = test_voice(4.0);
         let base = Arc::new(EngineConfig::new(Params { auto_level: false, ..Params::default() }, None));
-        let st = duo_setup(&base, &DUO_VOICES, 80.0, Layout::Fixed, 0.0, None);
+        let st = duo_setup(&base, &DUO_VOICES, 80.0, false, 0.0, None);
         assert_eq!(st.delays, vec![0, 3840]);
         let run = |chunks: &[usize]| {
             let mut lm = LiveMix::new(&st, false);
@@ -1091,14 +883,14 @@ mod tests {
         // 动作不按主播模式（网页声音是连续的录音）：话很少时和严格跟着说话的试听一样几乎不动
         let x = test_voice(3.0);
         let base = Arc::new(EngineConfig::new(Params::default(), None));
-        let mut lm = LiveMix::new(&duo_setup(&base, &DUO_VOICES, 100.0, Layout::Fixed, 0.0, None), false);
+        let mut lm = LiveMix::new(&duo_setup(&base, &DUO_VOICES, 100.0, false, 0.0, None), false);
         let (mut l, mut r) = (vec![0f32; 256], vec![0f32; 256]);
         let mut o = 0;
         while o + 256 <= FS as usize {
             lm.process(&x[o..o + 256], &mut l, &mut r);
             o += 256;
         }
-        lm.set_setup(&duo_setup(&base, &DUO_VOICES, 50.0, Layout::Fixed, 0.0, None));
+        lm.set_setup(&duo_setup(&base, &DUO_VOICES, 50.0, false, 0.0, None));
         let own_step = x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
         let mut prev = lm.inbs[1][255];
         let mut max_step = 0f32;
@@ -1120,7 +912,7 @@ mod tests {
         let v = test_voice(1.0);
         let sparse: Vec<f32> = (0..FS as usize * 30).map(|i| if i % (FS as usize * 9) < v.len() { v[i % (FS as usize * 9)] } else { 0.0 }).collect();
         let moves = |live: bool| {
-            let mut lm = LiveMix::new(&duo_setup(&base, &DUO_VOICES, 80.0, Layout::Follow, 0.0, None), live);
+            let mut lm = LiveMix::new(&duo_setup(&base, &DUO_VOICES, 80.0, true, 0.0, None), live);
             let (mut l, mut r) = (vec![0f32; sparse.len()], vec![0f32; sparse.len()]);
             lm.process(&sparse, &mut l, &mut r);
             lm.mixer().engine(0).tele.n_moves
@@ -1135,7 +927,7 @@ mod tests {
         let x = test_voice(16.0);
         let base = Arc::new(EngineConfig::new(Params { auto_level: false, ..Params::default() }, None));
         let voices = [DUO_VOICES[0], Voice { dist: Some(0.5), ..DUO_VOICES[1] }];
-        let mut lm = LiveMix::new(&duo_setup(&base, &voices, 80.0, Layout::Fixed, 1.0, None), false);
+        let mut lm = LiveMix::new(&duo_setup(&base, &voices, 80.0, false, 1.0, None), false);
         let (mut l, mut r) = (vec![0f32; 512], vec![0f32; 512]);
         for c in x.chunks_exact(512) {
             lm.process(c, &mut l, &mut r);

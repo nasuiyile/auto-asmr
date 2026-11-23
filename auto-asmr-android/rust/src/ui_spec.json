@@ -71,8 +71,8 @@
      "key": "duo_ms",
      "label": "左右双人",
      "label_en": "Two voices",
-     "tip": "把网页里的声音当成两个人：同一个声音一个在左耳、一个在右耳（各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音（听起来偏在先到的那一边），50–120 ms 像两个人，150 ms 以上像回声。只有第 2 个声音晚，第 1 个和平时一样及时。和电脑版「文件转换」页的左右双人是同一个设置。0 = 关闭",
-     "tip_en": "Turns the page's voice into two people: the same voice at the left ear and at the right ear (each sways near and far on its own), the second one this many milliseconds later. Below about 30 ms the two tend to fuse into one voice; 50–120 ms sounds like two people; above 150 ms it sounds like an echo. Only the second voice is delayed. Same setting as Two voices on the desktop app's File tab. 0 = off",
+     "tip": "把网页里的声音当成两个人：同一个声音一个在左耳、一个在右耳（各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音（听起来偏在先到的那一边），50–120 ms 像两个人，150 ms 以上像回声。只有第 2 个声音晚，第 1 个和平时一样及时。打开时排布默认是「一起移动」（按「左右移动」一起走、始终相对），可以再改回各自固定。和电脑版「文件转换」页的左右双人是同一个设置。0 = 关闭",
+     "tip_en": "Turns the page's voice into two people: the same voice at the left ear and at the right ear (each sways near and far on its own), the second one this many milliseconds later. Below about 30 ms the two tend to fuse into one voice; 50–120 ms sounds like two people; above 150 ms it sounds like an echo. Only the second voice is delayed. Turning it on sets Layout to Together (both follow Left / right motion, always opposite); you can switch back to Fixed. Same setting as Two voices on the desktop app's File tab. 0 = off",
      "min": 0.0,
      "max": 300.0,
      "decimals": 0,
@@ -81,27 +81,22 @@
     },
     {
      "type": "choice",
-     "key": "mix_layout",
+     "key": "mix_follow",
      "style": "chips",
      "label": "排布",
      "label_en": "Layout",
-     "tip": "各自固定：1 号固定在左耳、2 号固定在右耳，只做忽远忽近、上下、自然晃动，「左右移动」不起作用。一起移动：两个声音按「左右移动」的方式一起走，始终在头的两侧相对（一个贴左耳时另一个贴右耳）。镜像：两个声音按「左右移动」的方式走同一套，1 号在头的左半边、2 号在右半边，左右对称（同时贴两耳、同时凑到脸前两侧）；原来要换到另一侧的地方变成朝脸前（或脑后）靠过去再退回来，离正前 / 正后至少 30°，不会撞上",
-     "tip_en": "Fixed: voice 1 stays at the left ear and voice 2 at the right, with only near / far sway, up / down and micro motion; Left / right motion is inactive. Together: both follow Left / right motion and always stay on opposite sides. Mirror: both share the Left / right motion, voice 1 on the left half of the head and voice 2 on the right, mirror images of each other; where the path would cross sides, they lean toward the face (or the back of the head) and come back, staying at least 30° from straight ahead / behind",
+     "tip": "各自固定：1 号固定在左耳、2 号固定在右耳，只做忽远忽近、上下、自然晃动，「左右移动」不起作用。一起移动：两个声音按「左右移动」的方式一起走，始终在头的两侧相对（一个贴左耳时另一个贴右耳）",
+     "tip_en": "Fixed: voice 1 stays at the left ear and voice 2 at the right, with only near / far sway, up / down and micro motion; Left / right motion is inactive. Together: both follow Left / right motion and always stay on opposite sides",
      "options": [
       {
-       "value": "fixed",
+       "value": false,
        "label": "各自固定",
        "label_en": "Fixed"
       },
       {
-       "value": "follow",
+       "value": true,
        "label": "一起移动",
        "label_en": "Together"
-      },
-      {
-       "value": "mirror",
-       "label": "镜像",
-       "label_en": "Mirror"
       }
      ],
      "show_if": {

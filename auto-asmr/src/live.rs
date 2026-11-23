@@ -540,7 +540,6 @@ pub fn mic_sink(in_rate: u32, mut tx: spsc::Producer, shared: Arc<Shared>) -> im
 mod tests {
     use super::*;
     use crate::dsp::engine::PostMode;
-    use crate::dsp::mix::Layout;
     use crate::dsp::params::Params;
 
     fn preview_pump(audio: Vec<f32>, out_rate: f64, dry: bool) -> (Pump, Arc<Shared>) {
@@ -616,7 +615,7 @@ mod tests {
         let x = crate::dsp::testsig::test_voice(8.0);
         let len = x.len();
         let base = EngineConfig::new(Params { auto_level: false, ..Params::default() }, None);
-        let setup = |v: [Voice; 2]| Arc::new(MixSetup { cfgs: voice_configs(&base, &v, None), gains: vec![1.0, 1.0], offsets: vec![0.0; 2], follow: false, mirror: false, balance: None, balance_strength: 0.0, delays: vec![0; 2] });
+        let setup = |v: [Voice; 2]| Arc::new(MixSetup { cfgs: voice_configs(&base, &v, None), gains: vec![1.0, 1.0], offsets: vec![0.0; 2], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; 2] });
         let first = setup([Voice::preset(0), Voice::preset(1)]);
         let shared = Arc::new(Shared::new(first.cfgs[0].clone()));
         *shared.mix.lock().unwrap() = Some(first.clone());
@@ -661,7 +660,7 @@ mod tests {
         let len = x.len();
         let base = Arc::new(EngineConfig::new(Params { auto_level: false, ..Params::default() }, None));
         let voices = [Voice::preset(0), Voice::preset(1)];
-        let st = |d: usize| Arc::new(MixSetup::new(&base, &voices, &[None, None], Layout::Fixed, None).with_delays(&[0, d]));
+        let st = |d: usize| Arc::new(MixSetup::new(&base, &voices, &[None, None], false, None).with_delays(&[0, d]));
         let first = st(4800);
         let shared = Arc::new(Shared::new(base.clone()));
         *shared.mix.lock().unwrap() = Some(first.clone());
@@ -718,7 +717,7 @@ mod tests {
         let len = x.len();
         let base = Arc::new(EngineConfig::new(Params { auto_level: false, ..Params::default() }, None));
         let voices = [Voice::preset(0), Voice::preset(1)];
-        let st = Arc::new(MixSetup::new(&base, &voices, &[None, None], Layout::Follow, None));
+        let st = Arc::new(MixSetup::new(&base, &voices, &[None, None], true, None));
         let shared = Arc::new(Shared::new(base.clone()));
         *shared.mix.lock().unwrap() = Some(st.clone());
         let audio = Arc::new(x);
@@ -731,7 +730,7 @@ mod tests {
             if i == 600 {
                 let p = Params { mode: crate::dsp::params::MotionMode::Orbit, auto_level: false, ..Params::default() };
                 let orbit = Arc::new(EngineConfig::new(p, Some(&base)));
-                shared.set_mix(Arc::new(MixSetup::new(&orbit, &voices, &[None, None], Layout::Follow, Some(&st))));
+                shared.set_mix(Arc::new(MixSetup::new(&orbit, &voices, &[None, None], true, Some(&st))));
             }
             pump.fill(&mut l, &mut r);
             let vt = shared.voice_telemetry();
@@ -753,7 +752,6 @@ mod tests {
     }
 
     fn duo_setup(base: &Arc<EngineConfig>, follow: bool, delay: usize) -> Arc<MixSetup> {
-        let follow = if follow { Layout::Follow } else { Layout::Fixed };
         use crate::dsp::mix::Voice;
         Arc::new(MixSetup::new(base, &[Voice::preset(0), Voice::preset(1)], &[None, None], follow, None).with_delays(&[0, delay]))
     }
@@ -858,7 +856,7 @@ mod tests {
         let x = crate::dsp::testsig::test_voice(16.0);
         let base = Arc::new(EngineConfig::new(Params { auto_level: false, ..Params::default() }, None));
         let voices = [Voice::preset(0), Voice { dist: Some(0.6), ..Voice::preset(1) }];
-        let setup = |s: f32| Arc::new(MixSetup::new(&base, &voices, &[None, None], Layout::Fixed, None).with_delays(&[0, 3840]).with_balance(None, s));
+        let setup = |s: f32| Arc::new(MixSetup::new(&base, &voices, &[None, None], false, None).with_delays(&[0, 3840]).with_balance(None, s));
         let run = |strength: f32, off_at: Option<usize>| {
             let (mut pump, mut tx, _) = mic_duo_pump(&setup(strength), true);
             let (mut l, mut r) = (vec![0f32; 256], vec![0f32; 256]);

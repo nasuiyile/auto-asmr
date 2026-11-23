@@ -6,18 +6,16 @@
 //!   「虚拟字段」，读写都调用库里 `Params` 的同名方法，和桌面版界面的操作完全一样；换左右移动的方式时
 //!   「响度随位置变化」跟着换成默认值，也和桌面版一样。
 //! - 风格、恢复默认、雨夜这些按钮调用库里同一个函数。
-//! - 左右双人（`duo_ms`、排布、`mix_balance`）是配置文件里和桌面版共用的设置（不在 `params` 里；延迟是桌面版
+//! - 左右双人（`duo_ms`、`mix_follow`、`mix_balance`）是配置文件里和桌面版共用的设置（不在 `params` 里；延迟是桌面版
 //!   「文件转换」页的那个，实时页的 `rt_duo_ms` 不用——网页里是录好的声音，和文件试听一样），
 //!   界面按同样的字段名读写；打开时在这里算好两个声音的合成配置（[`Global::duo`]），处理器按版本号换上。
-//!   排布在配置文件里是 `mix_follow`、`mix_mirror` 两个开关，界面用的是由它们换算的 `mix_layout`（"fixed" /
-//!   "follow" / "mirror"，见 `auto_asmr::dsp::mix::Layout`）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use auto_asmr::config::{self, ConfigError, Saved};
 use auto_asmr::dsp::engine::EngineConfig;
-use auto_asmr::dsp::mix::{self, Layout, MixSetup, DUO_MAX_MS, DUO_VOICES};
+use auto_asmr::dsp::mix::{self, MixSetup, DUO_VOICES};
 use auto_asmr::dsp::motion::up_angle;
 use auto_asmr::dsp::params::{MotionMode, Params};
 use auto_asmr::dsp::pinna::pinnas;
@@ -38,7 +36,7 @@ pub struct Global {
 
 /// 左右双人的合成配置（关着时 None）。`prev` 里没变的引擎配置原样复用。
 fn duo_for(s: &Saved, base: &Arc<EngineConfig>, prev: Option<&MixSetup>) -> Option<Arc<MixSetup>> {
-    (s.duo_ms > 0.0).then(|| Arc::new(mix::duo_setup(base, &DUO_VOICES, s.duo_ms, s.layout(), s.mix_balance / 100.0, prev)))
+    (s.duo_ms > 0.0).then(|| Arc::new(mix::duo_setup(base, &DUO_VOICES, s.duo_ms, s.mix_follow, s.mix_balance / 100.0, prev)))
 }
 
 /// 网页声音用的参数：背景音关掉，其余一样。
@@ -117,7 +115,7 @@ pub fn update_doc(key: &str, v: Value) -> Result<(), String> {
     with_global(|g| {
         let mut s = g.saved.clone();
         set_doc_field(&mut s, key, v)?;
-        let duo_changed = (s.duo_ms, s.layout(), s.mix_balance) != (g.saved.duo_ms, g.saved.layout(), g.saved.mix_balance);
+        let duo_changed = (s.duo_ms, s.mix_follow, s.mix_balance) != (g.saved.duo_ms, g.saved.mix_follow, g.saved.mix_balance);
         g.saved = s;
         if duo_changed {
             commit(g);
@@ -198,19 +196,15 @@ pub const VIRTUAL: [&str; 4] = ["ear_cm", "manual_cm", "moves_per_min", "denoise
 
 /// 配置文件里 `params` 之外、界面也按字段读写的设置（和桌面版共用）：左右双人（排布、自动平衡也是多音频合成的），
 /// 以及文件转换页的设置（多音频合成、自动对齐、目标响度、取哪个声道、位深、同时转换几个）。
-/// `mix_layout` 是由 `mix_follow`、`mix_mirror` 换算的排布名（界面用它）。
-pub const DOC_KEYS: [&str; 11] = ["duo_ms", "mix_layout", "mix_follow", "mix_mirror", "mix_balance", "mix", "mix_align", "file_lufs", "file_channel", "bits", "jobs"];
+pub const DOC_KEYS: [&str; 9] = ["duo_ms", "mix_follow", "mix_balance", "mix", "mix_align", "file_lufs", "file_channel", "bits", "jobs"];
 
 /// 改 [`DOC_KEYS`] 里的一项。范围和桌面版界面一样：延迟 0–300 ms（0 = 关），自动平衡 0–100 %，声道 0 自动 / 1 左 /
-/// 2 右 / 3 混合，位深 16 / 24，同时转换 0 = 自动（逻辑核数）。排布：`mix_layout` 是 "fixed" / "follow" / "mirror"；
-/// 只认得一起移动的旧界面写 `mix_follow`（true = 一起移动，false = 各自固定，都会关掉镜像）。
+/// 2 右 / 3 混合，位深 16 / 24，同时转换 0 = 自动（逻辑核数）。
 pub fn set_doc_field(s: &mut Saved, key: &str, v: Value) -> Result<(), String> {
     let as_bool = |v: &Value| v.as_bool().ok_or_else(|| format!("{key} 要 true / false"));
     match key {
-        "duo_ms" => s.duo_ms = as_f32(&v)?.clamp(0.0, DUO_MAX_MS),
-        "mix_layout" => s.set_layout(v.as_str().and_then(Layout::from_key).ok_or("mix_layout 要 \"fixed\" / \"follow\" / \"mirror\"")?),
-        "mix_follow" => s.set_layout(if as_bool(&v)? { Layout::Follow } else { Layout::Fixed }),
-        "mix_mirror" => s.set_layout(if as_bool(&v)? { Layout::Mirror } else { Layout::from_flags(s.mix_follow, false) }),
+        "duo_ms" => s.set_duo_ms(as_f32(&v)?), // 从 0 打开时排布切到一起移动（同桌面版）
+        "mix_follow" => s.mix_follow = as_bool(&v)?,
         "mix_balance" => s.mix_balance = as_f32(&v)?.clamp(0.0, 100.0),
         "mix" => s.mix = as_bool(&v)?,
         "mix_align" => s.mix_align = as_bool(&v)?,
@@ -228,9 +222,7 @@ pub fn saved_json(s: &Saved) -> Value {
     let mut v = params_json(&s.params, s.dry);
     if let Some(m) = v.as_object_mut() {
         m.insert("duo_ms".into(), json!(s.duo_ms));
-        m.insert("mix_layout".into(), json!(s.layout().key()));
         m.insert("mix_follow".into(), json!(s.mix_follow));
-        m.insert("mix_mirror".into(), json!(s.mix_mirror));
         m.insert("mix_balance".into(), json!(s.mix_balance));
         m.insert("mix".into(), json!(s.mix));
         m.insert("mix_align".into(), json!(s.mix_align));

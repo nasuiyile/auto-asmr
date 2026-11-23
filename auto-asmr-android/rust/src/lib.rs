@@ -183,7 +183,7 @@ pub unsafe extern "C" fn asmr_action(name: *const c_char) -> c_int {
 }
 
 /// 改一个参数：`key` 是 `Params` 的字段名或虚拟字段（`ear_cm`、`manual_cm`、`moves_per_min`、`denoise_slider`），
-/// 或左右双人的设置（`duo_ms`、`mix_layout`（"fixed" / "follow" / "mirror"）、`mix_balance`，和桌面版配置文件同名）；`value` 是 JSON。
+/// 或左右双人的设置（`duo_ms`、`mix_follow`、`mix_balance`，和桌面版配置文件同名）；`value` 是 JSON。
 /// 返回 0 = 成功；失败时参数不变。
 ///
 /// # Safety
@@ -379,7 +379,7 @@ impl Processor {
     /// 左右双人的配置换上：开 / 关、换排布时重新建一份（会分配内存，只在用户改这两项的那一下），其余直接换配置。
     fn sync_duo(&mut self, setup: Option<&Arc<MixSetup>>) {
         match (setup, &mut self.duo) {
-            (Some(s), Some(d)) if d.mixer().accepts(s) => d.set_setup(s),
+            (Some(s), Some(d)) if d.mixer().is_follow() == (s.follow && s.cfgs.len() > 1) => d.set_setup(s),
             (Some(s), _) => self.duo = Some(LiveMix::new(s, false)),
             (None, _) => self.duo = None,
         }
@@ -750,7 +750,9 @@ mod tests {
         assert_eq!(set_field("duo_ms", "80"), 0);
         assert_eq!(set_field("mix_balance", "\"x\""), -1, "类型不对时报错");
         let json = settings::current_params_json();
-        assert_eq!((json["duo_ms"].as_f64(), json["mix_follow"].as_bool(), json["mix_layout"].as_str()), (Some(80.0), Some(false), Some("fixed")));
+        assert_eq!((json["duo_ms"].as_f64(), json["mix_follow"].as_bool()), (Some(80.0), Some(true)), "打开左右双人时排布切到一起移动");
+        // 改回各自固定（下面先看一左一右固定时的样子）；之后改延迟不会再切回一起移动
+        assert_eq!(set_field("mix_follow", "false"), 0);
         for rate in [48_000usize, 44_100] {
             let mut p = Processor::new(rate);
             assert!(p.duo.is_some());
@@ -776,25 +778,11 @@ mod tests {
         p.process(&mut buf);
         assert_eq!(p.duo.as_ref().map(|d| d as *const LiveMix), before);
         assert_eq!(p.duo.as_ref().unwrap().mixer().delays()[1], 5760);
+        assert_eq!(settings::current_params_json()["mix_follow"].as_bool(), Some(false), "只是改延迟，不切排布");
         // 换成一起移动：重新建
         assert_eq!(set_field("mix_follow", "true"), 0);
         p.process(&mut buf);
         assert!(p.duo.as_ref().unwrap().mixer().is_follow());
-        assert_eq!(settings::current_params_json()["mix_layout"].as_str(), Some("follow"));
-        // 换成镜像：再重新建；1 号在左、2 号在右，左右对称
-        assert_eq!(set_field("mix_layout", "\"mirror\""), 0);
-        assert_eq!(set_field("mix_layout", "\"sideways\""), -1, "没有这种排布");
-        let json = settings::current_params_json();
-        assert_eq!((json["mix_follow"].as_bool(), json["mix_mirror"].as_bool(), json["mix_layout"].as_str()), (Some(true), Some(true), Some("mirror")));
-        for _ in 0..20 {
-            p.process(&mut buf);
-        }
-        assert_eq!(p.duo.as_ref().unwrap().mixer().layout(), auto_asmr::dsp::mix::Layout::Mirror);
-        let t = tele_of(&p);
-        assert!(t[0] > 180.0 && t[7] < 180.0 && (t[0] + t[7] - 360.0).abs() < 2.0, "镜像：1 号在左、2 号在右，左右对称：{t:?}");
-        // 旧界面只写 mix_follow：一起移动 / 各自固定都会关掉镜像
-        settings::update_doc("mix_follow", serde_json::json!(true)).unwrap();
-        assert_eq!(settings::current_params_json()["mix_layout"].as_str(), Some("follow"));
         // 拖回 0：回到单个引擎
         assert_eq!(set_field("duo_ms", "0"), 0);
         p.process(&mut buf);

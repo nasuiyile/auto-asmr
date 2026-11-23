@@ -8,7 +8,7 @@ use crate::dsp::analysis::prescan;
 use crate::dsp::balance::{self, BalanceData};
 use crate::dsp::dynamics::{Limiter, LoudnessMeter, TruePeak};
 use crate::dsp::engine::{Engine, EngineConfig, PostMode};
-use crate::dsp::mix::{self, Layout, MixSetup, Mixer, Voice, MAX_VOICES};
+use crate::dsp::mix::{self, MixSetup, Mixer, Voice, MAX_VOICES};
 use crate::dsp::params::Params;
 use crate::dsp::rain::{self, Rain};
 use crate::dsp::resample::Resampler;
@@ -67,8 +67,8 @@ pub struct Duo {
     pub delay_ms: f32,
     /// 两个声音的位置和音量（默认左耳、右耳）。
     pub voices: [Voice; 2],
-    /// 排布：各自固定、一起移动（按移动方式一起走、彼此相对）或镜像（左右对称，各守一边）。
-    pub layout: Layout,
+    /// 一起移动（按移动方式一起走、彼此相对）；否则各自固定。
+    pub follow: bool,
     /// 自动平衡的强度（0–1，0 = 关）。
     pub balance: f32,
 }
@@ -76,7 +76,7 @@ pub struct Duo {
 impl Duo {
     /// 默认：一个在左耳、一个在右耳，各自固定，不平衡。
     pub fn new(delay_ms: f32) -> Self {
-        Duo { delay_ms, voices: [Voice::preset(0), Voice::preset(1)], layout: Layout::Fixed, balance: 0.0 }
+        Duo { delay_ms, voices: [Voice::preset(0), Voice::preset(1)], follow: false, balance: 0.0 }
     }
 
     /// 一句话说明（写进转换完成后的报告）。
@@ -85,10 +85,10 @@ impl Duo {
             Some(i) => if english { mix::PRESETS[i].1 } else { mix::PRESETS[i].0 }.to_string(),
             None => format!("{:.0}°", v.az),
         };
-        let pos = match self.layout {
-            Layout::Follow => if english { "moving together, opposite each other" } else { "一起移动，彼此相对" }.to_string(),
-            Layout::Mirror => if english { "mirrored, left and right" } else { "镜像，左右对称" }.to_string(),
-            Layout::Fixed => format!("{} / {}", name(&self.voices[0]), name(&self.voices[1])),
+        let pos = if self.follow {
+            if english { "moving together, opposite each other".to_string() } else { "一起移动，彼此相对".to_string() }
+        } else {
+            format!("{} / {}", name(&self.voices[0]), name(&self.voices[1]))
         };
         if english {
             format!("Two voices: the second {:.0} ms later ({pos})", self.delay_ms)
@@ -114,8 +114,8 @@ pub fn default_mix_output(first: &Path) -> PathBuf {
 /// 多音频合成的选项（位置和音量在 [`MixInput`] 里）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MixOptions {
-    /// 排布：各自固定、一起移动（按移动方式一起走、彼此错开 360°/N）或镜像（只用于两个音源，其余按一起移动）。
-    pub layout: Layout,
+    /// 一起移动（按移动方式一起走、彼此错开 360°/N）；否则各自固定。
+    pub follow: bool,
     /// 合成前自动对齐（同一首歌的几个版本，从一起开始唱的地方叠加）。
     pub align: bool,
     /// 自动平衡的强度（0–1，0 = 关）：按短时响度让几段每一段时间都差不多一样响。
@@ -160,8 +160,6 @@ pub struct ConvertReport {
     pub n_strokes: u32,
     pub speech_pct: f32,
     pub elapsed_s: f64,
-    /// 镜像排布：`n_moves` 数的是"靠向脸前 / 脑后"，不是换耳。
-    pub mirrored: bool,
 }
 
 /// 单个文件转换完成后的说明（桌面版界面和安卓版文件转换页共用）。`out`：输出文件的位置。
@@ -179,7 +177,7 @@ pub fn report_text(rep: &ConvertReport, out: &str, english: bool) -> String {
         rep.max_gr_db,
         t("说话占", "speech"),
         rep.speech_pct,
-        if rep.mirrored { t("靠向脸前 / 脑后", "lean-ins") } else { t("换耳", "switches") },
+        t("换耳", "switches"),
         rep.n_moves,
         t("从头顶绕", "over the head"),
         rep.n_tops,
@@ -593,7 +591,6 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
         n_strokes: eng.tele.n_strokes,
         speech_pct: 100.0 * eng.n_speech as f32 / eng.n_blocks.max(1) as f32,
         elapsed_s: t_start.elapsed().as_secs_f64(),
-        mirrored: false,
     })
 }
 
@@ -608,7 +605,7 @@ fn convert_duo(opts: &ConvertOptions, d: Duo, params: &Params, cancel: Arc<Atomi
     let inputs = [MixInput { path: opts.input.clone(), voice: d.voices[0] }, MixInput { path: opts.input.clone(), voice: d.voices[1] }];
     let mut delays = [0; MAX_VOICES];
     delays[1] = mix::delay_samples(d.delay_ms);
-    let mo = MixOptions { layout: d.layout, align: false, balance: d.balance, delays };
+    let mo = MixOptions { follow: d.follow, align: false, balance: d.balance, delays };
     let mut rep = convert_mix(&o, &inputs, params, mo, cancel, progress)?;
     rep.duo_note = d.describe(false);
     Ok(rep)
@@ -630,8 +627,7 @@ pub fn align_tracks(monos: &[&[f32]], names: &[String]) -> Result<(Vec<Vec<f32>>
 /// 多音频合成：`inputs` 里的 2–[`MAX_VOICES`] 个文件各放一个位置（见 [`crate::dsp::mix`]），同时播放，合成一个
 /// 双耳 WAV 写到 `opts.output`。`opts.input` 不用；起点、时长、取哪个声道、位深、目标响度、峰值上限对每个音源都一样。
 /// 输出的长度按最长的那个音源；各音源先按响度对齐，再加各自的音量增减，相加之后与单个文件一样两遍处理。
-/// `mo.layout`：一起移动（按 `params` 的移动方式一起走、彼此错开 360°/N）、镜像（两个音源左右对称）；
-/// 各自固定时在 `inputs` 给的位置。
+/// `follow`：一起移动（按 `params` 的移动方式一起走、彼此错开 360°/N）；否则各自固定在 `inputs` 给的位置。
 /// `mo.align`：先自动对齐（整段解码后对齐、裁掉对不上的开头和结尾），起点和时长按对齐之后的时间算；
 /// 对齐的说明（每段从哪里开始用、裁掉多少）放在报告的 `align_note` 里。
 /// `mo.balance`：自动平衡（整段算增益曲线，再截起点和时长），说明放在 `balance_note` 里。
@@ -639,7 +635,7 @@ pub fn align_tracks(monos: &[&[f32]], names: &[String]) -> Result<(Vec<Vec<f32>>
 /// 对齐、平衡或有延迟时整段解码（同一个文件只解码一次）、按整段测响度，和合成试听完全一样；
 /// 都没有时和以前一样只解码要处理的那一段。
 pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, mo: MixOptions, cancel: Arc<AtomicBool>, mut progress: impl FnMut(f32, &str)) -> Result<ConvertReport, String> {
-    let (follow, align) = (mo.layout.moves(), mo.align);
+    let (follow, align) = (mo.follow, mo.align);
     let n = inputs.len();
     let delays = &mo.delays[..n.min(MAX_VOICES)];
     let full = mo.align || mo.balance > 0.0 || delays.iter().any(|&d| d > 0);
@@ -728,7 +724,7 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
     }
     let voices: Vec<Voice> = inputs.iter().map(|i| i.voice).collect();
     let base = Arc::new(EngineConfig::new(params.clone(), None));
-    let setup = MixSetup::new(&base, &voices, &lufs, mo.layout, None).with_balance(bal, mo.balance).with_delays(delays);
+    let setup = MixSetup::new(&base, &voices, &lufs, follow, None).with_balance(bal, mo.balance).with_delays(delays);
     let mut mixer = Mixer::new(&setup, PostMode::Offline, 1.0);
     mixer.seek(s0); // 平衡曲线按整段的位置取
     for (k, m) in monos.iter().enumerate() {
@@ -756,7 +752,7 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
         balance_note = balance::describe(mo.balance, mixer.balance_stats(), false);
     }
     let speech = (0..n).map(|k| 100.0 * mixer.engine(k).n_speech as f32 / mixer.engine(k).n_blocks.max(1) as f32).sum::<f32>() / n as f32;
-    // 各自固定：各音源的往后让、上下换位次数加起来；一起移动、镜像：大家走同一套，报告一份
+    // 各自固定：各音源的往后让、上下换位次数加起来；一起移动：大家走同一套，报告一份
     let t = if follow { mixer.engine(0).tele } else { mixer.tele };
     Ok(ConvertReport {
         seconds: fin.seconds,
@@ -775,7 +771,6 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
         n_strokes: t.n_strokes,
         speech_pct: speech,
         elapsed_s: t_start.elapsed().as_secs_f64(),
-        mirrored: setup.mirror,
     })
 }
 
@@ -1006,7 +1001,7 @@ mod tests {
         // 一起移动：同样长度和响度；两个音源走同一套，所以报告的换耳次数就是一个音源的
         let mut fo = opts.clone();
         fo.output = dir.join("mix_follow.wav");
-        let rf = convert_mix(&fo, &inputs, &Params::default(), MixOptions { layout: Layout::Follow, ..Default::default() }, Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+        let rf = convert_mix(&fo, &inputs, &Params::default(), MixOptions { follow: true, ..Default::default() }, Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
         assert!((rf.seconds - 12.0).abs() < 0.05 && (rf.lufs - opts.lufs).abs() < 0.5, "{} s {} LUFS", rf.seconds, rf.lufs);
         assert!(rf.n_moves >= 1, "一起移动应当换过边：{}", rf.n_moves);
         assert_eq!(rep.n_moves, 0, "各自固定不换边");

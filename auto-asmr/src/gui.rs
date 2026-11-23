@@ -2,10 +2,10 @@
 
 use crate::config::{ConfigError, Saved, Tab};
 use crate::dsp::engine::{EngineConfig, Telemetry};
-use crate::dsp::mix::{self, Layout, MixSetup, Voice, DUO_MAX_MS, MAX_VOICES, PRESETS};
+use crate::dsp::mix::{self, MixSetup, Voice, DUO_MAX_MS, MAX_VOICES, PRESETS};
 use crate::dsp::params::{MotionMode, Params, Playback, Via, DENOISE_MAX_DB};
 use crate::dsp::tables::tables;
-use crate::dsp::motion::{clamp_half, lift_tilt, up_angle};
+use crate::dsp::motion::{lift_tilt, up_angle};
 use crate::dsp::{FS, HEAD_A, R_MIN};
 mod view3d;
 
@@ -55,27 +55,6 @@ fn voice_name(v: &Voice) -> String {
     match v.preset_index() {
         Some(k) => t(PRESETS[k].0, PRESETS[k].1).to_string(),
         None => format!("{:.0}°", v.az),
-    }
-}
-
-/// 一起移动 / 镜像时第 `k` 个声音（共 `n` 个）的位置由走位决定：位置下拉框换成的说明文字和提示。各自固定时 None。
-fn layout_slot(layout: Layout, n: usize, k: usize) -> Option<(String, &'static str)> {
-    match layout {
-        Layout::Fixed => None,
-        Layout::Follow => Some((
-            if k == 0 { t("领头", "lead").to_string() } else { format!("+{:.0}°", 360.0 * k as f32 / n.max(1) as f32) },
-            t(
-                "一起移动：几个声音按同一套走位一起走，这个声音的位置比 1 号绕头转过这么多度（两个时 +180° 就是正对面）",
-                "Moving together: the voices share one path; this one is rotated around the head by this much from voice 1 (+180° = directly opposite)",
-            ),
-        )),
-        Layout::Mirror => Some((
-            if k == 0 { t("左半边", "left half") } else { t("右半边", "right half") }.to_string(),
-            t(
-                "镜像：两个声音走同一套，1 号在头的左半边、2 号在右半边，左右对称（离正前 / 正后至少 30°）",
-                "Mirrored: both share one path, voice 1 on the left half of the head and voice 2 on the right, mirror images of each other (at least 30° from straight ahead / behind)",
-            ),
-        )),
     }
 }
 
@@ -419,11 +398,7 @@ impl App {
             }
             // AUTO_ASMR_SHOT_FOLLOW=1：合成用"一起移动"
             if std::env::var("AUTO_ASMR_SHOT_FOLLOW").is_ok() {
-                app.s.set_layout(Layout::Follow);
-            }
-            // AUTO_ASMR_SHOT_MIRROR=1：合成 / 左右双人用"镜像"
-            if std::env::var("AUTO_ASMR_SHOT_MIRROR").is_ok() {
-                app.s.set_layout(Layout::Mirror);
+                app.s.mix_follow = true;
             }
             // AUTO_ASMR_SHOT_ALIGN=1：合成前自动对齐
             if std::env::var("AUTO_ASMR_SHOT_ALIGN").is_ok() {
@@ -539,7 +514,7 @@ impl App {
 
     /// 转换时的左右双人设置（不是左右双人时 None）。
     fn duo_options(&self) -> Option<Duo> {
-        (!self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, layout: self.s.layout(), balance: self.s.mix_balance / 100.0 })
+        (!self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, follow: self.s.mix_follow, balance: self.s.mix_balance / 100.0 })
     }
 
     /// 改第 k 个声音的位置 / 音量：多音频合成按文件记，左右双人（文件和实时共用）记在自己的两个位置里。
@@ -556,7 +531,7 @@ impl App {
     /// 改左右双人的延迟（0 = 关）。试听中开 / 关时按新的方式从当前位置重新开始；只是改延迟时实时生效（淡过去）。
     fn set_duo(&mut self, ms: f32) {
         let was = self.duo();
-        self.s.duo_ms = ms.clamp(0.0, DUO_MAX_MS);
+        self.s.set_duo_ms(ms); // 从 0 拖上来时排布切到一起移动
         if self.duo() == was {
             return;
         }
@@ -574,7 +549,7 @@ impl App {
     /// 只是改延迟时实时生效（淡过去）。
     fn set_rt_duo(&mut self, ms: f32) {
         let was = self.mic_duo();
-        self.s.rt_duo_ms = ms.clamp(0.0, DUO_MAX_MS);
+        self.s.set_rt_duo_ms(ms); // 从 0 拖上来时排布切到一起移动
         if self.mic_duo() == was {
             return;
         }
@@ -615,11 +590,6 @@ impl App {
             .collect()
     }
 
-    /// 合成 / 左右双人实际用的排布：镜像只用于两个声音，三个以上按一起移动。
-    fn layout(&self) -> Layout {
-        self.s.layout().for_voices(self.mix_voices().len())
-    }
-
     /// 给新进入合成的音频分配位置：按"左耳、右耳、正前、正后"取第一个空着的方向（两个音频时一左一右）。
     fn ensure_voices(&mut self) {
         let paths: Vec<PathBuf> = self.files.iter().take(MAX_VOICES).cloned().collect();
@@ -642,7 +612,7 @@ impl App {
     fn mix_setup(&self, lufs: &[Option<f32>]) -> (Vec<Voice>, Arc<MixSetup>) {
         let voices = self.mix_voices();
         let prev = self.mix_sent.as_ref().map(|(_, s)| s.as_ref());
-        let setup = MixSetup::new(&self.cfg, &voices, lufs, self.s.layout(), prev).with_balance(self.cur_balance(), self.s.mix_balance / 100.0).with_delays(&self.mix_delays());
+        let setup = MixSetup::new(&self.cfg, &voices, lufs, self.s.mix_follow, prev).with_balance(self.cur_balance(), self.s.mix_balance / 100.0).with_delays(&self.mix_delays());
         (voices, Arc::new(setup))
     }
 
@@ -673,23 +643,19 @@ impl App {
     }
 
     /// 合成时各音源此刻的位置 [方位角, 仰角, 距离, 说话活动]：试听中用引擎报告的；没在试听时，各自固定是各自摆好的
-    /// 位置（带上"高度"），一起移动是开始时的队形（走位的起点，再错开 360°/N），镜像是走位的起点折到左边、2 号翻到右边。
+    /// 位置（带上"高度"），一起移动是开始时的队形（走位的起点，再错开 360°/N）。
     fn mix_positions(&self) -> Vec<[f32; 4]> {
         let active = self.rt.is_some() && self.rt_mix;
         let p = &self.s.params;
         let voices = self.mix_voices();
-        let (layout, n) = (self.layout(), voices.len());
-        let start = layout.moves().then(|| {
-            let mut m = crate::dsp::motion::Motion::new(p.seed);
-            m.half = layout.half(0);
-            m.step(p, 0.0, 1.0, 0.0)
-        });
+        let start = self.s.mix_follow.then(|| crate::dsp::motion::Motion::new(p.seed).step(p, 0.0, 1.0, 0.0));
+        let offsets = mix::follow_offsets(voices.len(), self.s.mix_follow);
         voices
             .iter()
             .enumerate()
             .map(|(k, v)| match (self.mix_tele.get(k).filter(|_| active), start) {
                 (Some(q), _) => *q,
-                (None, Some(s)) => [layout.place(n, k, s.az), s.el, s.r, 0.0],
+                (None, Some(s)) => [(s.az + offsets[k]).rem_euclid(360.0), s.el, s.r, 0.0],
                 (None, None) => {
                     let (a, e, r) = lift_tilt(v.az, v.distance(p.ear_dist), 0.0, p.height.clamp(-80.0, 85.0));
                     [a, e, r, 0.0]
@@ -698,13 +664,13 @@ impl App {
             .collect()
     }
 
-    /// 切换合成的排布（各自固定 / 一起移动 / 镜像）。合成试听中切换时从当前位置重新开始（几个引擎的走位要从头对齐）；
+    /// 切换合成的排布（各自固定 / 一起移动）。合成试听中切换时从当前位置重新开始（几个引擎的走位要从头对齐）；
     /// 主播模式的左右双人也重新开始。
-    fn set_mix_layout(&mut self, layout: Layout) {
-        if layout == self.s.layout() {
+    fn set_mix_follow(&mut self, follow: bool) {
+        if follow == self.s.mix_follow {
             return;
         }
-        self.s.set_layout(layout);
+        self.s.mix_follow = follow;
         self.mix_trails.clear();
         if self.rt_mix && self.rt.is_some() {
             if self.rt_preview {
@@ -917,24 +883,21 @@ impl App {
         let out = self.mix_output();
         let voices = self.mix_voices();
         let inputs: Vec<MixInput> = paths.iter().cloned().zip(voices.iter().copied()).map(|(path, voice)| MixInput { path, voice }).collect();
-        let layout = self.s.layout().for_voices(inputs.len());
+        let follow = self.s.mix_follow;
         let align = self.s.mix_align;
-        let mo = MixOptions { layout, align, balance: self.s.mix_balance / 100.0, ..Default::default() };
+        let mo = MixOptions { follow, align, balance: self.s.mix_balance / 100.0, ..Default::default() };
+        let offsets = mix::follow_offsets(inputs.len(), follow);
         let list = inputs
             .iter()
             .enumerate()
             .map(|(k, i)| {
                 let g = if i.voice.gain_db != 0.0 { format!("，{:+.1} dB", i.voice.gain_db) } else { String::new() };
-                let pos = layout_slot(layout, inputs.len(), k).map_or_else(|| voice_name(&i.voice), |(s, _)| s);
+                let pos = if follow { format!("+{:.0}°", offsets[k]) } else { voice_name(&i.voice) };
                 format!("{}. {}（{pos}{g}）", k + 1, file_name(&i.path))
             })
             .collect::<Vec<_>>()
             .join("  ");
-        let desc = match layout {
-            Layout::Follow => format!("{}（{}）  {list}", t("一起移动", "moving together"), motion_name(self.s.params.mode)),
-            Layout::Mirror => format!("{}（{}）  {list}", t("镜像", "mirrored"), motion_name(self.s.params.mode)),
-            Layout::Fixed => list,
-        };
+        let desc = if follow { format!("{}（{}）  {list}", t("一起移动", "moving together"), motion_name(self.s.params.mode)) } else { list };
         let desc = if align { format!("{}  {desc}", t("自动对齐", "auto-aligned")) } else { desc };
         let desc = if mo.balance > 0.0 { format!("{} {:.0}%  {desc}", t("自动平衡", "auto-balance"), self.s.mix_balance) } else { desc };
         let opts = self.convert_options(paths[0].clone(), out.clone());
@@ -1297,9 +1260,7 @@ impl App {
     fn ui_radar(&mut self, ui: &mut egui::Ui, size: f32) {
         const GAUGE_W: f32 = 20.0;
         let mixing = self.mix_view();
-        let layout = self.layout();
-        let follow = mixing && layout.moves();
-        let mirror = mixing && layout == Layout::Mirror;
+        let follow = mixing && self.s.mix_follow;
         let fixed_mix = mixing && !follow;
         let manual = !fixed_mix && self.s.params.mode == MotionMode::Manual;
         let sense = if manual || fixed_mix { egui::Sense::click_and_drag() } else { egui::Sense::hover() };
@@ -1322,10 +1283,9 @@ impl App {
         let on_gauge = |pt: egui::Pos2| pt.x > rect.right();
         if manual {
             // 手动摆位：在俯视图里点 / 拖改方位和距离，在右侧竖条上点 / 拖改高度（双击竖条回到与耳朵齐平）。
-            // 合成"一起移动"时抓住离按下点最近的那个音源，拖它就是挪整组（其余音源保持错开的角度）；
-            // 镜像时拖哪个都一样（走位会折到各自那一侧），另一个在对侧对称的位置
+            // 合成"一起移动"时抓住离按下点最近的那个音源，拖它就是挪整组（其余音源保持错开的角度）
             let origin = ui.input(|i| i.pointer.press_origin());
-            let offsets = if follow && !mirror { mix::follow_offsets(self.mix_voices().len(), true) } else { Vec::new() };
+            let offsets = if follow { mix::follow_offsets(self.mix_voices().len(), true) } else { Vec::new() };
             if resp.is_pointer_button_down_on() {
                 if follow && self.mix_drag.is_none() {
                     if let Some(o) = origin.filter(|&o| !on_gauge(o)) {
@@ -1424,7 +1384,7 @@ impl App {
             let active = self.rt.is_some() && self.rt_mix;
             let pr = &self.s.params;
             let voices = self.mix_voices();
-            let offsets = mix::follow_offsets(voices.len(), follow && !mirror);
+            let offsets = mix::follow_offsets(voices.len(), follow);
             let cur = self.mix_positions();
             let ear = self.s.params.ear_dist;
             if active {
@@ -1451,8 +1411,6 @@ impl App {
                 let sel = self.mix_sel == Some(k) || self.mix_drag == Some(k);
                 let ring = if !follow {
                     Some(pos(v.az, v.distance(ear)))
-                } else if manual && mirror {
-                    Some(pos(clamp_half(pr.manual_az, layout.half(k)), pr.manual_dist))
                 } else if manual {
                     Some(pos(pr.manual_az + offsets[k], pr.manual_dist))
                 } else {
@@ -1485,10 +1443,6 @@ impl App {
                 t("拖动圆圈，改两个声音的位置", "drag a ring to move that voice")
             } else if !follow {
                 t("拖动圆圈，改各音频的位置", "drag a ring to move that file")
-            } else if mirror && manual {
-                t("拖任意一个，另一个对称 · 右侧拖高度", "drag either dot, the other mirrors · height at right")
-            } else if mirror {
-                t("镜像：左右对称，按「左右移动」走", "mirrored: see Left / right motion")
             } else if manual {
                 t("拖任意一个，整组一起挪 · 右侧拖高度", "drag any dot to move the group · height at right")
             } else {
@@ -1587,7 +1541,7 @@ impl App {
                 "When on, all automatic motion stops (sweeps, near / far sway, auto up / down, micro motion) and the source stays where you put it: click or drag on the map for direction and distance, drag the bar at the right for height (double-click it for ear level). Turned on while running, the source stays where it is at that moment. For file conversion this is a fixed position",
             );
             // 合成·各自固定时没有手动摆位（直接拖各音频的圆圈）；一起移动时手动摆位就是拖整组
-            let fixed_mix = self.mix_view() && !self.s.layout().moves();
+            let fixed_mix = self.mix_view() && !self.s.mix_follow;
             let r = ui.add_enabled(!fixed_mix, egui::Checkbox::new(&mut manual, t("手动摆位：关闭自动移动，拖动位置图里的声源", "Manual: stop automatic motion and drag the source on the map")));
             if r.on_hover_text(tip).on_disabled_hover_text(t("几个声音各自固定时，直接在位置图上拖各自的圆圈", "With voices at fixed positions, drag each one's ring on the map")).changed() {
                 let p = &mut self.s.params;
@@ -1667,8 +1621,8 @@ impl App {
             let mut edits: Vec<(PathBuf, Voice)> = Vec::new();
             let row_h = 22.0;
             let mixing = self.multi();
-            let n_mix = self.files.len().min(MAX_VOICES);
-            let layout = self.s.layout().for_voices(n_mix);
+            let follow = mixing && self.s.mix_follow;
+            let offsets = mix::follow_offsets(self.files.len().min(MAX_VOICES), true);
             let files = self.files.clone();
             egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(4.0).inner_margin(4.0).show(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt("filelist").max_height(row_h * 5.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -1707,9 +1661,9 @@ impl App {
                             if in_mix {
                                 let mut v = self.voices.get(p).copied().unwrap_or_else(|| Voice::preset(i.min(1)));
                                 let before = v;
-                                // 一起移动 / 镜像：位置由走位决定，这里显示它比 1 号转过多少度、在哪一侧（只有音量可调）
-                                let slot = layout_slot(layout, n_mix, i);
-                                ui.add_enabled_ui(!busy, |ui| Self::voice_controls(ui, i, &mut v, combo_w, slot));
+                                // 一起移动：位置由走位决定，这里显示它比 1 号转过多少度（只有音量可调）
+                                let follow_off = follow.then(|| offsets[i]);
+                                ui.add_enabled_ui(!busy, |ui| Self::voice_controls(ui, i, &mut v, combo_w, follow_off));
                                 if v != before {
                                     edits.push((p.clone(), v));
                                 }
@@ -1876,31 +1830,21 @@ impl App {
         }
     }
 
-    /// 合成的排布（各自固定 / 一起移动 / 镜像）和自动平衡：多音频合成和左右双人（文件页、实时页）共用。
+    /// 合成的排布（各自固定 / 一起移动）和自动平衡：多音频合成和左右双人（文件页、实时页）共用。
     fn ui_layout_row(&mut self, ui: &mut egui::Ui, busy: bool) {
         ui.horizontal(|ui| {
             ui.label(t("排布", "Layout"));
-            // 选中的是实际用的排布（三个以上音频时镜像按一起移动）
-            let two = self.mix_voices().len() == 2;
-            let mut layout = self.layout();
-            ui.selectable_value(&mut layout, Layout::Fixed, t("各自固定", "Fixed")).on_hover_text(t(
+            let mut follow = self.s.mix_follow;
+            ui.selectable_value(&mut follow, false, t("各自固定", "Fixed")).on_hover_text(t(
                 "每个音频固定在自己的位置（在列表里选，或在位置图上拖），只做忽远忽近、上下、自然晃动，不会跑到别的音频那边去",
                 "Each file stays at its own position (pick it in the list or drag it on the map), with only near / far sway, up / down and micro motion",
             ));
-            ui.selectable_value(&mut layout, Layout::Follow, t("一起移动", "Together")).on_hover_text(t(
+            ui.selectable_value(&mut follow, true, t("一起移动", "Together")).on_hover_text(t(
                 "几个音频按右侧「左右移动」的方式（穿梭、随机走位、环绕、固定、手动）一起走，彼此始终相隔 360°/个数：两个时正好在头的两侧相对，一个贴左耳时另一个贴右耳，换边时一个从脸前、一个从脑后绕过去，不会撞在一起。说话时钟按任何一个音频在说话来走",
                 "The files follow Left / right motion (sweep, random, orbit, static, manual) together and always stay 360° / count apart: two files sit on opposite sides, one at the left ear while the other is at the right, and when they switch sides one passes in front and the other behind, so they never meet. Motion runs while any of the files is speaking",
             ));
-            ui.add_enabled_ui(two, |ui| {
-                ui.selectable_value(&mut layout, Layout::Mirror, t("镜像", "Mirror"))
-                    .on_hover_text(t(
-                        "只用于两个声音：两个声音按右侧「左右移动」的方式走同一套，1 号在头的左半边、2 号在右半边，左右对称——同时贴两耳、同时凑到脸前两侧。原来要换到另一侧的地方，变成朝脸前（或脑后）靠过去、慢下来、再退回这一侧，离正前 / 正后至少 30°，两人各守一边，不会撞上。说话时钟按任何一个在说话来走",
-                        "Two voices only: both follow Left / right motion on one shared path, voice 1 on the left half of the head and voice 2 on the right, mirror images of each other — at both ears together, leaning in toward the face together. Where the path would cross to the other side, it leans toward the face (or the back of the head), slows down and comes back, staying at least 30° from straight ahead / behind, so each keeps to its own side and they never meet. Motion runs while either is speaking",
-                    ))
-                    .on_disabled_hover_text(t("镜像只用于两个声音（左右双人，或两个音频的多音频合成）；三个以上按一起移动", "Mirror is for two voices only (two voices, or mixing two files); with three or more it works as Together"));
-            });
-            if layout != self.layout() {
-                self.set_mix_layout(layout);
+            if follow != self.s.mix_follow {
+                self.set_mix_follow(follow);
             }
             // 自动平衡（0 = 关）：和排布放在一行，不多占高度
             ui.add_space(8.0);
@@ -1932,13 +1876,13 @@ impl App {
     fn ui_duo_block(&mut self, ui: &mut egui::Ui, busy: bool, live: bool) {
         let tip = if live {
             t(
-                "把你的声音变成两个人：同一个声音一个在左耳、一个在右耳（各自忽远忽近），第 2 个整体晚这么多毫秒，听起来是两个人一前一后地说。30 ms 以下两边容易融成一个声音（听起来偏在先到的那一边），50–120 ms 像两个人，150 ms 以上像回声。只有第 2 个声音晚，第 1 个和平时一样及时。打开后下面可以改两个声音的位置、音量、排布和自动平衡；运行中拖这个滑条实时生效，从 0 拖上来或拖回 0 时会重新开始一下。处理量约是平时的两倍。0 = 关闭",
-                "Turns your voice into two people: the same voice at the left ear and at the right ear (each sways near and far on its own), the second one this many milliseconds later, so it sounds like two people speaking one after the other. Below about 30 ms the two tend to fuse into one voice (heard on the earlier side); 50–120 ms sounds like two people; above 150 ms it sounds like an echo. Only the second voice is delayed; the first is as immediate as usual. When on, the two voices' positions, volumes, layout and balance can be set below; dragging this slider while running takes effect live, and turning it on or off restarts briefly. Uses about twice the processing. 0 = off",
+                "把你的声音变成两个人：同一个声音一个在左耳、一个在右耳（各自忽远忽近），第 2 个整体晚这么多毫秒，听起来是两个人一前一后地说。30 ms 以下两边容易融成一个声音（听起来偏在先到的那一边），50–120 ms 像两个人，150 ms 以上像回声。只有第 2 个声音晚，第 1 个和平时一样及时。打开时排布默认是「一起移动」（按右侧「左右移动」一起走、始终相对），下面可以改两个声音的位置、音量、排布和自动平衡；运行中拖这个滑条实时生效，从 0 拖上来或拖回 0 时会重新开始一下。处理量约是平时的两倍。0 = 关闭",
+                "Turns your voice into two people: the same voice at the left ear and at the right ear (each sways near and far on its own), the second one this many milliseconds later, so it sounds like two people speaking one after the other. Below about 30 ms the two tend to fuse into one voice (heard on the earlier side); 50–120 ms sounds like two people; above 150 ms it sounds like an echo. Only the second voice is delayed; the first is as immediate as usual. Turning it on sets Layout to Together (both follow Left / right motion, always opposite); the two voices' positions, volumes, layout and balance can be set below; dragging this slider while running takes effect live, and turning it on or off restarts briefly. Uses about twice the processing. 0 = off",
             )
         } else {
             t(
-                "把一个音频当成两个人：同一个声音一个在左耳、一个在右耳（和导入两个音频的多音频合成一样，各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音（听起来偏在先到的那一边），50–120 ms 像两个人，150 ms 以上像回声。打开后下面可以改两个声音的位置、音量、排布和自动平衡；试听中拖这个滑条实时生效。输出比原音频长出这段延迟。列表里有几个音频时，试听的是选中的那个，「全部转换」时每个文件都这样做。0 = 关闭",
-                "Turns one file into two people: the same voice at the left ear and at the right ear (like mixing two files: each sways near and far on its own), the second one this many milliseconds later, so you hear two people speaking one after the other. Below about 30 ms the two tend to fuse into one voice (heard on the earlier side); 50–120 ms sounds like two people; above 150 ms it sounds like an echo. When on, the two voices' positions, volumes, layout and balance can be set below; dragging this slider during Preview takes effect live. The output is longer by the delay. With several files in the list, Preview plays the selected one and Convert all does this to every file. 0 = off",
+                "把一个音频当成两个人：同一个声音一个在左耳、一个在右耳（和导入两个音频的多音频合成一样，各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音（听起来偏在先到的那一边），50–120 ms 像两个人，150 ms 以上像回声。打开时排布默认是「一起移动」（按右侧「左右移动」一起走、始终相对），下面可以改两个声音的位置、音量、排布和自动平衡；试听中拖这个滑条实时生效。输出比原音频长出这段延迟。列表里有几个音频时，试听的是选中的那个，「全部转换」时每个文件都这样做。0 = 关闭",
+                "Turns one file into two people: the same voice at the left ear and at the right ear (like mixing two files: each sways near and far on its own), the second one this many milliseconds later, so you hear two people speaking one after the other. Below about 30 ms the two tend to fuse into one voice (heard on the earlier side); 50–120 ms sounds like two people; above 150 ms it sounds like an echo. Turning it on sets Layout to Together (both follow Left / right motion, always opposite); the two voices' positions, volumes, layout and balance can be set below; dragging this slider during Preview takes effect live. The output is longer by the delay. With several files in the list, Preview plays the selected one and Convert all does this to every file. 0 = off",
             )
         };
         let ms = if live { self.s.rt_duo_ms } else { self.s.duo_ms };
@@ -1978,7 +1922,8 @@ impl App {
     /// 文件页和实时页共用这两个位置。`ms`：第 2 个声音晚多少毫秒（写在提示里）。
     fn ui_duo_voices(&mut self, ui: &mut egui::Ui, busy: bool, ms: f32) {
         let combo_w = if ENGLISH.load(Ordering::Relaxed) { 104.0 } else { 64.0 };
-        let layout = self.s.layout().for_voices(2);
+        let follow = self.s.mix_follow;
+        let offsets = mix::follow_offsets(2, true);
         let names = [t("1 号：原声（准时）", "1: the original (on time)").to_string(), format!("{} {:.0} ms", t("2 号：晚", "2: later by"), ms)];
         ui.horizontal(|ui| {
             for k in 0..2 {
@@ -1996,8 +1941,7 @@ impl App {
                     self.mix_sel = Some(k);
                 }
                 let mut v = self.duo_voices[k];
-                let slot = layout_slot(layout, 2, k);
-                ui.add_enabled_ui(!busy, |ui| Self::voice_controls(ui, k, &mut v, combo_w, slot));
+                ui.add_enabled_ui(!busy, |ui| Self::voice_controls(ui, k, &mut v, combo_w, follow.then(|| offsets[k])));
                 self.duo_voices[k] = v;
             }
         });
@@ -2027,12 +1971,16 @@ impl App {
     }
 
     /// 文件列表里一个合成音源的位置下拉框（固定宽度 `combo_w`，放不下的字截断）和音量。
-    /// `slot`：一起移动 / 镜像时位置由走位决定，下拉框换成这段说明（[`layout_slot`]）。
-    fn voice_controls(ui: &mut egui::Ui, i: usize, v: &mut Voice, combo_w: f32, slot: Option<(String, &'static str)>) {
+    /// `follow_off`：一起移动时它比 1 号转过的角度（位置由走位决定，下拉框换成这个角度）。
+    fn voice_controls(ui: &mut egui::Ui, i: usize, v: &mut Voice, combo_w: f32, follow_off: Option<f32>) {
         ui.allocate_ui_with_layout(egui::vec2(combo_w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.set_max_width(combo_w);
-            if let Some((text, tip)) = slot {
-                ui.add_sized([combo_w, 18.0], egui::Label::new(RichText::new(text).weak()).truncate()).on_hover_text(tip);
+            if let Some(off) = follow_off {
+                let text = if i == 0 { t("领头", "lead").to_string() } else { format!("+{off:.0}°") };
+                ui.add_sized([combo_w, 18.0], egui::Label::new(RichText::new(text).weak())).on_hover_text(t(
+                    "一起移动：几个音频按同一套走位一起走，这个音频的位置比 1 号绕头转过这么多度（两个时 +180° 就是正对面）",
+                    "Moving together: the files share one path; this one is rotated around the head by this much from file 1 (+180° = directly opposite)",
+                ));
                 return;
             }
             egui::ComboBox::from_id_salt(("voice_pos", i))
@@ -2241,12 +2189,12 @@ impl App {
         ui.add_space(3.0);
     }
 
-    /// 右侧第一栏：风格、贴耳感、左右移动。`mix`：多音频合成 / 左右双人时是 Some(排布)——各自固定时左右移动不起作用，
-    /// 一起移动、镜像时几个声音按这里的方式一起走。
+    /// 右侧第一栏：风格、贴耳感、左右移动。`mix`：多音频合成中时是 Some(是否一起移动)——各自固定时左右移动不起作用，
+    /// 一起移动时几个音频按这里的方式一起走。
     ///
     /// 按下风格按钮或「恢复默认」时返回 Some(需同步的文件转换目标响度)：调用方据此同步目标响度、关掉左右双人
     /// （各风格的默认状态都是一个声音）。
-    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<Layout>) -> Option<Option<f32>> {
+    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<Option<f32>> {
         let mut file_lufs = None;
         let mut pressed = false;
         ui.horizontal_wrapped(|ui| {
@@ -2326,22 +2274,19 @@ impl App {
         egui::CollapsingHeader::new(RichText::new(t("左右移动", "Left / right motion")).strong()).default_open(true).show(ui, |ui| {
             let accent = Color32::from_rgb(70, 150, 240);
             match mix {
-                Some(Layout::Fixed) => {
+                Some(false) => {
                     ui.add(egui::Label::new(RichText::new(t("几个声音各自固定（多音频合成 / 左右双人）：每个声音固定在自己的位置（在左边选，或在位置图上拖），下面的移动方式暂不起作用；忽远忽近、上下、自然晃动照常。想让它们一起动，把左边的「排布」改成「一起移动」", "Voices fixed (multi-audio mix / two voices): each voice stays at its own position (pick it on the left or drag it on the map), so the motion modes below are inactive; near / far sway, up / down and micro motion still apply. Set Layout to Together on the left to move them")).small().color(accent)).wrap());
                 }
-                Some(Layout::Follow) => {
+                Some(true) => {
                     ui.add(egui::Label::new(RichText::new(t("几个声音一起移动（多音频合成 / 左右双人）：按下面的方式一起走，彼此始终相隔 360°/个数（两个时正好相对：一个贴左耳时另一个贴右耳）", "Voices moving together (multi-audio mix / two voices): they follow the motion below together and always stay 360° / count apart (two voices: one at the left ear while the other is at the right)")).small().color(accent)).wrap());
-                }
-                Some(Layout::Mirror) => {
-                    ui.add(egui::Label::new(RichText::new(t("两个声音镜像（左右双人 / 两个音频的多音频合成）：按下面的方式走同一套，1 号在头的左半边、2 号在右半边，左右对称。原来要换到另一侧的地方，变成朝脸前（或脑后）靠过去再退回来（穿梭时「换边时从哪里绕」选的就是往哪边靠）；离正前 / 正后至少 30°，两人各守一边，不会撞上", "Two voices mirrored (two voices / mixing two files): they share the motion below, voice 1 on the left half of the head and voice 2 on the right, mirror images of each other. Where the path would cross to the other side, they lean toward the face (or the back of the head) and come back (for sweeps, Cross via picks which way); they stay at least 30° from straight ahead / behind, each on its own side, so they never meet")).small().color(accent)).wrap());
                 }
                 None => {}
             }
-            ui.add_enabled_ui(mix != Some(Layout::Fixed), |ui| Self::motion_controls(ui, p));
+            ui.add_enabled_ui(mix != Some(false), |ui| Self::motion_controls(ui, p));
             egui::Grid::new("g2b").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 row(ui, t("响度随位置变化", "Level follows position"), t("1 = 物理真实（贴耳很响、到脸前会弱很多），0 = 处处一样响", "1 = physical (loud at the ear, much quieter in front), 0 = constant"), egui::Slider::new(&mut p.level_follow, 0.0..=1.0).fixed_decimals(2));
             });
-            if p.mode == MotionMode::Manual && mix != Some(Layout::Fixed) {
+            if p.mode == MotionMode::Manual && mix != Some(false) {
                 ui.add(egui::Label::new(RichText::new(t("手动：声源停在你摆的位置，在左边的位置图上拖动。忽远忽近、上下、自然晃动此时不起作用", "Manual: the source stays where you put it; drag it on the map at the left. Near / far sway, up / down and micro motion are inactive")).weak().small()).wrap());
             }
         });
@@ -2832,14 +2777,14 @@ impl eframe::App for App {
             });
         });
         let mix = self.mix_view();
-        let layout = mix.then(|| self.layout());
+        let layout = mix.then_some(self.s.mix_follow);
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().id_salt("rightscroll").show(ui, |ui| {
                 let p = &mut self.s.params;
                 let mut style_lufs = None;
                 ui.columns(2, |c| {
                     style_lufs = Self::params_left(&mut c[0], p, layout);
-                    Self::params_right(&mut c[1], p, layout == Some(Layout::Fixed));
+                    Self::params_right(&mut c[1], p, layout == Some(false));
                 });
                 if let Some(l) = style_lufs {
                     if let Some(l) = l {
@@ -3026,16 +2971,16 @@ mod tests {
             };
             let expected = params.clone();
             let ctx = egui::Context::default();
-            // 普通、合成·各自固定、合成·一起移动、合成·镜像四种画法都画几遍
-            for k in 0..12 {
+            // 普通、合成·各自固定、合成·一起移动三种画法都画几遍
+            for k in 0..9 {
                 let _ = ctx.run_ui(egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2000.0, 3000.0))),
                     ..Default::default()
                 }, |ui| {
                     ui.columns(2, |columns| {
-                        let layout = [None, Some(Layout::Fixed), Some(Layout::Follow), Some(Layout::Mirror)][k % 4];
+                        let layout = [None, Some(false), Some(true)][k % 3];
                         App::params_left(&mut columns[0], &mut params, layout);
-                        App::params_right(&mut columns[1], &mut params, layout == Some(Layout::Fixed));
+                        App::params_right(&mut columns[1], &mut params, layout == Some(false));
                     });
                 });
                 assert_eq!(params, expected, "drawing controls changed a manually entered value");
@@ -3055,18 +3000,6 @@ mod tests {
         // 旧配置文件里没有这两项：默认关、各自固定
         let old: Saved = ron::from_str("(english:false)").unwrap();
         assert!(!old.mix && !old.mix_follow);
-        assert_eq!(old.layout(), Layout::Fixed);
-        // 镜像：两个开关都打开（不认识 mix_mirror 的旧版读到的是一起移动），存了再读回来还是镜像
-        let mut m = Saved::default();
-        m.set_layout(Layout::Mirror);
-        assert!(m.mix_follow && m.mix_mirror);
-        let back: Saved = ron::from_str(&ron::to_string(&m).unwrap()).unwrap();
-        assert_eq!(back.layout(), Layout::Mirror);
-        m.set_layout(Layout::Follow);
-        assert!(m.mix_follow && !m.mix_mirror);
-        // 镜像只用于两个声音，三个以上按一起移动
-        assert_eq!(Layout::Mirror.for_voices(2), Layout::Mirror);
-        assert_eq!(Layout::Mirror.for_voices(3), Layout::Follow);
         let v = Voice { az: 45.0, dist: Some(0.3), gain_db: -3.0 };
         assert_eq!(ron::from_str::<Voice>(&ron::to_string(&v).unwrap()).unwrap(), v);
         assert_eq!(voice_name(&Voice::preset(0)), "左耳");

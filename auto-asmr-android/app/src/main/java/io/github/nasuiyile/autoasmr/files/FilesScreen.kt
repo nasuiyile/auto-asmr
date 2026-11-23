@@ -212,7 +212,8 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
             }
             if (n == 0) Note("支持 wav / m4a / mp3 / flac / ogg 等常见格式")
             val voices = st.optJSONArray("voices")
-            val slots = st.optJSONArray("slots")
+            val offsets = st.optJSONArray("follow_offsets")
+            val follow = Settings.params.optBoolean("mix_follow")
             val selected = st.optInt("selected", -1).takeIf { st.has("selected") && !st.isNull("selected") }
             val mixSel = st.optInt("mix_sel", -1).takeIf { st.has("mix_sel") && !st.isNull("mix_sel") }
             for (i in 0 until n) {
@@ -236,7 +237,7 @@ private fun FileList(st: JSONObject, busy: Boolean, multi: Boolean, onAddFiles: 
                         modifier = Modifier.weight(1f).padding(start = 6.dp, top = 10.dp, bottom = 10.dp),
                     )
                     when {
-                        inMix -> VoiceControls(i, voices?.optJSONObject(i), busy, slotOf(slots, i))
+                        inMix -> VoiceControls(i, voices?.optJSONObject(i), busy, if (follow) offsets?.optDouble(i)?.toFloat() else null)
                         multi -> Note("不参与合成")
                         else -> StatusCell(f.optJSONObject("status")) { title, body -> detail = title to body }
                     }
@@ -283,16 +284,12 @@ private fun StatusCell(s: JSONObject?, onDetail: (String, String) -> Unit) {
     }
 }
 
-/** 一起移动 / 镜像时第 k 个声音的位置说明（"领头"、"+180°"、"左半边"……）；各自固定时 null。 */
-private fun slotOf(slots: org.json.JSONArray?, k: Int): String? =
-    slots?.takeIf { k < it.length() && !it.isNull(k) }?.optString(k)
-
-/** 一个合成音源的位置下拉框和音量（一起移动 / 镜像时位置由走位决定，显示 `slot`：比 1 号转过的角度、在哪半边）。 */
+/** 一个合成音源的位置下拉框和音量（一起移动时位置由走位决定，显示它比 1 号转过的角度）。 */
 @Composable
-private fun VoiceControls(k: Int, v: JSONObject?, busy: Boolean, slot: String?) {
+private fun VoiceControls(k: Int, v: JSONObject?, busy: Boolean, followOff: Float?) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        if (slot != null) {
-            Note(slot, MaterialTheme.colorScheme.onSurfaceVariant)
+        if (followOff != null) {
+            Note(if (k == 0) "领头" else String.format(Locale.ROOT, "+%.0f°", followOff), MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             var open by remember { mutableStateOf(false) }
             Box {
@@ -324,13 +321,13 @@ private fun MixBlock(st: JSONObject, busy: Boolean) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TipLabel(
                 "多音频合成：几个音频各在一个位置，同时播放",
-                "勾上后，列表里的前 4 个音频各放一个位置（默认一个在左耳、一个在右耳，再多就放正前、正后），「试听」时一起播放，「合成并保存」输出一个文件。下面的「排布」可以选各自固定（位置在列表里选或在位置图上拖）、一起移动（按「左右移动」的方式一起走，彼此始终相对）或镜像（只用于两个音频：左右对称，各守一边）。各音频先自动对齐到一样响，列表里的 dB 是在这之上的加减",
+                "勾上后，列表里的前 4 个音频各放一个位置（默认一个在左耳、一个在右耳，再多就放正前、正后），「试听」时一起播放，「合成并保存」输出一个文件。下面的「排布」可以选各自固定（位置在列表里选或在位置图上拖）或一起移动（按「左右移动」的方式一起走，彼此始终相对）。各音频先自动对齐到一样响，列表里的 dB 是在这之上的加减",
                 Modifier.weight(1f).padding(end = 12.dp),
             )
             Switch(checked = on, onCheckedChange = { Settings.setBool("mix", it) }, enabled = !busy)
         }
         if (on) Note(if (n < 2) "再添加一个音频" else if (n > 4) "只用前 4 个" else "最多 4 个", MaterialTheme.colorScheme.onSurfaceVariant)
-        if (on) LayoutRow(st, busy)
+        if (on) LayoutRow(busy)
         if (on) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
                 TipLabel(
@@ -359,26 +356,18 @@ private fun MixBlock(st: JSONObject, busy: Boolean) {
     }
 }
 
-/** 排布（各自固定 / 一起移动 / 镜像）和自动平衡：多音频合成和左右双人共用。选中的是实际用的排布（三个以上声音时镜像按一起移动）。 */
+/** 排布（各自固定 / 一起移动）和自动平衡：多音频合成和左右双人共用。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LayoutRow(st: JSONObject, busy: Boolean) {
+private fun LayoutRow(busy: Boolean) {
     val p = Settings.params
-    val layout = st.optString("layout", "fixed")
-    val two = st.optInt("n_voices") == 2
+    val follow = p.optBoolean("mix_follow")
     Column {
         FlowRow(verticalArrangement = Arrangement.Center, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            TipLabel("排布", "各自固定：每个声音固定在自己的位置（在列表里选，或在位置图上拖），只做忽远忽近、上下、自然晃动。一起移动：几个声音按「左右移动」的方式（穿梭、随机走位、环绕、固定、手动）一起走，彼此始终相隔 360°/个数：两个时正好在头的两侧相对，换边时一个从脸前、一个从脑后绕过去，不会撞在一起。镜像（只用于两个声音）：两个声音按「左右移动」的方式走同一套，1 号在头的左半边、2 号在右半边，左右对称——同时贴两耳、同时凑到脸前两侧；原来要换到另一侧的地方，变成朝脸前（或脑后）靠过去再退回来，离正前 / 正后至少 30°，两人各守一边，不会撞上")
-            for ((key, label) in listOf("fixed" to "各自固定", "follow" to "一起移动", "mirror" to "镜像")) {
-                FilterChip(
-                    selected = layout == key,
-                    onClick = { Settings.set("mix_layout", "\"$key\"") },
-                    label = { Text(label) },
-                    enabled = !busy && (key != "mirror" || two),
-                )
-            }
+            TipLabel("排布", "各自固定：每个声音固定在自己的位置（在列表里选，或在位置图上拖），只做忽远忽近、上下、自然晃动。一起移动：几个声音按「左右移动」的方式（穿梭、随机走位、环绕、固定、手动）一起走，彼此始终相隔 360°/个数：两个时正好在头的两侧相对，换边时一个从脸前、一个从脑后绕过去，不会撞在一起")
+            FilterChip(selected = !follow, onClick = { Settings.setBool("mix_follow", false) }, label = { Text("各自固定") }, enabled = !busy)
+            FilterChip(selected = follow, onClick = { Settings.setBool("mix_follow", true) }, label = { Text("一起移动") }, enabled = !busy)
         }
-        if (!two && p.optBoolean("mix_mirror")) Note("镜像只用于两个声音，三个以上按一起移动")
         val bal = p.optDouble("mix_balance", 0.0)
         var drag by remember { mutableStateOf<Float?>(null) }
         val shown = drag?.toDouble() ?: bal
@@ -410,7 +399,7 @@ private fun DuoBlock(st: JSONObject, busy: Boolean) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TipLabel(
                 "左右双人",
-                "把一个音频当成两个人：同一个声音一个在左耳、一个在右耳（和导入两个音频的多音频合成一样，各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音，50–120 ms 像两个人，150 ms 以上像回声。打开后下面可以改两个声音的位置、音量、排布和自动平衡；试听中拖这个滑条实时生效。输出比原音频长出这段延迟。列表里有几个音频时，试听的是选中的那个，「全部转换」时每个文件都这样做。0 = 关闭",
+                "把一个音频当成两个人：同一个声音一个在左耳、一个在右耳（和导入两个音频的多音频合成一样，各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音，50–120 ms 像两个人，150 ms 以上像回声。打开时排布默认是「一起移动」（按「左右移动」一起走、始终相对），下面可以改两个声音的位置、音量、排布和自动平衡；试听中拖这个滑条实时生效。输出比原音频长出这段延迟。列表里有几个音频时，试听的是选中的那个，「全部转换」时每个文件都这样做。0 = 关闭",
                 Modifier.weight(1f),
             )
             Text(if (shown < 0.5) "0 关" else "${shown.roundToInt()} ms", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
@@ -422,16 +411,17 @@ private fun DuoBlock(st: JSONObject, busy: Boolean) {
         Note(if (ms <= 0.0) "同一个声音一左一右两个人说" else if (n > 1) "转换时每个文件都这样" else "50–120 ms 最像两个人")
         if (st.optBoolean("duo")) {
             val voices = st.optJSONArray("voices")
-            val slots = st.optJSONArray("slots")
+            val offsets = st.optJSONArray("follow_offsets")
+            val follow = p.optBoolean("mix_follow")
             val mixSel = st.optInt("mix_sel", -1).takeIf { st.has("mix_sel") && !st.isNull("mix_sel") }
             for (k in 0 until 2) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Badge(k, mixSel == k) { FileSession.cmd("mix_sel", "index" to k) }
                     Text(if (k == 0) "  1 号：原声（准时）" else String.format(Locale.ROOT, "  2 号：晚 %.0f ms", ms), style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                    VoiceControls(k, voices?.optJSONObject(k), busy, slotOf(slots, k))
+                    VoiceControls(k, voices?.optJSONObject(k), busy, if (follow) offsets?.optDouble(k)?.toFloat() else null)
                 }
             }
-            if (!p.optBoolean("mix")) LayoutRow(st, busy)
+            if (!p.optBoolean("mix")) LayoutRow(busy)
         }
     }
 }

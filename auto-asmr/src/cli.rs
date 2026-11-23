@@ -47,7 +47,7 @@ convert 的选项（括号里是默认值）：
                           --mix-follow、--mix-balance 一起用；输出比原音频长出这段延迟
   --style ear|ku100|breath|earclean   ear=贴耳加强；ku100=KU100 近耳轻语；breath=呼吸音（近耳呼吸与气流）；
                           earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
-                          带耳道共鸣和耳内低频，每只耳朵约 40 秒才换边，目标响度默认 −20 LUFS）
+                          带耳道共鸣和耳内低频，每只耳朵约 15 秒换一次边，目标响度默认 −20 LUFS）
   --start <秒> --duration <秒>      只处理一段
   --channel auto|left|right|mix     立体声取哪个声道（auto=更响的那个）
  背景音（实时生成的雨声，不用录音素材；人声不受影响。界面里叫「背景音」）

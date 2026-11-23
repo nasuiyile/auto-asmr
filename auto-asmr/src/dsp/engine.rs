@@ -1060,12 +1060,12 @@ mod tests {
     /// 掏耳预设：声音只在一只耳朵里（另一只低 40 dB 以上），带很强的耳内低频；输入里并没有低频。
     #[test]
     fn earclean_is_one_sided_and_rumbles() {
-        let x = crate::dsp::testsig::test_scratch(20.0);
+        let x = crate::dsp::testsig::test_scratch(12.0);
         assert!(band_db(&x, 25.0, 160.0) < band_db(&x, 300.0, 2000.0) - 25.0, "测试输入不该有低频");
         let (l, r) = render(Params::default().style_earclean(), &x);
         assert!(l.iter().chain(r.iter()).all(|v| v.is_finite()));
         let e = |v: &[f32]| 10.0 * (v.iter().map(|a| (a * a) as f64).sum::<f64>() / v.len() as f64 + 1e-30).log10() as f32;
-        // 开场在左耳，20 秒内不换边
+        // 开场在左耳，前 12 秒不换边（停留 15 秒）
         assert!(e(&l) - e(&r) > 40.0, "左 {} dB，右 {} dB", e(&l), e(&r));
         let (lf, mid) = (band_db(&l, 25.0, 160.0), band_db(&l, 300.0, 2000.0));
         assert!(lf - mid > 6.0 && lf - mid < 24.0, "耳内低频比摩擦声高 {} dB（实录 10–20 dB）", lf - mid);

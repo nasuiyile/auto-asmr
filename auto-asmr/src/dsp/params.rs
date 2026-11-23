@@ -307,7 +307,7 @@ impl Params {
     /// 把"风格"管的那些参数恢复成默认值（= 贴耳加强）：贴耳感、入耳、左右移动的方式和节奏、忽远忽近、上下、
     /// 房间与回放、去齿音 / 轻声化、目标响度。其余的——降噪、耳廓、自动响度开关、输出增益、峰值上限、
     /// 随机种子、环绕 / 固定 / 手动模式的位置——保持不变。各风格都先做这一步，所以按哪个按钮结果都是确定的，
-    /// 从"掏耳"切回人声的风格时不会留下"伸进耳道、每只耳朵停 40 秒"之类的设置。
+    /// 从"掏耳"切回人声的风格时不会留下"伸进耳道、每只耳朵停 15 秒"之类的设置。
     fn style_base(mut self) -> Self {
         let d = Params::default();
         (self.ear_dist, self.isolation_db, self.presence_db, self.ku100_eq, self.dark_db) = (d.ear_dist, d.isolation_db, d.presence_db, d.ku100_eq, d.dark_db);
@@ -396,7 +396,7 @@ impl Params {
 
     /// 掏耳：按两段 KU100 掏耳实录标定。给棉签 / 挖耳勺 / 刮擦这类"触发音"用，不是给人声用的——
     /// 声源贴在耳朵上并伸进耳道进进出出（耳道共鸣跟着在约 3–11 kHz 之间滑动），带耳内低频和堵耳的闷感；
-    /// 另一只耳朵基本听不到；每只耳朵停留约 40 秒才换边，换边时先退出来。人声用的几项（气声、气流、轻声、
+    /// 另一只耳朵基本听不到；每只耳朵停留约 15 秒（有声音的时间）再换边，换边时先退出来。人声用的几项（气声、气流、轻声、
     /// 忽远忽近、耳甲共鸣、临场感、嘴的大小）都关掉。
     pub fn style_earclean(self) -> Self {
         let mut p = self.style_base();
@@ -410,7 +410,7 @@ impl Params {
         p.mouth_cm = 0.0;
         p.soft_near = 0.0;
         p.inear_cm = 2.1;
-        p.hold_s = 40.0;
+        p.hold_s = 15.0;
         p.move_s = 2.0;
         p.randomness = 0.2;
         p.approach = 0.0;
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(d.clone().style_ku100().inear_cm, 0.0);
         assert!(!d.clone().style_ku100().static_ambience);
         let e = d.clone().style_earclean();
-        assert!(e.inear_cm > 1.0 && e.hold_s >= 20.0 && e.isolation_db >= 40.0);
+        assert!(e.inear_cm > 1.0 && (10.0..=20.0).contains(&e.hold_s) && e.isolation_db >= 40.0);
         assert!(e.breath_db == 0.0 && e.puff == 0.0 && e.sway == 0.0 && e.sway_follow == 0.0 && e.soft_near == 0.0);
         assert!(!e.room && e.target_lufs == EARCLEAN_LIVE_LUFS && EARCLEAN_LUFS < d.target_lufs);
         // 风格不管的设置保持不变：降噪、耳廓、输出、随机种子、各模式的位置

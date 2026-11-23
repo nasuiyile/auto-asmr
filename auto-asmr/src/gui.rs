@@ -2219,7 +2219,7 @@ impl App {
                 file_lufs = Some(crate::dsp::params::BREATH_LUFS);
                 pressed = true;
             }
-            if style_button(ui, "style_earclean", t("掏耳", "Ear cleaning")).on_hover_text(t("给棉签、挖耳勺、刮擦这类触发音用（不是给人声用的）：声源伸进耳道进进出出，带耳道共鸣、耳内低频和堵耳的闷感，另一只耳朵基本听不到，每只耳朵约 40 秒才换边。按两段 KU100 掏耳实录标定。降噪会把这类声音当噪声压掉，请把降噪关掉或调低", "For trigger sounds such as cotton swabs, ear picks and scratching (not for voice): the source moves in and out of the ear canal with canal resonance, in-ear rumble and an occluded tone; the other ear is almost silent and the ear changes about every 40 s. Calibrated to two KU100 ear-cleaning recordings. Denoise treats such sounds as noise: turn it off or down")).clicked() {
+            if style_button(ui, "style_earclean", t("掏耳", "Ear cleaning")).on_hover_text(t("给棉签、挖耳勺、刮擦这类触发音用（不是给人声用的）：声源伸进耳道进进出出，带耳道共鸣、耳内低频和堵耳的闷感，另一只耳朵基本听不到，每只耳朵约 15 秒换一次边。按两段 KU100 掏耳实录标定。降噪会把这类声音当噪声压掉，请把降噪关掉或调低", "For trigger sounds such as cotton swabs, ear picks and scratching (not for voice): the source moves in and out of the ear canal with canal resonance, in-ear rumble and an occluded tone; the other ear is almost silent and the ear changes about every 15 s. Calibrated to two KU100 ear-cleaning recordings. Denoise treats such sounds as noise: turn it off or down")).clicked() {
                 *p = p.clone().style_earclean();
                 file_lufs = Some(crate::dsp::params::EARCLEAN_LUFS);
                 pressed = true;

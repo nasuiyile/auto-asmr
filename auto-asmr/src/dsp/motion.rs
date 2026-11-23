@@ -1171,14 +1171,46 @@ mod tests {
             }
             tm += clock_step(1.0, 0.13);
         }
-        // 200 秒里每只耳朵都掏过，换过 4 次左右的边；一个来回约 4 秒
-        assert!(m.n_moves >= 3 && m.n_moves <= 6, "moves {}", m.n_moves);
+        // 200 秒里每只耳朵都掏过，每只耳朵停约 15 秒、换边 2 秒：换 11 次左右的边；一个来回约 4 秒
+        assert!(m.n_moves >= 9 && m.n_moves <= 14, "moves {}", m.n_moves);
         assert!(left > n / 5 && right > n / 5 && crossing > 100, "left {left} right {right} crossing {crossing}");
         assert!(m.n_strokes >= 35 && m.n_strokes <= 65, "strokes {}", m.n_strokes);
         // 在"深"和"浅"两头都停得不少
         assert!(deep > n / 5 && shallow > n / 12, "deep {deep} shallow {shallow} of {n}");
         // 进出是平滑的：共振峰最快每秒滑 5 个倍频程以内（实录：中位约 1，最快的 10% 在 2.5–4.8）
         assert!(glide_max < 5.0, "fastest resonance glide {glide_max} oct/s");
+    }
+
+    /// 掏耳不能一直停在一只耳朵：开场 20 秒内就换到另一边，之后每一侧最多停 25 秒左右（说话时钟按有声音的时间走）；
+    /// 断断续续的声音（一半时间在停顿）按网页 / 试听的时钟走，真实时间里一分钟内也换过边。
+    #[test]
+    fn earclean_switches_ears_regularly() {
+        let p = Params::default().style_earclean();
+        for (seed, sparse) in [(1u64, false), (7, false), (3, true)] {
+            let mut m = Motion::new(seed);
+            let (mut tm, mut side, mut since, mut first, mut longest) = (0.0f64, 0i8, 0.0f32, None, 0f32);
+            let n = (240.0 / CTRL_DT) as usize;
+            for i in 0..n {
+                let t = i as f32 * CTRL_DT;
+                let q = m.step(&p, tm, 1.0, 0.0);
+                let s = q.az.to_radians().sin();
+                let now = if s > 0.9 { 1 } else if s < -0.9 { -1 } else { 0 };
+                if now != 0 && now != side {
+                    if side != 0 {
+                        first.get_or_insert(t);
+                        longest = longest.max(t - since);
+                    }
+                    (side, since) = (now, t);
+                }
+                // 断断续续：说 1 秒、停 1 秒
+                let act = if sparse && (t as u32) % 2 == 1 { 0.0 } else { 1.0 };
+                tm += clock_step(act, p.pause_motion);
+            }
+            let first = first.expect("240 秒里一次都没换边");
+            let (first_max, hold_max) = if sparse { (40.0, 45.0) } else { (20.0, 25.0) };
+            assert!(first < first_max, "第一次换边在 {first} 秒（sparse {sparse}）");
+            assert!(longest < hold_max, "一侧最长停了 {longest} 秒（sparse {sparse}）");
+        }
     }
 
     #[test]

@@ -66,6 +66,45 @@ fn mix_pos(a: (f32, f32, f32), b: (f32, f32, f32), s: f32) -> (f32, f32, f32) {
 /// 从手动切回自动后，用这么久（秒）平滑过渡到自动的走位。
 const MANUAL_LEAVE_S: f32 = 0.6;
 
+/// 镜像排布：走位折到头的哪一侧。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Half {
+    /// 不折，整圈都走（平时）。
+    #[default]
+    Whole,
+    Left,
+    Right,
+}
+
+/// 镜像排布时离正中面（正前、正后）至少多少度：两个声音在脸前 / 脑后最近也相隔两倍这个角度。
+pub const HALF_MARGIN_DEG: f32 = 30.0;
+
+/// 把水平面上的方位角平滑地折到一侧：横向坐标 x 换成 ±√(x² + c²)（c = tan 30°），前后坐标不变。
+/// 正侧方（耳朵）不动；正前方折到同侧 30°、正后方折到同侧 150°；原来要穿过正中面换到另一侧的路线，
+/// 变成"朝脸前（或脑后）靠过去、慢下来、再退回这一侧"，速度连续、不会突然掉头。左、右两侧互为镜像。
+pub fn fold_half(az: f32, half: Half) -> f32 {
+    let s = match half {
+        Half::Whole => return az,
+        Half::Left => -1.0,
+        Half::Right => 1.0,
+    };
+    let a = az.to_radians();
+    let c = HALF_MARGIN_DEG.to_radians().tan();
+    (s * a.sin().hypot(c)).atan2(a.cos()).to_degrees().rem_euclid(360.0)
+}
+
+/// 手动摆位用的折法：先翻到这一侧（另一侧的位置取镜像），离正中面不到 [`HALF_MARGIN_DEG`] 的停在边上；
+/// 其余位置原样不动（拖到哪里就是哪里）。
+pub fn clamp_half(az: f32, half: Half) -> f32 {
+    let side = |a: f32| (a.rem_euclid(360.0) + 180.0).rem_euclid(360.0) - 180.0; // (-180, 180]，右为正
+    let th = side(az).abs().clamp(HALF_MARGIN_DEG, 180.0 - HALF_MARGIN_DEG);
+    match half {
+        Half::Whole => az,
+        Half::Left => 360.0 - th,
+        Half::Right => th,
+    }
+}
+
 /// 两者都为 0 时原样返回，仰角为 0。
 pub fn lift_tilt(az: f32, r: f32, lift: f32, tilt: f32) -> (f32, f32, f32) {
     if lift == 0.0 && tilt == 0.0 {
@@ -202,6 +241,8 @@ pub struct Motion {
     pub n_updowns: u32,
     /// 统计：伸进耳道的次数。
     pub n_strokes: u32,
+    /// 镜像排布：输出的位置折到哪一侧（[`fold_half`]；手动摆位用 [`clamp_half`]）。走位本身照常规划，只折输出。
+    pub half: Half,
 }
 
 impl Motion {
@@ -277,6 +318,7 @@ impl Motion {
             n_tops: 0,
             n_updowns: 0,
             n_strokes: 0,
+            half: Half::Whole,
         }
     }
 
@@ -615,7 +657,8 @@ impl Motion {
 
     /// 手动模式的一步：位置跟着用户拖到的目标走，没有任何自动移动。
     fn step_manual(&mut self, p: &Params) -> Pose {
-        let tgt = lift_tilt(p.manual_az.rem_euclid(360.0), p.manual_dist.clamp(R_MIN, R_MAX), 0.0, p.manual_tilt.clamp(-80.0, 85.0));
+        let az = clamp_half(p.manual_az.rem_euclid(360.0), self.half);
+        let tgt = lift_tilt(az, p.manual_dist.clamp(R_MIN, R_MAX), 0.0, p.manual_tilt.clamp(-80.0, 85.0));
         let cur = match (self.man, self.mode) {
             (Some(c), _) => c,
             (None, None) => tgt,          // 开场：直接就位
@@ -756,7 +799,8 @@ impl Motion {
                 }
             }
         }
-        let az = x.atan2(y).to_degrees().rem_euclid(360.0);
+        // 镜像排布：折到自己这一侧（走位照常规划，换边的路线变成朝脸前 / 脑后靠过去再退回来）
+        let az = fold_half(x.atan2(y).to_degrees().rem_euclid(360.0), self.half);
         let r_base = x.hypot(y).clamp(R_MIN, R_MAX);
 
         // 忽远忽近：只改嘴到头表面的距离
@@ -840,6 +884,31 @@ pub fn clock_step_live(act: f32, idle: f32, pause_s: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fold_half_keeps_each_side_and_mirrors() {
+        // 耳朵不动；正前 / 正后折到同侧 30° / 150°；左、右互为镜像；整圈走下来输出连续，离正中面始终至少 30°
+        let close = |a: f32, b: f32| ((a - b + 180.0).rem_euclid(360.0) - 180.0).abs() < 1e-3;
+        assert!(close(fold_half(270.0, Half::Left), 270.0) && close(fold_half(90.0, Half::Left), 270.0));
+        assert!(close(fold_half(0.0, Half::Left), 330.0) && close(fold_half(180.0, Half::Left), 210.0));
+        assert!(close(fold_half(0.0, Half::Right), 30.0) && close(fold_half(180.0, Half::Right), 150.0));
+        assert_eq!(fold_half(123.0, Half::Whole), 123.0);
+        let mut prev = fold_half(0.0, Half::Left);
+        let mut max_step = 0f32;
+        for i in 1..=3600 {
+            let az = i as f32 * 0.1;
+            let (l, r) = (fold_half(az, Half::Left), fold_half(az, Half::Right));
+            assert!(close(l + r, 360.0), "{az}° 折到左 {l:.2}° / 右 {r:.2}°，不对称");
+            assert!((30.0 - 1e-3..=150.0 + 1e-3).contains(&r), "{az}° 折到右边 {r:.2}°，离正中面不到 30°");
+            max_step = max_step.max(((l - prev + 180.0).rem_euclid(360.0) - 180.0).abs());
+            prev = l;
+        }
+        assert!(max_step < 0.2, "输入每走 0.1°，输出最多跳了 {max_step:.3}°");
+        // 手动摆位：拖到哪里就是哪里；另一侧的位置取镜像；离正中面不到 30° 的停在 30°
+        assert!(close(clamp_half(300.0, Half::Left), 300.0) && close(clamp_half(60.0, Half::Left), 300.0));
+        assert!(close(clamp_half(10.0, Half::Right), 30.0) && close(clamp_half(200.0, Half::Right), 150.0));
+        assert!(close(clamp_half(355.0, Half::Left), 330.0) && close(clamp_half(42.0, Half::Whole), 42.0));
+    }
 
     #[test]
     fn arc_goes_the_requested_way() {

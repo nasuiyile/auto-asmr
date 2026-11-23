@@ -54,6 +54,8 @@ private class Trails {
  * - 各自固定：按下时抓住离按下点最近的那个声音，拖到哪里它就摆到哪里（方位和距离）。
  * - 一起移动 + 手动摆位：圈是整组摆好的位置，拖任意一个，整组跟着挪（其余声音保持错开的角度）；右侧竖条上拖高度，
  *   双击竖条回到与耳朵齐平。其它移动方式下不能拖。
+ * - 镜像 + 手动摆位：拖任意一个，另一个在对侧对称的位置（离正前 / 正后不到 30° 的停在 30°）；圈的位置由 Rust 层算好
+ *   （状态里的 `ring_az`）。
  * - 右侧竖条：各声音此刻的高度。
  * 图下面是选中 / 正在拖的声音的读数，没选中时是操作提示。
  */
@@ -62,9 +64,13 @@ fun MixMap(st: JSONObject) {
     val positions = st.optJSONArray("positions")
     val voices = st.optJSONArray("voices")
     val offsets = st.optJSONArray("follow_offsets")
+    val ringAz = st.optJSONArray("ring_az")
     val n = minOf(positions?.length() ?: 0, VOICE_COLORS.size)
     val p = Settings.params
-    val follow = p.optBoolean("mix_follow")
+    // 实际用的排布（三个以上声音时镜像按一起移动）
+    val layout = st.optString("layout", "fixed")
+    val follow = layout != "fixed"
+    val mirror = layout == "mirror"
     val manual = p.optString("mode") == "Manual"
     val draggable = !follow || manual
     val active = st.optBoolean("previewing") && st.optBoolean("rt_mix")
@@ -84,6 +90,7 @@ fun MixMap(st: JSONObject) {
         return FloatArray(4) { q.optDouble(it).toFloat() }
     }
     fun offset(k: Int) = offsets?.optDouble(k)?.toFloat() ?: 0f
+    fun ringAzOf(k: Int) = ringAz?.optDouble(k)?.toFloat() ?: (mAz + offset(k))
     // 每来一份新状态记一个点（同一份状态只记一次）；不在试听时清掉
     val trails = remember { Trails() }
     remember(st) {
@@ -103,7 +110,7 @@ fun MixMap(st: JSONObject) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Canvas(
-                Modifier.size(236.dp).pointerInput(draggable, n, follow) {
+                Modifier.size(236.dp).pointerInput(draggable, n, follow, mirror) {
                     if (!draggable || n == 0) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown()
@@ -188,11 +195,11 @@ fun MixMap(st: JSONObject) {
                     }
                     val q = pos(k)
                     val pt = at(q[0], q[2] * cos(Math.toRadians(q[1].toDouble())).toFloat())
-                    // 摆好的位置（空心圈，可拖）：各自固定时是各自的位置，一起移动 + 手动时是整组的位置
+                    // 摆好的位置（空心圈，可拖）：各自固定时是各自的位置，一起移动 / 镜像 + 手动时是整组的位置
                     val ring = if (!follow) {
                         voices?.optJSONObject(k)?.let { v -> at(v.optDouble("az").toFloat(), v.optDouble("dist").toFloat()) }
                     } else if (manual) {
-                        at(mAz + offset(k), mDist)
+                        at(ringAzOf(k), mDist)
                     } else null
                     if (ring != null) drawCircle(col, 12.dp.toPx(), ring, style = Stroke(if (sel == k) 3.dp.toPx() else 1.5.dp.toPx()))
                     val speaking = active && q[3] > 0.5f
@@ -237,6 +244,8 @@ fun MixMap(st: JSONObject) {
             val plan = q[2] * cos(Math.toRadians(q[1].toDouble())).toFloat()
             String.format(Locale.ROOT, "%d 号：离耳 %.1f cm · 方位 %.0f°%s", k + 1, ((plan - Radar.HEAD_A) * 100f).coerceAtLeast(0f), q[0], if (kotlin.math.abs(q[1]) >= 1f) String.format(Locale.ROOT, " · %s %.0f°", if (q[1] > 0) "上" else "下", kotlin.math.abs(q[1])) else "")
         } ?: when {
+            mirror && !manual -> "镜像：按「左右移动」的方式走同一套，1 号在左半边、2 号在右半边，左右对称；切到手动摆位可以拖"
+            mirror -> "镜像 + 手动摆位：拖任意一个，另一个在对侧对称 · 右侧拖高度，双击回到齐平"
             follow && !manual -> "一起移动：按「左右移动」的方式一起走，彼此相对；切到手动摆位可以拖着挪整组"
             follow -> "一起移动 + 手动摆位：拖任意一个，整组跟着挪 · 右侧拖高度，双击回到齐平"
             else -> "各自固定：拖圆圈摆位置，下拉框也可以选"

@@ -6,6 +6,7 @@
 //! 安卓版读写同一个格式：用得上的是 `params`（全部效果参数）和 `dry`（输出效果 / 监听原声）；
 //! 音频设备、缓冲、文件转换这些安卓用不上的设置原样保留，导出后带回桌面版照样能用。
 
+use crate::dsp::mix::Layout;
 use crate::dsp::params::Params;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -45,7 +46,11 @@ pub struct Saved {
     /// 多音频合成：列表里的前几个音频（最多 [`crate::dsp::mix::MAX_VOICES`] 个）各放一个位置，同时播放、合成一个文件。
     pub mix: bool,
     /// 合成的排布：false = 各自固定在自己的位置；true = 一起移动（按"左右移动"的方式走，彼此错开 360°/N）。
+    /// 用 [`Saved::layout`] / [`Saved::set_layout`] 读写，不要单独改。
     pub mix_follow: bool,
+    /// 合成的排布是镜像：两个声音左右对称、各守一边（只用于两个声音，三个以上按一起移动）。打开时 `mix_follow`
+    /// 也是 true，不认识这一项的旧版读到的就是"一起移动"。
+    pub mix_mirror: bool,
     /// 合成前自动对齐：同一首歌的几个版本，从一起开始唱的地方叠加，对不上的开头和结尾裁掉。
     pub mix_align: bool,
     /// 合成的自动平衡强度（0–100 %，0 = 关）：按短时响度让几段每一段时间都差不多一样响。
@@ -59,7 +64,18 @@ pub struct Saved {
 
 impl Default for Saved {
     fn default() -> Self {
-        Saved { params: Params::default(), english: false, tab: Tab::Realtime, host: String::new(), input: None, output: None, buffer: 256, in_channel: 0, dry: false, bits: 24, file_lufs: -16.0, file_channel: 0, jobs: 0, out_dir: None, view3d: false, mix: false, mix_follow: false, mix_align: false, mix_balance: 0.0, duo_ms: 0.0, rt_duo_ms: 0.0 }
+        Saved { params: Params::default(), english: false, tab: Tab::Realtime, host: String::new(), input: None, output: None, buffer: 256, in_channel: 0, dry: false, bits: 24, file_lufs: -16.0, file_channel: 0, jobs: 0, out_dir: None, view3d: false, mix: false, mix_follow: false, mix_mirror: false, mix_align: false, mix_balance: 0.0, duo_ms: 0.0, rt_duo_ms: 0.0 }
+    }
+}
+
+impl Saved {
+    /// 合成 / 左右双人的排布（由 `mix_follow`、`mix_mirror` 两个开关得出）。
+    pub fn layout(&self) -> Layout {
+        Layout::from_flags(self.mix_follow, self.mix_mirror)
+    }
+
+    pub fn set_layout(&mut self, layout: Layout) {
+        (self.mix_follow, self.mix_mirror) = layout.flags();
     }
 }
 

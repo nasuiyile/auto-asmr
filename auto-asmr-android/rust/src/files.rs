@@ -26,8 +26,8 @@ use auto_asmr::config::Saved;
 use auto_asmr::dsp::align::Alignment;
 use auto_asmr::dsp::balance::{self, BalanceData};
 use auto_asmr::dsp::engine::{Engine, EngineConfig, PostMode, Telemetry};
-use auto_asmr::dsp::mix::{self, MixSetup, Mixer, Voice, MAX_VOICES, PRESETS};
-use auto_asmr::dsp::motion::{lift_tilt, Motion};
+use auto_asmr::dsp::mix::{self, Layout, MixSetup, Mixer, Voice, MAX_VOICES, PRESETS};
+use auto_asmr::dsp::motion::{clamp_half, lift_tilt, Motion};
 use auto_asmr::dsp::params::MotionMode;
 use auto_asmr::dsp::FS;
 use auto_asmr::live::{Proc, Pump, Shared, Source};
@@ -54,6 +54,15 @@ fn motion_name(m: MotionMode) -> &'static str {
 }
 
 /// 位置名（预设的名字，摆到别处时是方位角）。
+/// 一起移动 / 镜像时第 `k` 个声音（共 `n` 个）的位置由走位决定：位置下拉框换成这段文字（同桌面版 `layout_slot`）。
+fn layout_slot(layout: Layout, n: usize, k: usize) -> Option<String> {
+    match layout {
+        Layout::Fixed => None,
+        Layout::Follow => Some(if k == 0 { "领头".to_string() } else { format!("+{:.0}°", 360.0 * k as f32 / n.max(1) as f32) }),
+        Layout::Mirror => Some(if k == 0 { "左半边" } else { "右半边" }.to_string()),
+    }
+}
+
 fn voice_name(v: &Voice) -> String {
     match v.preset_index() {
         Some(i) => PRESETS[i].0.to_string(),
@@ -305,7 +314,7 @@ impl Files {
     }
 
     fn duo_options(&self) -> Option<Duo> {
-        (!self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, follow: self.s.mix_follow, balance: self.s.mix_balance / 100.0 })
+        (!self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, layout: self.s.layout(), balance: self.s.mix_balance / 100.0 })
     }
 
     fn set_mix_voice(&mut self, k: usize, v: Voice) {
@@ -370,7 +379,7 @@ impl Files {
     fn mix_setup(&self, lufs: &[Option<f32>]) -> (Vec<Voice>, Arc<MixSetup>) {
         let voices = self.mix_voices();
         let prev = self.mix_sent.as_ref().map(|(_, s)| s.as_ref());
-        let setup = MixSetup::new(&self.cfg, &voices, lufs, self.s.mix_follow, prev).with_balance(self.cur_balance(), self.s.mix_balance / 100.0).with_delays(&self.mix_delays());
+        let setup = MixSetup::new(&self.cfg, &voices, lufs, self.s.layout(), prev).with_balance(self.cur_balance(), self.s.mix_balance / 100.0).with_delays(&self.mix_delays());
         (voices, Arc::new(setup))
     }
 
@@ -397,18 +406,27 @@ impl Files {
         self.mix_bal = Some((key, balance_data(&lv, &t.lufs)));
     }
 
+    /// 合成 / 左右双人实际用的排布：镜像只用于两个声音，三个以上按一起移动（同桌面版 `layout`）。
+    fn layout(&self) -> Layout {
+        self.s.layout().for_voices(self.mix_voices().len())
+    }
+
     fn mix_positions(&self) -> Vec<[f32; 4]> {
         let active = self.rt.is_some() && self.rt_mix;
         let p = &self.s.params;
         let voices = self.mix_voices();
-        let start = self.s.mix_follow.then(|| Motion::new(p.seed).step(p, 0.0, 1.0, 0.0));
-        let offsets = mix::follow_offsets(voices.len(), self.s.mix_follow);
+        let (layout, n) = (self.layout(), voices.len());
+        let start = layout.moves().then(|| {
+            let mut m = Motion::new(p.seed);
+            m.half = layout.half(0);
+            m.step(p, 0.0, 1.0, 0.0)
+        });
         voices
             .iter()
             .enumerate()
             .map(|(k, v)| match (self.mix_tele.get(k).filter(|_| active), start) {
                 (Some(q), _) => *q,
-                (None, Some(s)) => [(s.az + offsets[k]).rem_euclid(360.0), s.el, s.r, 0.0],
+                (None, Some(s)) => [layout.place(n, k, s.az), s.el, s.r, 0.0],
                 (None, None) => {
                     let (a, e, r) = lift_tilt(v.az, v.distance(p.ear_dist), 0.0, p.height.clamp(-80.0, 85.0));
                     [a, e, r, 0.0]
@@ -417,8 +435,8 @@ impl Files {
             .collect()
     }
 
-    /// 排布变了（各自固定 / 一起移动）：合成试听中从当前位置重新开始。
-    fn on_follow_changed(&mut self) {
+    /// 排布变了（各自固定 / 一起移动 / 镜像）：合成试听中从当前位置重新开始。
+    fn on_layout_changed(&mut self) {
         if self.rt_mix && self.rt.is_some() {
             self.start_mix_preview();
         }
@@ -622,21 +640,24 @@ impl Files {
         let out = staging.join(default_mix_output(&paths[0]).file_name().unwrap_or_default());
         let voices = self.mix_voices();
         let inputs: Vec<MixInput> = paths.iter().cloned().zip(voices.iter().copied()).map(|(path, voice)| MixInput { path, voice }).collect();
-        let follow = self.s.mix_follow;
+        let layout = self.s.layout().for_voices(inputs.len());
         let align = self.s.mix_align;
-        let mo = MixOptions { follow, align, balance: self.s.mix_balance / 100.0, ..Default::default() };
-        let offsets = mix::follow_offsets(inputs.len(), follow);
+        let mo = MixOptions { layout, align, balance: self.s.mix_balance / 100.0, ..Default::default() };
         let list = inputs
             .iter()
             .enumerate()
             .map(|(k, i)| {
                 let g = if i.voice.gain_db != 0.0 { format!("，{:+.1} dB", i.voice.gain_db) } else { String::new() };
-                let pos = if follow { format!("+{:.0}°", offsets[k]) } else { voice_name(&i.voice) };
+                let pos = layout_slot(layout, inputs.len(), k).unwrap_or_else(|| voice_name(&i.voice));
                 format!("{}. {}（{pos}{g}）", k + 1, file_name(&i.path))
             })
             .collect::<Vec<_>>()
             .join("  ");
-        let desc = if follow { format!("一起移动（{}）  {list}", motion_name(self.s.params.mode)) } else { list };
+        let desc = match layout {
+            Layout::Follow => format!("一起移动（{}）  {list}", motion_name(self.s.params.mode)),
+            Layout::Mirror => format!("镜像（{}）  {list}", motion_name(self.s.params.mode)),
+            Layout::Fixed => list,
+        };
         let desc = if align { format!("自动对齐  {desc}") } else { desc };
         let desc = if mo.balance > 0.0 { format!("自动平衡 {:.0}%  {desc}", self.s.mix_balance) } else { desc };
         let opts = self.convert_options(paths[0].clone(), out.clone());
@@ -965,8 +986,8 @@ impl Files {
         if old.duo_ms != self.s.duo_ms {
             self.on_duo_changed(was_duo);
         }
-        if old.mix_follow != self.s.mix_follow {
-            self.on_follow_changed();
+        if old.layout() != self.s.layout() {
+            self.on_layout_changed();
         }
         if old.mix_align != self.s.mix_align {
             self.on_align_changed();
@@ -1205,6 +1226,13 @@ impl Files {
             Vec::new()
         };
         let n_voices = if mixing { self.mix_voices().len() } else { 0 };
+        let layout = self.s.layout().for_voices(n_voices);
+        // 一起移动 / 镜像 + 手动摆位时各声音的圈在哪个方位（拖任意一个就是改手动摆位的方位）
+        let p = &self.s.params;
+        let offsets = mix::follow_offsets(n_voices.max(1), layout != Layout::Mirror);
+        let ring_az: Vec<f32> = (0..n_voices)
+            .map(|k| if layout == Layout::Mirror { clamp_half(p.manual_az, layout.half(k)) } else { (p.manual_az + offsets[k]).rem_euclid(360.0) })
+            .collect();
         let align = if self.s.mix_align && multi {
             let paths = self.mix_paths();
             let ch = self.s.file_channel;
@@ -1262,7 +1290,10 @@ impl Files {
             "align_on": self.align_on(),
             "n_voices": n_voices,
             "voices": voices,
-            "follow_offsets": mix::follow_offsets(n_voices.max(1), true),
+            "layout": layout.key(),
+            "slots": (0..n_voices).map(|k| layout_slot(layout, n_voices, k)).collect::<Vec<_>>(),
+            "follow_offsets": offsets,
+            "ring_az": ring_az,
             "positions": if mixing { self.mix_positions().iter().map(|q| q.to_vec()).collect::<Vec<_>>() } else { Vec::new() },
             "align": align,
             "job": job,
@@ -1484,6 +1515,28 @@ mod tests {
         let report = st["report"].as_str().unwrap();
         assert!(report.contains("1. 甲.wav（左耳）") && report.contains("2. 乙.wav（右耳，-3.0 dB）"), "{report}");
         assert!(staging.join("2/甲_mix_asmr.wav").is_file());
+        // 换成镜像：状态里是镜像，位置下拉框换成"左半边 / 右半边"；手动摆位时两个圈左右对称；合成的说明里写着镜像
+        crate::settings::update_doc("mix_layout", json!("mirror")).unwrap();
+        crate::settings::update_params(|p| {
+            p.mode = MotionMode::Manual;
+            p.manual_az = 60.0;
+            Ok(())
+        })
+        .unwrap();
+        let st = f.handle(&json!({"op": "poll"}));
+        assert_eq!((st["layout"].as_str(), st["slots"][0].as_str(), st["slots"][1].as_str()), (Some("mirror"), Some("左半边"), Some("右半边")));
+        assert_eq!((st["ring_az"][0].as_f64(), st["ring_az"][1].as_f64()), (Some(300.0), Some(60.0)));
+        assert!(st["positions"][0][0].as_f64().unwrap() > 180.0 && st["positions"][1][0].as_f64().unwrap() < 180.0, "{}", st["positions"]);
+        f.handle(&json!({"op": "convert", "staging": staging.display().to_string()}));
+        let st = wait(&mut f, |s| !s["busy"].as_bool().unwrap());
+        let report = st["report"].as_str().unwrap();
+        assert!(report.contains("镜像（手动）") && report.contains("1. 甲.wav（左半边）"), "{report}");
+        crate::settings::update_params(|p| {
+            p.mode = MotionMode::Sweep;
+            Ok(())
+        })
+        .unwrap();
+        crate::settings::update_doc("mix_layout", json!("fixed")).unwrap();
         crate::settings::update_doc("mix", json!(false)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

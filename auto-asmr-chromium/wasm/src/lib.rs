@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use auto_asmr::config::{self, ConfigError, Saved};
 use auto_asmr::dsp::engine::{Engine, EngineConfig, PostMode};
-use auto_asmr::dsp::mix::{self, LiveMix, MixSetup, DUO_MAX_MS, DUO_VOICES};
+use auto_asmr::dsp::mix::{self, Layout, LiveMix, MixSetup, DUO_MAX_MS, DUO_VOICES};
 use auto_asmr::dsp::params::{MotionMode, Params};
 use auto_asmr::dsp::pinna::pinnas;
 use auto_asmr::dsp::rain::RainSetup;
@@ -74,7 +74,7 @@ impl State {
     fn apply(&mut self) {
         let cfg = Arc::new(EngineConfig::new(self.doc.params.clone(), self.cfg.as_deref()));
         let d = &self.doc;
-        self.duo = (d.duo_ms > 0.0).then(|| Arc::new(mix::duo_setup(&cfg, &DUO_VOICES, d.duo_ms, d.mix_follow, d.mix_balance / 100.0, self.duo.as_deref())));
+        self.duo = (d.duo_ms > 0.0).then(|| Arc::new(mix::duo_setup(&cfg, &DUO_VOICES, d.duo_ms, d.layout(), d.mix_balance / 100.0, self.duo.as_deref())));
         self.cfg = Some(cfg);
         self.dry = d.dry;
     }
@@ -211,7 +211,8 @@ pub extern "C" fn asmr_doc_text() -> i32 {
 /// `derived`（界面上的换算值：`ear_cm` 贴耳距离、`manual_cm` 手动摆位的离头距离、`moves_per_min` 移动频率、
 /// `denoise` 降噪滑条、`bg_db` 雨声比人声低多少 dB，关闭时为 null；`style` 选中的风格，编号同 `style`，
 /// 参数和哪个风格都对不上时为 null）、
-/// `doc`（配置文件里 `params` 之外、和桌面版共用的左右双人设置：`duo_ms`、`mix_follow`、`mix_balance`）。
+/// `doc`（配置文件里 `params` 之外、和桌面版共用的左右双人设置：`duo_ms`、`mix_layout`（排布："fixed" / "follow" /
+/// "mirror"，由配置文件里的 `mix_follow`、`mix_mirror` 换算）、`mix_balance`）。
 /// 插件风格按钮的编号（`style` 0..3）对应的风格名（[`Params::STYLES`]）。
 const STYLE_ORDER: [&str; 4] = ["style_ear", "style_ku100", "style_earclean", "style_breath"];
 
@@ -233,7 +234,7 @@ pub extern "C" fn asmr_doc_ui() -> i32 {
                 },
                 "doc": {
                     "duo_ms": st.doc.duo_ms,
-                    "mix_follow": st.doc.mix_follow,
+                    "mix_layout": st.doc.layout().key(),
                     "mix_balance": st.doc.mix_balance,
                 }
             })
@@ -251,7 +252,8 @@ pub extern "C" fn asmr_doc_ui() -> i32 {
 /// - `bg_preset`：`"rain_night"` = 雨夜，`"off"` = 关掉背景音
 /// - `ear_cm`、`manual_cm`、`moves_per_min`、`denoise`：界面上的换算值（见 `asmr_doc_ui`）
 /// - `mode`：换左右移动的方式，「响度随位置变化」跟着换成这个方式的默认值（同桌面版）
-/// - `duo_ms`（0–300，0 = 关）、`mix_follow`（true = 一起移动）、`mix_balance`（0–100）：左右双人（同桌面版配置文件）
+/// - `duo_ms`（0–300，0 = 关）、`mix_layout`（"fixed" 各自固定 / "follow" 一起移动 / "mirror" 镜像）、`mix_balance`（0–100）：
+///   左右双人（同桌面版配置文件；旧的 `mix_follow`（true = 一起移动）也认）
 ///
 /// 返回 0 = 成功；名字不对、值的类型不对时返回 −1，文档不变。
 ///
@@ -303,7 +305,8 @@ fn set_field(doc: &mut Saved, key: &str, v: serde_json::Value) -> Result<(), Str
             p.set_mode(m);
         }
         "duo_ms" => doc.duo_ms = num()?.clamp(0.0, DUO_MAX_MS),
-        "mix_follow" => doc.mix_follow = v.as_bool().ok_or("mix_follow 要 true / false")?,
+        "mix_layout" => doc.set_layout(v.as_str().and_then(Layout::from_key).ok_or("mix_layout 只能是 \"fixed\"、\"follow\" 或 \"mirror\"")?),
+        "mix_follow" => doc.set_layout(if v.as_bool().ok_or("mix_follow 要 true / false")? { Layout::Follow } else { Layout::Fixed }),
         "mix_balance" => doc.mix_balance = num()?.clamp(0.0, 100.0),
         _ => {
             // 其余参数按名字改：转成 JSON 对象改一项再转回来，类型不对时报错、不改
@@ -391,7 +394,7 @@ impl Processor {
                 self.eng.set_config(cfg);
             }
             match (duo, &mut self.duo) {
-                (Some(s), Some(d)) if d.mixer().is_follow() == (s.follow && s.cfgs.len() > 1) => d.set_setup(&s),
+                (Some(s), Some(d)) if d.mixer().accepts(&s) => d.set_setup(&s),
                 (Some(s), _) => self.duo = Some(LiveMix::new(&s, false)),
                 (None, _) => self.duo = None,
             }
@@ -657,8 +660,9 @@ mod tests {
         assert_eq!(set("duo_ms", "80"), 0);
         assert_eq!(set("mix_balance", "50"), 0);
         assert_ne!(set("mix_follow", "1"), 0);
+        assert_ne!(set("mix_layout", "\"sideways\""), 0);
         let d = ui()["doc"].clone();
-        assert_eq!((d["duo_ms"].as_f64(), d["mix_follow"].as_bool(), d["mix_balance"].as_f64()), (Some(80.0), Some(false), Some(50.0)));
+        assert_eq!((d["duo_ms"].as_f64(), d["mix_layout"].as_str(), d["mix_balance"].as_f64()), (Some(80.0), Some("fixed"), Some(50.0)));
         asmr_engine_apply();
         let mut p = Processor::new();
         assert!(p.duo.is_some());
@@ -691,6 +695,19 @@ mod tests {
         asmr_engine_apply();
         p.process(128);
         assert!(p.duo.as_ref().unwrap().mixer().is_follow());
+        assert_eq!(ui()["doc"]["mix_layout"].as_str(), Some("follow"));
+        // 镜像：重新建；1 号在左、2 号在右，左右对称
+        assert_eq!(set("mix_layout", "\"mirror\""), 0);
+        asmr_engine_apply();
+        for c in x.chunks_exact(128).take(400) {
+            let io = p.io();
+            io[..128].copy_from_slice(c);
+            io[CAP..CAP + 128].copy_from_slice(c);
+            p.process(128);
+        }
+        assert_eq!(p.duo.as_ref().unwrap().mixer().layout(), Layout::Mirror);
+        let t = *p.tele();
+        assert!(t[tele::AZ] > 180.0 && t[tele::AZ2] < 180.0 && (t[tele::AZ] + t[tele::AZ2] - 360.0).abs() < 2.0, "镜像：左右对称：{t:?}");
         assert_eq!(set("duo_ms", "0"), 0);
         asmr_engine_apply();
         p.process(128);
@@ -698,9 +715,9 @@ mod tests {
         // 配置文件里存的就是桌面版的那几项
         asmr_doc_text();
         let back = config::parse(&out()).unwrap();
-        assert!(back.mix_follow && back.mix_balance == 50.0 && back.duo_ms == 0.0);
+        assert!(back.mix_follow && back.mix_mirror && back.mix_balance == 50.0 && back.duo_ms == 0.0);
         asmr_doc_reset_params();
-        assert_eq!(set("mix_follow", "false"), 0);
+        assert_eq!(set("mix_layout", "\"fixed\""), 0);
         assert_eq!(set("mix_balance", "0"), 0);
     }
 

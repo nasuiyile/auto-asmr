@@ -81,22 +81,27 @@
     },
     {
      "type": "choice",
-     "key": "mix_follow",
+     "key": "mix_layout",
      "style": "chips",
      "label": "排布",
      "label_en": "Layout",
-     "tip": "各自固定：1 号固定在左耳、2 号固定在右耳，只做忽远忽近、上下、自然晃动，「左右移动」不起作用。一起移动：两个声音按「左右移动」的方式一起走，始终在头的两侧相对（一个贴左耳时另一个贴右耳）",
-     "tip_en": "Fixed: voice 1 stays at the left ear and voice 2 at the right, with only near / far sway, up / down and micro motion; Left / right motion is inactive. Together: both follow Left / right motion and always stay on opposite sides",
+     "tip": "各自固定：1 号固定在左耳、2 号固定在右耳，只做忽远忽近、上下、自然晃动，「左右移动」不起作用。一起移动：两个声音按「左右移动」的方式一起走，始终在头的两侧相对（一个贴左耳时另一个贴右耳）。镜像：两个声音按「左右移动」的方式走同一套，1 号在头的左半边、2 号在右半边，左右对称（同时贴两耳、同时凑到脸前两侧）；原来要换到另一侧的地方变成朝脸前（或脑后）靠过去再退回来，离正前 / 正后至少 30°，不会撞上",
+     "tip_en": "Fixed: voice 1 stays at the left ear and voice 2 at the right, with only near / far sway, up / down and micro motion; Left / right motion is inactive. Together: both follow Left / right motion and always stay on opposite sides. Mirror: both share the Left / right motion, voice 1 on the left half of the head and voice 2 on the right, mirror images of each other; where the path would cross sides, they lean toward the face (or the back of the head) and come back, staying at least 30° from straight ahead / behind",
      "options": [
       {
-       "value": false,
+       "value": "fixed",
        "label": "各自固定",
        "label_en": "Fixed"
       },
       {
-       "value": true,
+       "value": "follow",
        "label": "一起移动",
        "label_en": "Together"
+      },
+      {
+       "value": "mirror",
+       "label": "镜像",
+       "label_en": "Mirror"
       }
      ],
      "show_if": {

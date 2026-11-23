@@ -41,10 +41,13 @@ convert 的选项（括号里是默认值）：
                           数值 = 强度 %，100 = 一样响，50 = 差距减半；不写数值 = 100
   --mix-follow            一起移动：几个音源按 --mode 的方式（穿梭 / 随机走位 / 环绕 / 固定）一起走，彼此相隔 360°/个数
                           （两个时正好相对：一个贴左耳时另一个贴右耳，换边时一个从脸前、一个从脑后绕）；不加就是各自固定
+  --mix-mirror            镜像（只用于两个音源）：两个音源按 --mode 的方式走同一套，1 号在头的左半边、2 号在右半边，
+                          左右对称（同时贴两耳、同时凑到脸前两侧），离正前 / 正后至少 30°，不会撞上；
+                          换边的路线变成朝脸前（或脑后）靠过去再退回这一侧，两人各守一边
  左右双人（一个音频当成两个人：同一个声音一个在左耳、一个在右耳，第 2 个晚一点；批量时每个文件都这样）
   --duo [毫秒]            第 2 个声音晚多少毫秒（1–300；不写数值 = 80）。30 ms 以下两边容易融成一个声音，
                           50–120 ms 像两个人一前一后地说，150 ms 以上像回声。可以和 --pos（两个位置）、--mix-gain、
-                          --mix-follow、--mix-balance 一起用；输出比原音频长出这段延迟
+                          --mix-follow / --mix-mirror、--mix-balance 一起用；输出比原音频长出这段延迟
   --style ear|ku100|breath|earclean   ear=贴耳加强；ku100=KU100 近耳轻语；breath=呼吸音（近耳呼吸与气流）；
                           earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
                           带耳道共鸣和耳内低频，每只耳朵约 15 秒换一次边，目标响度默认 −20 LUFS）
@@ -398,7 +401,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
     let (mut bits, mut peak, mut max_gr) = (24u16, -1.0f32, 8.0f32);
     let mut level_follow: Option<f32> = None;
     let mut save_traj: Option<PathBuf> = None;
-    let (mut mix_on, mut mix_follow, mut mix_align) = (false, false, false);
+    let (mut mix_on, mut mix_follow, mut mix_mirror, mut mix_align) = (false, false, false, false);
     let mut mix_balance = 0.0f32;
     let mut duo_ms = 0.0f32;
     let (mut pos_list, mut gain_list): (Option<String>, Option<String>) = (None, None);
@@ -419,6 +422,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             "-j" | "--jobs" => jobs = (f(&mut it)? as usize).max(1),
             "--mix" => mix_on = true,
             "--mix-follow" => mix_follow = true,
+            "--mix-mirror" => mix_mirror = true,
             "--mix-align" => mix_align = true,
             "--mix-balance" => {
                 mix_balance = 100.0;
@@ -589,11 +593,15 @@ fn run_convert(args: &[String]) -> Result<(), String> {
     if mix_align && !mix_on {
         return Err("--mix-align 只用于多音频合成，请同时加 --mix".into());
     }
-    if (pos_list.is_some() || gain_list.is_some() || mix_follow || mix_balance > 0.0) && !mix_on && !duo_on {
-        return Err("--pos / --mix-gain / --mix-follow / --mix-balance 只用于多音频合成（--mix）或左右双人（--duo）".into());
+    if (pos_list.is_some() || gain_list.is_some() || mix_follow || mix_mirror || mix_balance > 0.0) && !mix_on && !duo_on {
+        return Err("--pos / --mix-gain / --mix-follow / --mix-mirror / --mix-balance 只用于多音频合成（--mix）或左右双人（--duo）".into());
     }
-    if mix_follow && pos_list.is_some() {
-        return Err("一起移动时位置由 --mode 的走位决定，不能再用 --pos".into());
+    if mix_follow && mix_mirror {
+        return Err("--mix-follow（一起移动）和 --mix-mirror（镜像）只能选一个".into());
+    }
+    let layout = mix::Layout::from_flags(mix_follow, mix_mirror);
+    if layout.moves() && pos_list.is_some() {
+        return Err(format!("{}时位置由 --mode 的走位决定，不能再用 --pos", if mix_mirror { "镜像" } else { "一起移动" }));
     }
     // 左右双人：两个声音的位置和音量（默认左耳、右耳）
     let duo = if duo_on {
@@ -617,8 +625,12 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         if save_traj.is_some() {
             return Err("左右双人不支持 --save-trajectory".into());
         }
-        let d = Duo { voices, follow: mix_follow, balance: mix_balance / 100.0, ..Duo::new(duo_ms) };
-        let pos = if mix_follow { "一起移动，彼此相对".to_string() } else { format!("{} / {}", voice_text(&voices[0]), voice_text(&voices[1])) };
+        let d = Duo { voices, layout, balance: mix_balance / 100.0, ..Duo::new(duo_ms) };
+        let pos = match layout {
+            mix::Layout::Follow => "一起移动，彼此相对".to_string(),
+            mix::Layout::Mirror => "镜像，左右对称".to_string(),
+            mix::Layout::Fixed => format!("{} / {}", voice_text(&voices[0]), voice_text(&voices[1])),
+        };
         eprintln!("左右双人：第 2 个声音晚 {duo_ms:.0} ms（{pos}）{}", if mix_balance > 0.0 { format!("，自动平衡 {mix_balance:.0}%") } else { String::new() });
         Some(d)
     } else {
@@ -634,6 +646,9 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         let inputs = crate::batch::expand_inputs(&inputs);
         if inputs.len() < 2 || inputs.len() > MAX_VOICES {
             return Err(format!("多音频合成需要 2–{MAX_VOICES} 个音频，现在是 {} 个", inputs.len()));
+        }
+        if mix_mirror && inputs.len() != 2 {
+            return Err(format!("--mix-mirror（镜像）只用于两个音频，现在是 {} 个；三个以上请用 --mix-follow", inputs.len()));
         }
         let mut voices: Vec<Voice> = Vec::new();
         if let Some(s) = &pos_list {
@@ -667,13 +682,18 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         opts.peak_db = peak;
         opts.max_gr_db = max_gr;
         let items: Vec<MixInput> = inputs.iter().cloned().zip(voices.iter().copied()).map(|(path, voice)| MixInput { path, voice }).collect();
-        if mix_follow {
-            eprintln!("多音频合成 {} 个音频，一起移动（彼此相隔 {:.0}°）：", items.len(), 360.0 / items.len() as f32);
-        } else {
-            eprintln!("多音频合成 {} 个音频，各自固定：", items.len());
+        match layout {
+            mix::Layout::Follow => eprintln!("多音频合成 {} 个音频，一起移动（彼此相隔 {:.0}°）：", items.len(), 360.0 / items.len() as f32),
+            mix::Layout::Mirror => eprintln!("多音频合成 2 个音频，镜像（1 号在左半边、2 号在右半边，左右对称）："),
+            mix::Layout::Fixed => eprintln!("多音频合成 {} 个音频，各自固定：", items.len()),
         }
         for (k, it) in items.iter().enumerate() {
-            let pos = if mix_follow { format!("+{:.0}°{}", 360.0 * k as f32 / items.len() as f32, if it.voice.gain_db != 0.0 { format!("，{:+.1} dB", it.voice.gain_db) } else { String::new() }) } else { voice_text(&it.voice) };
+            let g = if it.voice.gain_db != 0.0 { format!("，{:+.1} dB", it.voice.gain_db) } else { String::new() };
+            let pos = match layout {
+                mix::Layout::Follow => format!("+{:.0}°{g}", 360.0 * k as f32 / items.len() as f32),
+                mix::Layout::Mirror => format!("{}{g}", if k == 0 { "左半边" } else { "右半边，镜像" }),
+                mix::Layout::Fixed => voice_text(&it.voice),
+            };
             eprintln!("  {}. {}（{pos}）", k + 1, it.path.display());
         }
         let mut last = -1i32;
@@ -683,7 +703,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         if mix_balance > 0.0 {
             eprintln!("  自动平衡 {mix_balance:.0}%（按短时响度让几段一样响）");
         }
-        let mo = MixOptions { follow: mix_follow, align: mix_align, balance: mix_balance / 100.0, ..Default::default() };
+        let mo = MixOptions { layout, align: mix_align, balance: mix_balance / 100.0, ..Default::default() };
         let rep = convert_mix(&opts, &items, &p, mo, Arc::new(AtomicBool::new(false)), |f, stage| {
             let pc = (f * 100.0) as i32;
             if pc / 10 != last / 10 {
@@ -711,7 +731,9 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             rep.true_peak_db,
             rep.max_gr_db,
             rep.speech_pct,
-            if mix_follow {
+            if mix_mirror {
+                format!("一起靠向脸前 / 脑后 {} 次，往后让 {} 次，上下换位 {} 次", rep.n_moves, rep.n_sways, rep.n_updowns)
+            } else if mix_follow {
                 format!("一起换边 {} 次（其中从头顶绕 {} 次），往后让 {} 次，上下换位 {} 次", rep.n_moves, rep.n_tops, rep.n_sways, rep.n_updowns)
             } else {
                 format!("往后让共 {} 次，上下换位共 {} 次", rep.n_sways, rep.n_updowns)
@@ -805,13 +827,14 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         }
     }
     println!(
-        "完成：{}  ({:.1} s，{:.1} LUFS，真峰值 {:.1} dBTP，限制器最多压 {:.1} dB；说话占 {:.0}%，换耳 {} 次（其中从头顶绕 {} 次），往后让 {} 次，上下换位 {} 次{}；用时 {:.1} s)",
+        "完成：{}  ({:.1} s，{:.1} LUFS，真峰值 {:.1} dBTP，限制器最多压 {:.1} dB；说话占 {:.0}%，{} {} 次（其中从头顶绕 {} 次），往后让 {} 次，上下换位 {} 次{}；用时 {:.1} s)",
         opts.output.display(),
         rep.seconds,
         rep.lufs,
         rep.true_peak_db,
         rep.max_gr_db,
         rep.speech_pct,
+        if rep.mirrored { "靠向脸前 / 脑后" } else { "换耳" },
         rep.n_moves,
         rep.n_tops,
         rep.n_sways,
@@ -1143,14 +1166,14 @@ fn bench() {
         );
     }
     // 多音频合成的试听：每个音源一个引擎，相加后统一做自动响度和限幅
-    for (n, follow) in [(2usize, false), (MAX_VOICES, false), (2, true)] {
+    for (n, layout) in [(2usize, mix::Layout::Fixed), (MAX_VOICES, mix::Layout::Fixed), (2, mix::Layout::Follow), (2, mix::Layout::Mirror)] {
         let base = Arc::new(EngineConfig::new(Params::default(), None));
         let mut voices: Vec<Voice> = Vec::new();
         for _ in 0..n {
             let v = mix::default_voice(&voices);
             voices.push(v);
         }
-        let setup = mix::MixSetup::new(&base, &voices, &vec![None; n], follow, None);
+        let setup = mix::MixSetup::new(&base, &voices, &vec![None; n], layout, None);
         let mut mx = mix::Mixer::new(&setup, PostMode::Realtime, 0.0);
         // 各音源错开 0.1 s，免得几路完全相同
         let ins: Vec<Vec<f32>> = (0..n).map(|k| x.iter().copied().skip(k * 4800).chain(std::iter::repeat(0.0).take(k * 4800)).collect()).collect();
@@ -1165,6 +1188,10 @@ fn bench() {
             total += dt;
         }
         let secs = x.len() as f64 / FS_USIZE as f64;
-        println!("  多音频合成 {n} 个音源{}（试听）：单核占用约 {:.1}%；每块平均 {:.0} µs，最慢 {:.0} µs", if follow { "、一起移动" } else { "" }, 100.0 * total / secs, 1e6 * total / (x.len() / 128) as f64, 1e6 * worst);
+        println!("  多音频合成 {n} 个音源{}（试听）：单核占用约 {:.1}%；每块平均 {:.0} µs，最慢 {:.0} µs", match layout {
+            mix::Layout::Fixed => "",
+            mix::Layout::Follow => "、一起移动",
+            mix::Layout::Mirror => "、镜像",
+        }, 100.0 * total / secs, 1e6 * total / (x.len() / 128) as f64, 1e6 * worst);
     }
 }

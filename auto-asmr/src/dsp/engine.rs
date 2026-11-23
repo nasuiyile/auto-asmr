@@ -6,7 +6,7 @@ use super::analysis::{Analyzer, Features};
 use super::direct::{DirectRenderer, BASE_DELAY};
 use super::dynamics::{Leveler, Limiter};
 use super::filters::{Biquad, Fir, OnePoleLp, BUTTER_Q};
-use super::motion::{clock_step, clock_step_live, Motion, Pose};
+use super::motion::{clock_step, clock_step_live, Half, Motion, Pose};
 use super::params::{Params, Playback};
 use super::pinna::pinnas;
 use super::rain::{Rain, RainSetup};
@@ -458,6 +458,11 @@ impl Engine {
     /// 文件转换和试听不开：动作严格跟着说话走，与 Python 版一致。
     pub fn set_live(&mut self, on: bool) {
         self.live = on;
+    }
+
+    /// 镜像排布：位置折到头的一侧（左右双人的 1 号在左、2 号在右，两个引擎同一套走位，结果正好左右对称）。
+    pub fn set_half(&mut self, half: Half) {
+        self.motion.half = half;
     }
 
     /// 换一份配置（在控制块边界生效）。

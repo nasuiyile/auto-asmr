@@ -46,6 +46,12 @@ auto-asmr convert a.m4a b.m4a --mix -o 合成.wav --pos left,right --mix-gain 0,
 auto-asmr convert a.m4a b.m4a --mix --mix-follow --mode orbit -o 合成_环绕.wav
 ```
 
+两个音频左右对称、各守一边加 `--mix-mirror`（镜像，只用于两个音频）：走位同样用 `--mode`，1 号在头的左半边、2 号在右半边，离正前 / 正后至少 30°；原来要换边的地方变成朝脸前（或脑后）靠过去再退回来（做法见[界面使用说明 · 多音频合成](app-usage.md#多音频合成)）。`--mix-follow` 和 `--mix-mirror` 只能选一个，都不能和 `--pos` 一起用：
+
+```bash
+auto-asmr convert a.m4a b.m4a --mix --mix-mirror --mode random -o 合成_镜像.wav
+```
+
 同一首歌的几个版本（前奏长短不同、编曲不同）加 `--mix-align` 自动对齐：从一起开始唱的地方叠加，对不上的开头和结尾裁掉，`--start` / `--duration` 按对齐之后的时间算；完成后打印每段从哪里开始用、裁掉多少（做法见[界面使用说明 · 自动对齐](app-usage.md#自动对齐同一首歌的几个版本)）：
 
 ```bash
@@ -58,11 +64,12 @@ auto-asmr convert 摇滚版.m4a DJ版.m4a --mix --mix-align --duration 60 -o 合
 auto-asmr convert a.m4a b.m4a --mix --mix-balance 80 -o 合成.wav
 ```
 
-一个音频当成左右两个人（同一个声音一个在左耳、一个在右耳，第 2 个晚一点）加 `--duo`，后面是第 2 个声音晚多少毫秒（1–300，不写就是 80）。`--pos`（两个位置）、`--mix-gain`、`--mix-follow`、`--mix-balance` 也能一起用；批量时每个文件都这样做；输出比原音频长出这段延迟（做法见[界面使用说明 · 左右双人](app-usage.md#左右双人一个音频当成两个人)）：
+一个音频当成左右两个人（同一个声音一个在左耳、一个在右耳，第 2 个晚一点）加 `--duo`，后面是第 2 个声音晚多少毫秒（1–300，不写就是 80）。`--pos`（两个位置）、`--mix-gain`、`--mix-follow` / `--mix-mirror`、`--mix-balance` 也能一起用；批量时每个文件都这样做；输出比原音频长出这段延迟（做法见[界面使用说明 · 左右双人](app-usage.md#左右双人一个音频当成两个人)）：
 
 ```bash
 auto-asmr convert 人声.m4a --duo 80 --duration 60
 auto-asmr convert 人声.m4a --duo 100 --pos left,front-right --mix-balance 50 -o 双人.wav
+auto-asmr convert 人声.m4a --duo 80 --mix-mirror --via alternate -o 双人_镜像.wav
 ```
 
 背景音（实时生成的雨声，见[界面使用说明 · 背景音](app-usage.md#背景音雨声)）：`--bg rain-night` 打开雨夜预设，后面再写 `--bg-level`（音量）、`--rain`（雨量）、`--bg-pan`（左右）、`--bg-width`（包围感）、`--bg-flow`（流动）、`--bg-indoor`（隔窗）、`--rain-land`（落地声；旧名 `--rain-near` 也能用）、`--rain-drip`（屋檐滴水）、`--thunder`（雷声，可选，默认 0 = 没有）覆盖它，都是 0–100（`--bg-pan` 是 −100–100）。单个文件、批量、多音频合成、左右双人都能用：

@@ -14,7 +14,7 @@ use crate::batch;
 use crate::dsp::align::Alignment;
 use crate::dsp::balance::{self, BalanceData};
 use crate::offline::{align_tracks, auto_pick, balance_data, convert_mix, default_mix_output, default_output, load_audio, Channel, ConvertOptions, ConvertReport, Duo, MixInput, MixOptions};
-use crate::realtime::{self, DeviceInfo, DeviceList, Realtime, RtOptions};
+use crate::realtime::{self, DeviceInfo, DeviceList, GlitchWatch, Realtime, RtOptions, GLITCH_RESTARTS};
 use eframe::egui;
 use egui::{Color32, RichText};
 use std::collections::{HashMap, VecDeque};
@@ -209,6 +209,9 @@ pub struct App {
     devices: DeviceList,
     rt: Option<Realtime>,
     rt_preview: bool,
+    /// 主播模式：录音设备连续丢数据时自动重新开始（见 [`GlitchWatch`]），以及这次手动点开始之后已经自动重新开始了几次。
+    glitch_watch: GlitchWatch,
+    glitch_restarts: u32,
     status: String,
     /// 文件页的待转换列表；`file_in` 是其中选中用来试听的那个。
     files: Vec<PathBuf>,
@@ -415,6 +418,8 @@ impl App {
             devices,
             rt: None,
             rt_preview: false,
+            glitch_watch: GlitchWatch::new(),
+            glitch_restarts: 0,
             status: String::new(),
             files: Vec::new(),
             statuses: HashMap::new(),
@@ -1036,8 +1041,41 @@ impl App {
         self.job = Some(job);
     }
 
+    /// 点开始（以及改了左右双人这类要重新开始的设置）：自动重新开始的次数从头算。
     fn start_mic(&mut self) {
+        self.glitch_restarts = 0;
+        self.open_mic();
+    }
+
+    /// 录音设备连续丢数据（虚拟声卡两头的节奏没对上，见 [`GlitchWatch`]）：自动停掉重新开始，重掷一次节奏。
+    /// 这次手动开始之后已经试了 [`GLITCH_RESTARTS`] 次还在丢，就不再试，提示一次去调大变声器 / 虚拟声卡的缓冲。
+    fn restart_after_glitches(&mut self) {
+        if self.glitch_restarts < GLITCH_RESTARTS {
+            self.glitch_restarts += 1;
+            let n = self.glitch_restarts;
+            self.open_mic();
+            if self.rt.is_some() {
+                self.status = format!(
+                    "{}{n}{}",
+                    t("录音设备在接连丢数据（虚拟声卡两头的节奏没对上），已自动重新开始（第 ", "The input device kept losing data (the virtual sound card's two ends were out of step); restarted automatically ("),
+                    t(" 次）", ")")
+                );
+            }
+        } else if self.glitch_restarts == GLITCH_RESTARTS {
+            self.glitch_restarts += 1;
+            self.status = format!(
+                "{GLITCH_RESTARTS}{}",
+                t(
+                    " 次自动重新开始后录音设备仍在丢数据，不再自动重试：把变声器的块长（RVC 里是「采样长度」）或虚拟声卡自己的缓冲调大，再点开始",
+                    " automatic restarts and the input device still loses data; no more retries. Increase the voice changer's block length (RVC: sample length) or the virtual sound card's own buffer, then Start again",
+                )
+            );
+        }
+    }
+
+    fn open_mic(&mut self) {
         self.stop();
+        self.glitch_watch = GlitchWatch::new();
         self.sync_params();
         // 左右双人：两个声音都来自麦克风，本来就是同一个声音，不用做响度对齐
         let duo = self.mic_duo().then(|| self.mix_setup(&[None, None]));
@@ -3243,7 +3281,7 @@ impl App {
                 }
             };
         }
-        let mut stop = false;
+        let (mut stop, mut restart) = (false, false);
         if let Some(rt) = &self.rt {
             self.tele = rt.shared.telemetry();
             if self.rt_mix {
@@ -3255,6 +3293,10 @@ impl App {
             if let Some(e) = rt.shared.take_error() {
                 self.status = e;
                 stop = true;
+            }
+            // 主播模式：录音设备接连丢数据就自动重新开始（这一帧末尾做，免得在借用 rt 的时候换掉它）
+            if !self.rt_preview && !stop && self.glitch_watch.update(rt.shared.dropouts()[crate::live::Dropout::InputDevice as usize]) && self.glitch_restarts <= GLITCH_RESTARTS {
+                restart = true;
             }
             if self.rt_preview && !self.preview_dragging {
                 self.preview_s = rt.shared.play_pos.load(Ordering::Relaxed) as f64 / FS as f64;
@@ -3271,6 +3313,9 @@ impl App {
         }
         if stop {
             self.stop();
+        }
+        if restart {
+            self.restart_after_glitches();
         }
         // 拖进窗口的文件
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());

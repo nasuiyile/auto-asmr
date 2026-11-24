@@ -127,6 +127,45 @@ pub struct RtInfo {
     pub out_channels: u16,
 }
 
+/// 录音设备连续丢数据时该不该重新开始。
+///
+/// 变声器（比如 RVC）往虚拟声卡里写、本程序从虚拟声卡的录音端读：录音端在本程序开始录音时才启动，两头的相对节奏在这一刻
+/// 定下来。节奏不巧时读的一头会追上写的一头，虚拟声卡一直丢数据（Windows 报"数据不连续"），声音在交给本程序之前就已经断了，
+/// 听起来从头到尾滋滋响，监听原声也一样；停掉重新开始一次，大多就落在好的节奏上。所以 [`GLITCH_WINDOW`] 秒内录音设备报告
+/// 丢数据达到 [`GLITCH_COUNT`] 次就该重新开始；偶尔一次（真的麦克风也可能有）不算。
+pub struct GlitchWatch {
+    t0: std::time::Instant,
+    seen: u32,
+    recent: std::collections::VecDeque<f64>,
+}
+
+pub const GLITCH_WINDOW: f64 = 2.0;
+pub const GLITCH_COUNT: usize = 3;
+/// 每次手动点开始之后最多自动重新开始几次（都不行就停下来，提示去调大变声器 / 虚拟声卡的缓冲）。
+pub const GLITCH_RESTARTS: u32 = 5;
+
+impl GlitchWatch {
+    pub fn new() -> Self {
+        GlitchWatch { t0: std::time::Instant::now(), seen: 0, recent: Default::default() }
+    }
+
+    /// `input_device_dropouts`：录音设备报告丢数据的累计次数（[`Dropout::InputDevice`]）。返回 true = 该重新开始了。
+    pub fn update(&mut self, input_device_dropouts: u32) -> bool {
+        self.update_at(self.t0.elapsed().as_secs_f64(), input_device_dropouts)
+    }
+
+    fn update_at(&mut self, now: f64, input_device_dropouts: u32) -> bool {
+        for _ in self.seen..input_device_dropouts {
+            self.recent.push_back(now);
+        }
+        self.seen = self.seen.max(input_device_dropouts);
+        while self.recent.front().is_some_and(|&t| t < now - GLITCH_WINDOW) {
+            self.recent.pop_front();
+        }
+        self.recent.len() >= GLITCH_COUNT
+    }
+}
+
 pub struct Realtime {
     _input: Option<cpal::Stream>,
     _output: cpal::Stream,
@@ -473,6 +512,29 @@ mod tests {
         assert_eq!(buffer_size(64, &range, false, 48_000, false), BufferSize::Fixed(128));
         assert_eq!(buffer_size(256, &unknown, true, 48_000, false), BufferSize::Default);
         assert_eq!(buffer_size(0, &range, false, 48_000, false), BufferSize::Default);
+    }
+
+    /// 录音设备 2 秒内丢 3 次数据就该重新开始；隔得远的零星几次不算；一次报好几次也算。
+    #[test]
+    fn repeated_input_glitches_ask_for_a_restart() {
+        let mut w = GlitchWatch::new();
+        // 零星的：每 1.5 秒一次，2 秒窗口里最多两次
+        for k in 1..=10 {
+            assert!(!w.update_at(k as f64 * 1.5, k), "第 {k} 次");
+        }
+        // 接连的：半秒一次，第三次就该重新开始
+        assert!(!w.update_at(20.0, 11));
+        assert!(!w.update_at(20.5, 12));
+        assert!(w.update_at(21.0, 13));
+        // 两帧之间一下子多了 3 次
+        let mut w = GlitchWatch::new();
+        assert!(!w.update_at(1.0, 0));
+        assert!(w.update_at(1.1, 3));
+        // 计数没变就不算
+        let mut w = GlitchWatch::new();
+        for k in 0..100 {
+            assert!(!w.update_at(k as f64 * 0.1, 2));
+        }
     }
 
     /// 设备报的断流按输入 / 输出分开记。

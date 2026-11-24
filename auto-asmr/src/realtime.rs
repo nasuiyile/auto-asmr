@@ -520,6 +520,129 @@ mod tests {
         (xr, avg, delay)
     }
 
+    /// 输入的到达方式：每个包 [`PACKET`] 帧，第 k 个包本该在 k × 10 ms 到，实际由 `deliver(本该到的时间)` 给出什么时候交给
+    /// 我们（一阵一阵地来、晚到）；输出回调每次 `n_out` 帧，比输入晚 `phase` 秒开始；两边每次醒来的时间再随机晚 0–`jitter` 秒
+    /// （线程调度）。两个设备同一个时钟。`tone`：输入是 0.5 幅度的 1 kHz 正弦，否则是静音。监听原声。
+    /// 返回每次输出回调之后的（时间，累计断流次数，积压毫秒），以及整段左声道输出。
+    fn simulate_arrivals(n_out: usize, phase: f64, jitter: f64, seconds: f64, deliver: impl Fn(f64) -> f64, tone: bool) -> (Vec<(f64, u32, f32)>, Vec<f32>) {
+        let cfg = Arc::new(EngineConfig::new(Params::default(), None));
+        let shared = Arc::new(Shared::new(cfg.clone()));
+        shared.monitor_dry.store(true, Ordering::Relaxed);
+        let (tx, rx) = spsc::channel(FS_USIZE);
+        let mut sink = mic_sink(FS_USIZE as u32, tx, shared.clone());
+        let mut pump = Pump::new(Source::Ring(rx), Engine::new(cfg, PostMode::Realtime, 0.0), shared.clone(), FS as f64);
+        let mut rng = crate::dsp::rng::Rng::new(7);
+        let (t_in, t_out) = (PACKET as f64 / FS as f64, n_out as f64 / FS as f64);
+        // (醒来的时间，输出回调 = true / 第几个输入包)
+        let mut ev: Vec<(f64, Option<usize>)> = Vec::new();
+        let mut k = 0;
+        while k as f64 * t_in < seconds {
+            ev.push((deliver(k as f64 * t_in) + jitter * rng.unit() as f64, Some(k)));
+            k += 1;
+        }
+        k = 0;
+        while k as f64 * t_out + phase < seconds {
+            ev.push((k as f64 * t_out + phase + jitter * rng.unit() as f64, None));
+            k += 1;
+        }
+        // 同一时刻先交输入；同一阵里的包按顺序
+        ev.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.is_some().cmp(&a.1.is_some())).then(a.1.cmp(&b.1)));
+        let mut inb = vec![0f32; PACKET];
+        let (mut ol, mut or) = (vec![0f32; n_out], vec![0f32; n_out]);
+        let (mut log, mut out) = (Vec::new(), Vec::new());
+        for (t, packet) in ev {
+            match packet {
+                Some(k) => {
+                    for (i, v) in inb.iter_mut().enumerate() {
+                        let n = (k * PACKET + i) as f32;
+                        *v = if tone { 0.5 * (std::f32::consts::TAU * 1000.0 * n / FS).sin() } else { 0.0 };
+                    }
+                    sink(&inb);
+                }
+                None => {
+                    pump.fill(&mut ol, &mut or);
+                    out.extend_from_slice(&ol);
+                    log.push((t, shared.xruns.load(Ordering::Relaxed), shared.fill_us.load(Ordering::Relaxed) as f32 / 1000.0));
+                }
+            }
+        }
+        (log, out)
+    }
+
+    /// 输入包的大小（Windows 共享模式常见的 10 ms）。
+    const PACKET: usize = 480;
+
+    /// 每 `n` 个包攒成一阵一起交出来（最后一个包该到的时候）。
+    fn bursts(n: usize) -> impl Fn(f64) -> f64 {
+        let t_in = PACKET as f64 / FS as f64;
+        move |t: f64| ((t / t_in).round() as usize / n * n + n - 1) as f64 * t_in
+    }
+
+    /// 从 `log` 里取 [a, b) 秒之间的断流次数和平均积压毫秒。
+    fn span(log: &[(f64, u32, f32)], a: f64, b: f64) -> (u32, f32) {
+        let s: Vec<_> = log.iter().filter(|e| e.0 >= a && e.0 < b).collect();
+        let before = log.iter().take_while(|e| e.0 < a).last().map_or(0, |e| e.1);
+        (s.last().map_or(before, |e| e.1) - before, s.iter().map(|e| e.2).sum::<f32>() / s.len().max(1) as f32)
+    }
+
+    /// 虚拟声卡把输入攒成 30 / 40 ms 一阵交出来（比如接 RVC 变声器）：以前只按一个包留余量，平均积压够、低谷不够，
+    /// 启动时相位不巧就每一阵都见底、从头断到尾（60 秒几百次）。现在开头断几次、多留出这一阵的量之后就不再断。
+    #[test]
+    fn bursty_input_settles_after_a_few_dropouts() {
+        for n_out in [256, 480, 1024] {
+            for n in [3, 4] {
+                for phase_ms in [0.0, 2.0, 5.0, 9.0, 25.0] {
+                    let (log, _) = simulate_arrivals(n_out, phase_ms / 1000.0, 0.001, 60.0, bursts(n), false);
+                    let (early, _) = span(&log, 0.0, 5.0);
+                    let (late, _) = span(&log, 5.0, 60.0);
+                    let (_, fill) = span(&log, 50.0, 60.0);
+                    let at = format!("输出 {n_out} 帧，{n} 个包一阵，相位 {phase_ms} ms");
+                    assert!(early <= 10, "{at}：开头 5 秒断流 {early} 次");
+                    assert!(late <= 2, "{at}：之后 55 秒又断 {late} 次");
+                    assert!(fill < 40.0, "{at}：积压 {fill} ms");
+                }
+            }
+        }
+    }
+
+    /// 输入按时一个包一个包地来（真的麦克风），两边醒来的时间各有 0–1 ms 的随机早晚：一次都不断，积压不比以前多。
+    #[test]
+    fn regular_input_keeps_its_low_latency() {
+        for n_out in [256, 480, 1024] {
+            for phase_ms in [0.0, 0.5, 5.0, 9.5] {
+                let (log, _) = simulate_arrivals(n_out, phase_ms / 1000.0, 0.001, 30.0, |t| t, false);
+                let (xr, fill) = span(&log, 0.0, 30.0);
+                assert_eq!(xr, 0, "输出 {n_out} 帧，相位 {phase_ms} ms");
+                assert!(fill < 14.0, "输出 {n_out} 帧，相位 {phase_ms} ms：积压 {fill} ms");
+            }
+        }
+    }
+
+    /// 一阵一阵的输入停了、恢复按时来：多留的积压慢慢减回去，回到和一直按时来时差不多的延迟，期间不断流。
+    #[test]
+    fn extra_backlog_shrinks_once_input_is_regular_again() {
+        let t_in = PACKET as f64 / FS as f64;
+        let four = bursts(4);
+        let (log, _) = simulate_arrivals(256, 0.0, 0.001, 120.0, move |t| if t < 20.0 - 4.0 * t_in { four(t) } else { t }, false);
+        let (_, bursty) = span(&log, 15.0, 20.0);
+        let (xr, _) = span(&log, 20.0, 120.0);
+        let (_, end) = span(&log, 110.0, 120.0);
+        assert!(bursty > 18.0, "一阵一阵时积压 {bursty} ms");
+        assert_eq!(xr, 0, "恢复按时后又断流");
+        assert!(end < 14.0, "恢复按时 90 秒后积压还有 {end} ms");
+    }
+
+    /// 输入中途卡住 40 ms（之后一起补上）：断流的地方先淡出、攒够了再淡入，波形没有突然的跳变（"啪"）。
+    #[test]
+    fn a_dropout_fades_instead_of_clicking() {
+        let (log, out) = simulate_arrivals(256, 0.002, 0.0, 6.0, |t| if (3.0..3.04).contains(&t) { 3.04 } else { t }, true);
+        let (xr, _) = span(&log, 0.0, 6.0);
+        assert!(xr >= 1, "这个卡顿应当造成断流");
+        // 0.5 幅度的 1 kHz 正弦相邻两个样本最多差 0.065
+        let step = out[FS_USIZE..].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        assert!(step < 0.1, "最大跳变 {step}");
+    }
+
     #[test]
     fn steady_when_clocks_match() {
         for (n_in, n_out) in [(128, 128), (256, 256), (480, 512), (512, 128), (441, 480)] {

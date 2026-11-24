@@ -231,6 +231,13 @@ pub struct Pump {
     primed: bool,
     fill_avg: f32,
     in_max: f32,
+    /// 麦克风：在"一次输入回调的量 + 2 ms"之外多留的积压（样本）。输入一阵一阵地来（虚拟声卡攒着几个包一起交出来，
+    /// 比如接 RVC 这类变声器）时，只按一次回调的量留不够，每一阵之间都会见底。断流一次就加 [`STALL_STEP`]，
+    /// 积压的最低点长时间都有富余再慢慢减回去。
+    extra: f32,
+    /// 这一段时间（[`LOW_WINDOW`] 秒）里每次输出回调结束时积压的最小值，以及这一段已经输出了多少帧。
+    low: f32,
+    low_frames: usize,
     proc_avg: f32,
     inb: Vec<f32>,
     /// 立体声源的右声道这一块（左声道在 `inb`）。
@@ -257,6 +264,15 @@ pub const DL_FADE: usize = mix::DELAY_FADE;
 /// 主播模式左右双人的输入历史（样本，2 的幂）：要装得下最长的延迟（300 ms = 14400 个样本）再加一块。
 pub const HIST: usize = 1 << 15;
 const _: () = assert!(HIST >= (mix::DUO_MAX_MS as usize) * FS_USIZE / 1000 + N);
+/// 麦克风断流一次，多留的积压加多少（样本，3 ms），最多加到 [`EXTRA_MAX`]（120 ms）。
+const STALL_STEP: f32 = 0.003 * FS;
+const EXTRA_MAX: f32 = 0.12 * FS;
+/// 多留的积压每 [`LOW_WINDOW`] 秒看一次：这段时间里积压的最低点比一块（[`N`]）还多 [`LOW_SLACK`]（4 ms）以上，
+/// 就减去多出来的一半（每次 1–5 ms）。窗口要够长，才抓得到输入一阵和输出回调错位最不巧的那一下；
+/// 一阵一阵的输入停了以后多出来的很多，约一分钟减完。
+const LOW_WINDOW: f64 = 10.0;
+const LOW_SLACK: f32 = 0.004 * FS;
+const EXTRA_DOWN: (f32, f32) = (0.001 * FS, 0.005 * FS);
 
 
 impl Pump {
@@ -303,6 +319,9 @@ impl Pump {
             primed: false,
             fill_avg: 0.0,
             in_max: 0.0,
+            extra: 0.0,
+            low: f32::MAX,
+            low_frames: 0,
             proc_avg: 0.0,
             inb: vec![0.0; N],
             inb_r: vec![0.0; N],
@@ -468,14 +487,16 @@ impl Pump {
             let _ = self.shared.seek_sample.compare_exchange(seek, u64::MAX, Ordering::AcqRel, Ordering::Acquire);
         }
         let frames = out_l.len();
-        // 麦克风：目标积压量 = 一次输入回调的量 + 2 ms 余量；攒够了才开始
+        // 麦克风：目标积压量 = 一次输入回调的量 + 2 ms 余量 + 断流后多留的；攒够了才开始（断流后也重新攒够再出声）
         let mut target = 0.0;
         if let Source::Ring(rx) = &self.src {
             let in48 = self.shared.in_frames.load(Ordering::Relaxed) as f32;
             self.in_max = (self.in_max * 0.999).max(in48);
-            target = self.in_max + 0.002 * FS;
+            target = self.in_max + 0.002 * FS + self.extra;
             if !self.primed {
-                if (rx.len() as f32) < target + N as f32 {
+                // 攒到这一次回调取走之后还剩目标积压量，第一下就不会断
+                let need = (frames as f64 * FS as f64 / self.out_rate) as f32;
+                if (rx.len() as f32) < target + need.max(N as f32) {
                     out_l.fill(0.0);
                     out_r.fill(0.0);
                     return;
@@ -562,6 +583,15 @@ impl Pump {
             out_r[i] = self.last_output[1] * (1.0 - mix) + out_r[i] * mix;
             self.seek_fade -= 1;
         }
+        if stalled {
+            // 输入没跟上，后面补的是静音：最后 1 ms 淡出，不让波形一下掉到 0（"啪"的一声）
+            let k = have.min((self.out_rate * 0.001).round().max(1.0) as usize);
+            for i in 0..k {
+                let g = (k - 1 - i) as f32 / k as f32;
+                out_l[have - k + i] *= g;
+                out_r[have - k + i] *= g;
+            }
+        }
         if let (Some(&l), Some(&r)) = (out_l.last(), out_r.last()) {
             // 淡入跨多个回调时保留同一衔接起点。
             if self.seek_fade == 0 {
@@ -591,6 +621,28 @@ impl Pump {
                 r.set_trim(FS as f64, self.out_rate, trim);
             }
             self.shared.fill_us.store((self.fill_avg / FS * 1e6) as u32, Ordering::Relaxed);
+            if stalled {
+                // 断流：多留一点积压，重新攒够了再出声（5 ms 淡入）。输入一阵一阵地来时，平均积压够、低谷不够，
+                // 只靠上面按平均值的微调补不回来，接下来每一阵之间都会见底，一直滋滋响
+                self.extra = (self.extra + STALL_STEP).min(EXTRA_MAX);
+                self.primed = false;
+                self.seek_fade = fade_len;
+                self.last_output = [0.0; 2];
+                self.low = f32::MAX;
+                self.low_frames = 0;
+            } else {
+                // 积压的最低点长时间都有富余：多留的慢慢减回去（正常的麦克风不断流，多留的一直是 0）
+                self.low = self.low.min(fill);
+                self.low_frames += frames;
+                if self.low_frames as f64 >= LOW_WINDOW * self.out_rate {
+                    let surplus = self.low - (N as f32 + LOW_SLACK);
+                    if surplus > 0.0 {
+                        self.extra = (self.extra - (0.5 * surplus).clamp(EXTRA_DOWN.0, EXTRA_DOWN.1)).max(0.0);
+                    }
+                    self.low = f32::MAX;
+                    self.low_frames = 0;
+                }
+            }
         }
         self.shared.store_tele(self.proc.tele());
         match &self.proc {

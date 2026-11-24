@@ -10,7 +10,7 @@ use crate::dsp::engine::{Engine, EngineConfig, PostMode};
 use crate::dsp::mix::{self, MixSetup, Mixer, MAX_VOICES};
 use crate::dsp::solo::Solo;
 use crate::dsp::{FS, FS_USIZE};
-use crate::live::{mic_sink, Proc, Pump, Shared, Source};
+use crate::live::{mic_sink, Dropout, Proc, Pump, Shared, Source};
 use crate::spsc;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample, StreamConfig, SupportedBufferSize};
@@ -101,7 +101,7 @@ trait StreamError {
 impl StreamError for Shared {
     fn stream_error(&self, device: &str, error: cpal::Error) {
         if error.kind() == cpal::ErrorKind::Xrun {
-            self.xruns.fetch_add(1, Ordering::Relaxed);
+            self.dropout(if device == "输入" { Dropout::InputDevice } else { Dropout::OutputDevice });
             return;
         }
         if realtime_denied(&error) {
@@ -141,12 +141,26 @@ fn err_text(what: &str, e: cpal::Error) -> String {
 fn pick_config(dev: &cpal::Device, input: bool, want_frames: u32) -> Result<(StreamConfig, SampleFormat), String> {
     let def = if input { dev.default_input_config() } else { dev.default_output_config() }.map_err(|e| err_text("读取设备格式失败", e))?;
     let mut cfg = def.config();
-    cfg.buffer_size = match (want_frames, def.buffer_size()) {
-        (0, _) => BufferSize::Default,
-        (n, SupportedBufferSize::Range { min, max }) => BufferSize::Fixed(n.clamp(*min, *max)),
-        (_, _) => BufferSize::Default,
-    };
+    cfg.buffer_size = buffer_size(want_frames, def.buffer_size(), input, cfg.sample_rate, cfg!(windows));
     Ok((cfg, def.sample_format()))
+}
+
+/// Windows（WASAPI 共享模式）的录音缓冲至少留多少秒。录音是事件驱动的：每个包一到就交给我们，缓冲大只是来不及读时
+/// 能多装，不增加延迟。太小了，虚拟声卡（比如接 RVC 变声器）一次交出好几个包、或者线程晚醒一下，装不下的就被系统丢掉，
+/// 在交给我们之前就没了（cpal 报断流），后面留多少积压都补不回来。
+const WASAPI_INPUT_MIN_S: f64 = 0.1;
+
+/// 设备缓冲要多大。`want_frames` 是界面上的「缓冲」（0 = 默认）。驱动报了范围时夹在范围里；Windows 的普通（软件）音频栈
+/// 不报范围（`Unknown`），但共享模式什么长度都接受，也按设置要（以前这时一律用系统默认，界面上的设置在 Windows 上不起作用）。
+/// Windows 的录音缓冲另外至少留 [`WASAPI_INPUT_MIN_S`]。`wasapi`：是不是 Windows。
+fn buffer_size(want_frames: u32, supported: &SupportedBufferSize, input: bool, rate: u32, wasapi: bool) -> BufferSize {
+    let want = if wasapi && input { want_frames.max((rate as f64 * WASAPI_INPUT_MIN_S).round() as u32) } else { want_frames };
+    match supported {
+        _ if want == 0 => BufferSize::Default,
+        SupportedBufferSize::Range { min, max } => BufferSize::Fixed(want.clamp(*min, *max)),
+        SupportedBufferSize::Unknown if wasapi => BufferSize::Fixed(want),
+        SupportedBufferSize::Unknown => BufferSize::Default,
+    }
 }
 
 fn build_in<T>(dev: &cpal::Device, cfg: StreamConfig, sel: usize, mut sink: impl FnMut(&[f32]) + Send + 'static, shared: Arc<Shared>) -> Result<cpal::Stream, cpal::Error>
@@ -440,6 +454,38 @@ mod tests {
         assert!(shared.take_error().is_none());
     }
 
+    /// Windows 上界面的「缓冲」真的生效（驱动不报范围时也按设置要），录音缓冲至少 100 ms；别的系统驱动不报范围时用默认，
+    /// 报了范围就夹在范围里。
+    #[test]
+    fn buffer_sizes_follow_the_setting_and_keep_a_roomy_input_on_windows() {
+        let unknown = SupportedBufferSize::Unknown;
+        let range = SupportedBufferSize::Range { min: 128, max: 2048 };
+        // Windows：输出按设置，录音至少 100 ms（48 kHz 4800 帧，44.1 kHz 4410 帧），设置更大就按设置
+        assert_eq!(buffer_size(256, &unknown, false, 48_000, true), BufferSize::Fixed(256));
+        assert_eq!(buffer_size(1024, &unknown, false, 48_000, true), BufferSize::Fixed(1024));
+        assert_eq!(buffer_size(0, &unknown, false, 48_000, true), BufferSize::Default);
+        assert_eq!(buffer_size(256, &unknown, true, 48_000, true), BufferSize::Fixed(4800));
+        assert_eq!(buffer_size(0, &unknown, true, 44_100, true), BufferSize::Fixed(4410));
+        assert_eq!(buffer_size(8192, &unknown, true, 48_000, true), BufferSize::Fixed(8192));
+        assert_eq!(buffer_size(256, &range, true, 48_000, true), BufferSize::Fixed(2048));
+        // 别的系统：录音和输出一样按设置；不报范围时用默认
+        assert_eq!(buffer_size(256, &range, true, 48_000, false), BufferSize::Fixed(256));
+        assert_eq!(buffer_size(64, &range, false, 48_000, false), BufferSize::Fixed(128));
+        assert_eq!(buffer_size(256, &unknown, true, 48_000, false), BufferSize::Default);
+        assert_eq!(buffer_size(0, &range, false, 48_000, false), BufferSize::Default);
+    }
+
+    /// 设备报的断流按输入 / 输出分开记。
+    #[test]
+    fn device_dropouts_are_counted_by_direction() {
+        let shared = Shared::new(Arc::new(EngineConfig::new(Params::default(), None)));
+        shared.stream_error("输入", cpal::ErrorKind::Xrun.into());
+        shared.stream_error("输入", cpal::ErrorKind::Xrun.into());
+        shared.stream_error("输出", cpal::ErrorKind::Xrun.into());
+        assert_eq!(shared.dropouts(), [0, 0, 2, 1]);
+        assert_eq!(shared.xruns.load(Ordering::Relaxed), 3);
+    }
+
     /// 音频线程没能提到实时优先级（cpal 的 realtime 特性报的错）：照常运行，不停掉、不算断流。
     #[test]
     fn realtime_priority_refusal_keeps_audio_running() {
@@ -523,8 +569,8 @@ mod tests {
     /// 输入的到达方式：每个包 [`PACKET`] 帧，第 k 个包本该在 k × 10 ms 到，实际由 `deliver(本该到的时间)` 给出什么时候交给
     /// 我们（一阵一阵地来、晚到）；输出回调每次 `n_out` 帧，比输入晚 `phase` 秒开始；两边每次醒来的时间再随机晚 0–`jitter` 秒
     /// （线程调度）。两个设备同一个时钟。`tone`：输入是 0.5 幅度的 1 kHz 正弦，否则是静音。监听原声。
-    /// 返回每次输出回调之后的（时间，累计断流次数，积压毫秒），以及整段左声道输出。
-    fn simulate_arrivals(n_out: usize, phase: f64, jitter: f64, seconds: f64, deliver: impl Fn(f64) -> f64, tone: bool) -> (Vec<(f64, u32, f32)>, Vec<f32>) {
+    /// 返回每次输出回调之后的（时间，累计断流次数，积压毫秒）、整段左声道输出，以及按原因分的断流次数。
+    fn simulate_arrivals(n_out: usize, phase: f64, jitter: f64, seconds: f64, deliver: impl Fn(f64) -> f64, tone: bool) -> (Vec<(f64, u32, f32)>, Vec<f32>, [u32; 4]) {
         let cfg = Arc::new(EngineConfig::new(Params::default(), None));
         let shared = Arc::new(Shared::new(cfg.clone()));
         shared.monitor_dry.store(true, Ordering::Relaxed);
@@ -566,7 +612,7 @@ mod tests {
                 }
             }
         }
-        (log, out)
+        (log, out, shared.dropouts())
     }
 
     /// 输入包的大小（Windows 共享模式常见的 10 ms）。
@@ -592,7 +638,7 @@ mod tests {
         for n_out in [256, 480, 1024] {
             for n in [3, 4] {
                 for phase_ms in [0.0, 2.0, 5.0, 9.0, 25.0] {
-                    let (log, _) = simulate_arrivals(n_out, phase_ms / 1000.0, 0.001, 60.0, bursts(n), false);
+                    let (log, _, _) = simulate_arrivals(n_out, phase_ms / 1000.0, 0.001, 60.0, bursts(n), false);
                     let (early, _) = span(&log, 0.0, 5.0);
                     let (late, _) = span(&log, 5.0, 60.0);
                     let (_, fill) = span(&log, 50.0, 60.0);
@@ -610,7 +656,7 @@ mod tests {
     fn regular_input_keeps_its_low_latency() {
         for n_out in [256, 480, 1024] {
             for phase_ms in [0.0, 0.5, 5.0, 9.5] {
-                let (log, _) = simulate_arrivals(n_out, phase_ms / 1000.0, 0.001, 30.0, |t| t, false);
+                let (log, _, _) = simulate_arrivals(n_out, phase_ms / 1000.0, 0.001, 30.0, |t| t, false);
                 let (xr, fill) = span(&log, 0.0, 30.0);
                 assert_eq!(xr, 0, "输出 {n_out} 帧，相位 {phase_ms} ms");
                 assert!(fill < 14.0, "输出 {n_out} 帧，相位 {phase_ms} ms：积压 {fill} ms");
@@ -623,7 +669,7 @@ mod tests {
     fn extra_backlog_shrinks_once_input_is_regular_again() {
         let t_in = PACKET as f64 / FS as f64;
         let four = bursts(4);
-        let (log, _) = simulate_arrivals(256, 0.0, 0.001, 120.0, move |t| if t < 20.0 - 4.0 * t_in { four(t) } else { t }, false);
+        let (log, _, _) = simulate_arrivals(256, 0.0, 0.001, 120.0, move |t| if t < 20.0 - 4.0 * t_in { four(t) } else { t }, false);
         let (_, bursty) = span(&log, 15.0, 20.0);
         let (xr, _) = span(&log, 20.0, 120.0);
         let (_, end) = span(&log, 110.0, 120.0);
@@ -635,12 +681,23 @@ mod tests {
     /// 输入中途卡住 40 ms（之后一起补上）：断流的地方先淡出、攒够了再淡入，波形没有突然的跳变（"啪"）。
     #[test]
     fn a_dropout_fades_instead_of_clicking() {
-        let (log, out) = simulate_arrivals(256, 0.002, 0.0, 6.0, |t| if (3.0..3.04).contains(&t) { 3.04 } else { t }, true);
+        let (log, out, kinds) = simulate_arrivals(256, 0.002, 0.0, 6.0, |t| if (3.0..3.04).contains(&t) { 3.04 } else { t }, true);
         let (xr, _) = span(&log, 0.0, 6.0);
         assert!(xr >= 1, "这个卡顿应当造成断流");
+        assert_eq!(kinds, [xr, 0, 0, 0], "记成输入没跟上");
         // 0.5 幅度的 1 kHz 正弦相邻两个样本最多差 0.065
         let step = out[FS_USIZE..].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
         assert!(step < 0.1, "最大跳变 {step}");
+    }
+
+    /// 输入卡住 0.4 秒后一下子全到：先记"输入没跟上"，积压超过目标 150 ms 后丢掉旧的，记"积压丢弃"，之后不再断。
+    #[test]
+    fn a_flood_after_a_long_gap_is_dropped_as_backlog() {
+        let (log, _, kinds) = simulate_arrivals(480, 0.002, 0.0, 10.0, |t| if (3.0..3.4).contains(&t) { 3.4 } else { t }, false);
+        assert!(kinds[0] >= 1 && kinds[1] >= 1 && kinds[2] == 0 && kinds[3] == 0, "{kinds:?}");
+        let (late, fill) = span(&log, 4.0, 10.0);
+        assert_eq!(late, 0);
+        assert!(fill < 60.0, "积压 {fill} ms");
     }
 
     #[test]

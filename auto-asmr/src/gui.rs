@@ -93,6 +93,28 @@ fn row(ui: &mut egui::Ui, label: &str, tip: &str, w: egui::Slider<'_>) -> bool {
 }
 
 /// 界面文字：中文 / 英文二选一。
+/// 断流次数按原因分开的说明（下标同 [`crate::live::Dropout`]），只列出现过的，如"输入没跟上 3 · 录音设备丢数据 9"。
+fn dropout_breakdown(kinds: [u32; 4]) -> String {
+    let names = [t("输入没跟上", "input late"), t("积压丢弃", "backlog dropped"), t("录音设备丢数据", "input device lost data"), t("输出设备", "output device")];
+    names.iter().zip(kinds).filter(|(_, n)| *n > 0).map(|(name, n)| format!("{name} {n}")).collect::<Vec<_>>().join(" · ")
+}
+
+/// 断流次数的悬停说明：每种原因是什么、怎么办。
+fn dropout_help() -> &'static str {
+    t(
+        "断流：轮到输出声卡要声音时没有可放的，只能补一段静音（断流处会淡出淡入，但接连断流仍会听到滋滋 / 噼啪声）。按原因分：\n\
+         · 输入没跟上：麦克风（或虚拟声卡）的声音还没送到。每断一次会自动多留 3 ms 缓冲，开头断几次后应当不再增加\n\
+         · 积压丢弃：输入积压太多（输入卡住后一下子全到，或输入设备的时钟比输出快很多），丢掉旧的追上实时\n\
+         · 录音设备丢数据：录音设备报告数据没来得及读就被系统丢了，在交给本程序之前就没了\n\
+         · 输出设备：输出设备报告断流，把「缓冲」调大试试",
+        "Dropout: when the output device needed audio there was none, so silence was inserted (with a fade, but repeated dropouts still crackle). By cause:\n\
+         · input late: the microphone (or virtual sound card) audio had not arrived yet. Each one adds 3 ms of buffer automatically; after a few at the start it should stop rising\n\
+         · backlog dropped: too much input piled up (a stalled input arriving all at once, or an input clock much faster than the output), so the oldest was dropped\n\
+         · input device lost data: the input device reported data discarded before it could be read\n\
+         · output device: the output device reported a dropout; try a larger Buffer",
+    )
+}
+
 fn t(zh: &'static str, en: &'static str) -> &'static str {
     if ENGLISH.load(Ordering::Relaxed) {
         en
@@ -1873,7 +1895,11 @@ impl App {
                             ui.label(format!("{} {:.1} ms", t("总延迟约", "Total latency ≈"), rt.latency_ms())).on_hover_text(t("输入缓冲 + 环形缓冲 + 算法 + 输出缓冲，不含声卡驱动自身的延迟", "Input buffer + ring + algorithm + output buffer; excludes the driver's own latency"));
                         }
                         ui.label(format!("{} {} µs（{} {}）", t("处理时间", "Processing"), sh.proc_us.load(Ordering::Relaxed), t("最大", "max"), sh.proc_max_us.load(Ordering::Relaxed)));
-                        ui.label(format!("{} {}", t("断流次数", "Dropouts"), sh.xruns.load(Ordering::Relaxed)));
+                        let kinds = sh.dropouts();
+                        ui.label(format!("{} {}", t("断流次数", "Dropouts"), sh.xruns.load(Ordering::Relaxed))).on_hover_text(dropout_help());
+                        if kinds.iter().any(|&n| n > 0) {
+                            ui.label(RichText::new(dropout_breakdown(kinds)).weak().small()).on_hover_text(dropout_help());
+                        }
                     } else {
                         let mut latency = if self.s.params.denoise { 22.4 } else { 2.4 };
                         if self.s.params.static_ambience {
@@ -3550,6 +3576,16 @@ fn save_png(path: &PathBuf, img: &egui::ColorImage) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 断流按原因分的说明只列出现过的，按"输入没跟上、积压丢弃、录音设备、输出设备"的顺序（中英文都一样）。
+    #[test]
+    fn dropout_breakdown_lists_only_the_causes_seen() {
+        assert_eq!(dropout_breakdown([0; 4]), "");
+        let parts: Vec<String> = dropout_breakdown([3, 0, 9, 0]).split(" · ").map(String::from).collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].ends_with(" 3") && parts[1].ends_with(" 9"), "{parts:?}");
+        assert_eq!(dropout_breakdown([1, 2, 3, 4]).split(" · ").count(), 4);
+    }
 
     #[test]
     fn extended_parameter_values_survive_redraw_and_serialization() {

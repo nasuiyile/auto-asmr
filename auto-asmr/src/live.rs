@@ -27,8 +27,9 @@ pub struct Shared {
     /// 最近每次输出回调的处理时间（微秒，平滑 / 最大）。
     pub proc_us: AtomicU32,
     pub proc_max_us: AtomicU32,
-    /// 断流次数（设备报告的短暂断流，或输入来不及 / 积压过多）。
+    /// 断流次数（设备报告的短暂断流，或输入来不及 / 积压过多）。按原因分开的在 `dropout_kinds`（见 [`Dropout`]）。
     pub xruns: AtomicU32,
+    dropout_kinds: [AtomicU32; 4],
     /// 引擎算法延时（样本，48 kHz）。
     pub algo_samples: AtomicU32,
     /// 输入 / 输出回调一次的帧数。
@@ -62,6 +63,7 @@ impl Shared {
             proc_us: AtomicU32::new(0),
             proc_max_us: AtomicU32::new(0),
             xruns: AtomicU32::new(0),
+            dropout_kinds: Default::default(),
             algo_samples: AtomicU32::new(0),
             in_frames: AtomicU32::new(0),
             out_frames: AtomicU32::new(0),
@@ -99,6 +101,17 @@ impl Shared {
             depth_cm: g(13),
             n_strokes: g(14) as u32,
         }
+    }
+
+    /// 记一次断流（总数和这种原因的次数各加一）。
+    pub fn dropout(&self, kind: Dropout) {
+        self.xruns.fetch_add(1, Ordering::Relaxed);
+        self.dropout_kinds[kind as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 按原因分的断流次数，下标见 [`Dropout`]。
+    pub fn dropouts(&self) -> [u32; 4] {
+        std::array::from_fn(|i| self.dropout_kinds[i].load(Ordering::Relaxed))
     }
 
     /// 设备出错（拔掉、被占用等）时的说明；读一次即清空。
@@ -169,6 +182,19 @@ impl Shared {
     }
 }
 
+
+/// 断流的原因（界面上分开显示，好知道是哪一环没跟上）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dropout {
+    /// 轮到输出时麦克风的输入还没送到，补了一段静音（处理泵发现的）。
+    InputLate = 0,
+    /// 输入积压太多（超过目标 150 ms），丢掉旧的追上实时。
+    Overflow = 1,
+    /// 录音设备报告丢了数据（Windows：录音缓冲满了没来得及读，数据在交给我们之前就没了）。
+    InputDevice = 2,
+    /// 输出设备报告的断流。
+    OutputDevice = 3,
+}
 
 /// 引擎的输入来源。
 pub enum Source {
@@ -605,7 +631,7 @@ impl Pump {
             self.qpos = 0;
         }
         if stalled {
-            self.shared.xruns.fetch_add(1, Ordering::Relaxed);
+            self.shared.dropout(Dropout::InputLate);
         }
         if let Source::Ring(rx) = &mut self.src {
             // 时钟漂移：积压偏多就稍微快一点消耗，偏少就慢一点；积压太多（> 目标 + 150 ms）直接丢掉旧的
@@ -614,7 +640,7 @@ impl Pump {
             if fill > target + 0.15 * FS {
                 rx.skip((fill - target) as usize);
                 self.fill_avg = target;
-                self.shared.xruns.fetch_add(1, Ordering::Relaxed);
+                self.shared.dropout(Dropout::Overflow);
             }
             let trim = 1.0 + (((self.fill_avg - target) / FS) as f64 * 0.5).clamp(-0.005, 0.005);
             for r in self.rs.iter_mut() {

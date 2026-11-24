@@ -9,6 +9,8 @@
 //! - **左右双人**（配置里的 `duo_ms` 大于 0）：同一路声音交给库里的 [`LiveMix`]——一个在左耳、一个在右耳，第 2 个
 //!   从输入的历史里晚一点取（和桌面版主播模式同一套做法），自动平衡的输入响度边听边算。开 / 关、换排布时在音频线程里
 //!   重新建一份（只在用户改这两项的那一下），延迟、位置、强度这些改动直接换配置。
+//! - **监听原声**（配置里的 `dry`）：不进引擎，只乘输出增益、过峰值限制器（库里的 [`DryOut`]，在流本身的采样率上做），
+//!   所以原声时音量滑条照样起作用。
 //! - **出错不崩溃**：导出函数都 `catch_unwind`，Rust 里出错只会让这个流改成直通。
 
 use std::ffi::{c_char, c_int, CStr};
@@ -16,6 +18,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, TryLockError};
 
+use auto_asmr::dsp::dynamics::DryOut;
 use auto_asmr::dsp::engine::{Engine, PostMode};
 use auto_asmr::dsp::mix::{LiveMix, MixSetup};
 use auto_asmr::dsp::params::Params;
@@ -31,7 +34,7 @@ pub mod aout;
 pub mod files;
 pub mod rain;
 pub mod settings;
-use settings::{current_cfg, update_params, with_global, CFG_VER, GLOBAL};
+use settings::{current_cfg, update_params, with_global, CFG_VER, DRY, GLOBAL};
 
 fn set_error(msg: String) {
     log(6, &msg);
@@ -352,6 +355,9 @@ pub struct Processor {
     r: Vec<f32>,
     failed: bool,
     tele: Arc<Tele>,
+    /// 监听原声时的输出级（输出增益 + 峰值限制器，流本身的采样率），以及上一次是不是原声（刚切到原声时清掉旧状态）。
+    dry_out: DryOut,
+    was_dry: bool,
 }
 
 impl Processor {
@@ -373,7 +379,20 @@ impl Processor {
             let delay_frames = PRIME + 16 * rate / FS_USIZE + 18;
             Rs { up: Resampler::new(rate as f64, fs), down: [Resampler::new(fs, rate as f64), Resampler::new(fs, rate as f64)], x48: Vec::with_capacity(n48), q, qpos: 0, delay_frames }
         });
-        Processor { eng, duo, ver: CFG_VER.load(Ordering::Acquire), rate, rs, mono: vec![0.0; CHUNK], l: vec![0.0; n48], r: vec![0.0; n48], failed: false, tele: Arc::new(Tele::default()) }
+        Processor {
+            eng,
+            duo,
+            ver: CFG_VER.load(Ordering::Acquire),
+            rate,
+            rs,
+            mono: vec![0.0; CHUNK],
+            l: vec![0.0; n48],
+            r: vec![0.0; n48],
+            failed: false,
+            tele: Arc::new(Tele::default()),
+            dry_out: DryOut::new(rate as f32),
+            was_dry: false,
+        }
     }
 
     /// 左右双人的配置换上：开 / 关、换排布时重新建一份（会分配内存，只在用户改这两项的那一下），其余直接换配置。
@@ -409,6 +428,18 @@ impl Processor {
     /// 处理一段交错的立体声（原地改写）。
     fn process(&mut self, data: &mut [f32]) {
         self.sync_config();
+        if DRY.load(Ordering::Relaxed) {
+            // 监听原声：不进引擎，只乘输出增益、过峰值限制器（同效果那一路的收尾），音量滑条照样起作用
+            if !self.was_dry {
+                self.dry_out.reset();
+                self.was_dry = true;
+            }
+            let p = &self.eng.config().params;
+            let (gain, ceiling) = (p.out_gain_db, p.ceiling_db);
+            self.dry_out.process_interleaved(data, gain, ceiling);
+            return;
+        }
+        self.was_dry = false;
         let Processor { eng, duo, rs, mono, l, r, tele, .. } = self;
         // 左右双人打开时交给两个声音，否则单个引擎
         let mut run = |x: &[f32], l: &mut [f32], r: &mut [f32]| match duo {
@@ -798,6 +829,51 @@ mod tests {
 
     /// 网页声音里没有雨声：打开雨声、再改别的参数之后，处理器换上的仍是去掉背景音的配置（雨声只在单独的输出流里），
     /// 左右双人时也一样。
+    /// 监听原声：不加效果（两耳一样），但输出增益照样起作用；调大了被峰值上限压住；切回效果又有空间感。
+    #[test]
+    fn dry_still_follows_output_gain() {
+        let _g = settings::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        settings::provide_repo_data();
+        settings::load_config("()").unwrap();
+        let rms = |x: &[f32]| (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt();
+        let run = |p: &mut Processor, x: &mut [f32]| {
+            for c in x.chunks_mut(2 * 441) {
+                p.process(c);
+            }
+        };
+        for rate in [48_000usize, 44_100] {
+            let src = tone(rate, 2.0);
+            let mut p = Processor::new(rate);
+            asmr_set_dry(1);
+            let mut x = src.clone();
+            run(&mut p, &mut x);
+            let k = 2 * (rate / 100); // 跳过开头限制器的延时
+            assert!(x[k..].chunks(2).all(|f| f[0] == f[1]), "{rate} Hz 原声两耳应一样");
+            let base = rms(&x[src.len() / 2..]);
+            assert!((base / rms(&src[src.len() / 2..]) - 1.0).abs() < 0.01, "{rate} Hz 0 dB 时原声音量不变");
+            assert_eq!(set_field("out_gain_db", "-12"), 0);
+            let mut y = src.clone();
+            run(&mut p, &mut y);
+            let db = 20.0 * (rms(&y[src.len() / 2..]) / base).log10();
+            assert!((db + 12.0).abs() < 0.2, "{rate} Hz 原声时输出增益没起作用：{db:.2} dB");
+            // 调大 24 dB（0.2 → 3.2）：被峰值上限（−1 dB）压住
+            assert_eq!(set_field("out_gain_db", "12"), 0);
+            let mut z: Vec<f32> = src.iter().map(|v| v * 4.0).collect();
+            run(&mut p, &mut z);
+            let pk = z[src.len() / 2..].iter().fold(0f32, |m, v| m.max(v.abs()));
+            assert!(pk < 0.9 && pk > 0.8, "{rate} Hz 峰值 {pk}");
+            // 切回效果：两耳不一样
+            asmr_set_dry(0);
+            assert_eq!(set_field("out_gain_db", "0"), 0);
+            let mut w = tone(rate, 4.0);
+            run(&mut p, &mut w);
+            let tail = &w[w.len() / 2..];
+            let (el, er) = tail.chunks(2).fold((0.0f64, 0.0f64), |(a, b), f| (a + (f[0] as f64).powi(2), b + (f[1] as f64).powi(2)));
+            assert!((10.0 * (el / er).log10()).abs() > 1.0, "{rate} Hz 切回效果后应有空间感");
+        }
+        settings::load_config("()").unwrap();
+    }
+
     #[test]
     fn web_audio_never_gets_the_rain() {
         let _g = settings::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

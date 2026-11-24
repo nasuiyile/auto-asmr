@@ -75,8 +75,8 @@ fn radar_pick(d: egui::Vec2, rmax: f32) -> (f32, f32) {
 const RADAR_MAX_R: f32 = 0.8;
 
 /// 输出增益的说明（左下角降噪下面那一行）。
-const OUT_GAIN_TIP_ZH: &str = "在自动响度之后、峰值限制器之前整体加减音量，相当于耳机音量旋钮。只在实时 / 试听时起作用；转换文件不用它，文件的响度精确归一化到「目标响度」。往上推到峰值上限后只会被限制器压扁，不会更响";
-const OUT_GAIN_TIP_EN: &str = "Overall gain after auto level and before the peak limiter, like a headphone volume knob. Real-time / preview only; file conversion ignores it and normalizes exactly to the target loudness. Above the ceiling the limiter only squashes it, it won't get louder";
+const OUT_GAIN_TIP_ZH: &str = "在自动响度之后、峰值限制器之前整体加减音量，相当于耳机音量旋钮。只在实时 / 试听时起作用（监听原声时也起作用，原声不做自动响度）；转换文件不用它，文件的响度精确归一化到「目标响度」。往上推到峰值上限后只会被限制器压扁，不会更响";
+const OUT_GAIN_TIP_EN: &str = "Overall gain after auto level and before the peak limiter, like a headphone volume knob. Real-time / preview only (also while monitoring dry, which skips auto level); file conversion ignores it and normalizes exactly to the target loudness. Above the ceiling the limiter only squashes it, it won't get louder";
 
 /// 参数表的一行：滑轨用常用范围，手输或拖动数值可以超出该范围。
 fn row(ui: &mut egui::Ui, label: &str, tip: &str, w: egui::Slider<'_>) -> bool {
@@ -2185,7 +2185,7 @@ impl App {
             ui.add(egui::Slider::new(&mut p.out_gain_db, -60.0..=12.0).clamping(egui::SliderClamping::Never).suffix(" dB").fixed_decimals(1))
                 .on_hover_text(t(OUT_GAIN_TIP_ZH, OUT_GAIN_TIP_EN));
         });
-        ui.add(egui::Label::new(RichText::new(t("只在实时 / 试听时起作用（相当于耳机音量）；转换文件不用它，文件的响度由「目标响度」决定", "Real-time / preview only (like a headphone volume); file conversion ignores it, the file loudness follows the target")).small().weak()).wrap());
+        ui.add(egui::Label::new(RichText::new(t("只在实时 / 试听时起作用（相当于耳机音量，监听原声时也有效）；转换文件不用它，文件的响度由「目标响度」决定", "Real-time / preview only (like a headphone volume, also while monitoring dry); file conversion ignores it, the file loudness follows the target")).small().weak()).wrap());
         ui.add_space(3.0);
     }
 

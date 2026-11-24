@@ -461,6 +461,11 @@ impl Engine {
     }
 
     /// 换一份配置（在控制块边界生效）。
+    /// 当前的配置。
+    pub fn config(&self) -> &Arc<EngineConfig> {
+        &self.cfg
+    }
+
     pub fn set_config(&mut self, cfg: Arc<EngineConfig>) {
         let d = &cfg.derived;
         let changed = |a: &Option<Arc<Vec<f32>>>, b: &Option<Arc<Vec<f32>>>| match (a, b) {

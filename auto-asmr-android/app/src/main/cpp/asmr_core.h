@@ -27,7 +27,7 @@ int asmr_action(const char *name);
 // 改一个参数（字段名或虚拟字段，值是 JSON）；读全部参数（JSON）
 int asmr_set_field(const char *key, const char *value_json);
 int asmr_get_params_json(char *buf, size_t cap);
-// 输出效果 / 监听原声（存进配置文件，和桌面版共用）
+// 输出效果 / 监听原声（存进配置文件，和桌面版共用）。原声时 asmr_proc_process 不进引擎，只乘输出增益、过峰值限制器
 void asmr_set_dry(int dry);
 // 配置文件（和桌面版同一格式）：导入整份换掉；导出返回长度，出错 -1
 int asmr_load_config(const char *text);

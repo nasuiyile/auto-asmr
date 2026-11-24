@@ -17,7 +17,7 @@ object Engine {
     @JvmStatic external fun procLatencyMs(p: Long): Float
     /** 处理器此刻的状态：方位角、仰角、距离、说话活动、断流次数、是否出过错、是不是左右双人、2 号的方位角 / 仰角 / 距离 / 说话活动。 */
     @JvmStatic external fun procTele(p: Long): FloatArray
-    /** 记下「输出效果 / 监听原声」（存进配置）。真正切换由服务进程的 AudioRouter 做（原声时不处理）。 */
+    /** 「输出效果 / 监听原声」（存进配置）。原声时处理器不进引擎，只乘输出增益、过峰值限制器。 */
     @JvmStatic external fun setDry(dry: Boolean)
     /** 0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音。 */
     @JvmStatic external fun setStyle(style: Int): Int

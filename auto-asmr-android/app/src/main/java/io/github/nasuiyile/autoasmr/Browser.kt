@@ -110,6 +110,17 @@ class Browser(private val context: Context) {
         if (tabs.isEmpty()) newTab() else if (current == tab) select(tabs[(i - 1).coerceAtLeast(0)]) else applyMute()
     }
 
+    /** 从通知栏退出时：停掉、销毁所有标签页（之后这个 Browser 不再用）。 */
+    fun destroyAll() {
+        for (t in tabs) {
+            t.web.stopLoading()
+            t.web.destroy()
+        }
+        tabs.clear()
+        pinned = null
+        current = null
+    }
+
     fun togglePin(tab: Tab) {
         pinned = if (pinned == tab) null else tab
         applyMute()

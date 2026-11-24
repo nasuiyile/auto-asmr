@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use auto_asmr::config::{self, ConfigError, Saved};
+use auto_asmr::dsp::dynamics::DryOut;
 use auto_asmr::dsp::engine::{Engine, EngineConfig, PostMode};
 use auto_asmr::dsp::mix::{self, LiveMix, MixSetup, DUO_VOICES};
 use auto_asmr::dsp::params::{MotionMode, Params};
@@ -354,7 +355,8 @@ pub extern "C" fn asmr_engine_apply() {
 }
 
 /// 一个标签页的处理器：立体声下混成单声道 → `Engine::process`（左右双人时 [`LiveMix`]）→ 双耳；「监听原声」时输出
-/// 原来的立体声（引擎照常在跑，切回效果时动作和响度是接着的）。只处理 48 kHz（插件的 AudioContext 固定 48 kHz）。
+/// 原来的立体声，只乘输出增益、过峰值限制器（[`DryOut`]，音量滑条照样起作用；引擎照常在跑，切回效果时动作和响度是接着的）。
+/// 只处理 48 kHz（插件的 AudioContext 固定 48 kHz）。
 pub struct Processor {
     /// 单个声音的引擎（左右双人关着时用；一直跟着换配置，关掉左右双人时接着用）。
     eng: Engine,
@@ -366,6 +368,9 @@ pub struct Processor {
     io: Box<[f32]>,
     mono: Box<[f32]>,
     tele: [f32; tele::N],
+    /// 监听原声时的输出级，以及上一块是不是原声（刚切到原声时清掉它的旧状态）。
+    dry_out: DryOut,
+    was_dry: bool,
 }
 
 impl Processor {
@@ -380,7 +385,17 @@ impl Processor {
         // 网页内容是连续的录音：动作严格跟着说话走（同桌面版试听、安卓版），不用主播模式的"停顿 1 秒恢复"
         eng.set_live(false);
         let duo = duo.map(|s| LiveMix::new(&s, false));
-        Processor { eng, duo, ver, dry, io: vec![0.0; 4 * CAP].into_boxed_slice(), mono: vec![0.0; CAP].into_boxed_slice(), tele: [0.0; tele::N] }
+        Processor {
+            eng,
+            duo,
+            ver,
+            dry,
+            io: vec![0.0; 4 * CAP].into_boxed_slice(),
+            mono: vec![0.0; CAP].into_boxed_slice(),
+            tele: [0.0; tele::N],
+            dry_out: DryOut::new(FS_USIZE as f32),
+            was_dry: false,
+        }
     }
 
     /// 配置换过了就换上（只换 `Arc`）。左右双人开 / 关、换排布时重新建一份（会分配内存，只在用户改这两项的那一下）。
@@ -417,7 +432,13 @@ impl Processor {
         if self.dry {
             outl[..n].copy_from_slice(&inl[..n]);
             outr[..n].copy_from_slice(&inr[..n]);
+            if !self.was_dry {
+                self.dry_out.reset();
+            }
+            let p = &self.eng.config().params;
+            self.dry_out.process(&mut outl[..n], &mut outr[..n], p.out_gain_db, p.ceiling_db);
         }
+        self.was_dry = self.dry;
         let (t, t2) = match &self.duo {
             Some(d) => (&d.mixer().engine(0).tele, Some(&d.mixer().engine(1).tele)),
             None => (&self.eng.tele, None),
@@ -755,21 +776,47 @@ mod tests {
         assert!(lr_db_max > 10.0 && lr_db_min < -10.0, "左右没有来回：{lr_db_min:.1} … {lr_db_max:.1} dB");
         assert!(p.tele()[tele::LATENCY_MS] > 0.0 && p.tele()[tele::LATENCY_MS] < 50.0);
 
-        // 监听原声：输出就是输入
+        // 监听原声：输出就是输入（立体声原样，只晚限制器的约 2 ms）；输出增益照样起作用
         assert_eq!(set("dry", "true"), 0);
         asmr_engine_apply();
-        {
+        let mut dry_block = |p: &mut Processor, i: usize| -> (Vec<f32>, Vec<f32>) {
             let io = p.io();
             for k in 0..128 {
                 let (l, r) = speech(i + k);
                 io[k] = l;
                 io[CAP + k] = r;
             }
+            p.process(128);
+            let io = p.io();
+            (io[2 * CAP..2 * CAP + 128].to_vec(), io[3 * CAP..3 * CAP + 128].to_vec())
+        };
+        let (mut gl, mut gr) = (Vec::new(), Vec::new());
+        let i0 = i;
+        for _ in 0..40 {
+            let (l, r) = dry_block(&mut p, i);
+            gl.extend(l);
+            gr.extend(r);
+            i += 128;
         }
-        p.process(128);
-        let io = p.io();
-        assert_eq!(&io[2 * CAP..2 * CAP + 128], &io[..128]);
-        assert_eq!(&io[3 * CAP..3 * CAP + 128], &io[CAP..CAP + 128]);
+        let k = p.dry_out.delay();
+        for j in k..gl.len() {
+            let (l, r) = speech(i0 + j - k);
+            assert!((gl[j] - l).abs() < 1e-6 && (gr[j] - r).abs() < 1e-6, "原声第 {j} 个样本不对");
+        }
+        assert_eq!(set("out_gain_db", "-12"), 0);
+        asmr_engine_apply();
+        let (i1, mut ql) = (i, Vec::new());
+        for _ in 0..40 {
+            ql.extend(dry_block(&mut p, i).0);
+            i += 128;
+        }
+        // 第一块里从 0 dB 过渡过去，之后每个样本都是原声的 −12 dB
+        let g = 10f32.powf(-12.0 / 20.0);
+        assert!(ql[k + 128..].iter().any(|v| v.abs() > 0.01), "这一段应该有声音");
+        for j in k + 128..ql.len() {
+            assert!((ql[j] - speech(i1 + j - k).0 * g).abs() < 1e-5, "原声时输出增益没起作用：第 {j} 个样本 {} ≠ {}", ql[j], speech(i1 + j - k).0 * g);
+        }
+        assert_eq!(set("out_gain_db", "0"), 0);
 
         // 换成掏耳 + 雨声，再处理一段：不出错、有声音
         assert_eq!(set("dry", "false"), 0);

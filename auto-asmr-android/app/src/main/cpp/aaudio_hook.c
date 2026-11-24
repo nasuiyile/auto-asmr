@@ -941,12 +941,13 @@ JNIEXPORT jstring JNICALL JNI_FN(exportConfig)(JNIEnv *env, jclass cls) {
     return take_string(env, asmr_export_config);
 }
 
-// 输出效果 / 监听原声：存进配置（和桌面版共用的 dry），同时切换 hook 的模式
+// 输出效果 / 监听原声：存进配置（和桌面版共用的 dry）。hook 一直交给处理器：原声时 Rust 那边不进引擎，
+// 只乘输出增益、过峰值限制器（所以原声时音量滑条照样起作用）；调试用的模式（setMode）回到 ASMR
 JNIEXPORT void JNICALL JNI_FN(setDry)(JNIEnv *env, jclass cls, jboolean dry) {
     (void)env;
     (void)cls;
     asmr_set_dry(dry ? 1 : 0);
-    atomic_store(&g_mode, dry ? MODE_BYPASS : MODE_ASMR);
+    atomic_store(&g_mode, MODE_ASMR);
 }
 
 // 文件转换页（rust/src/files.rs）：命令和状态都按 UTF-8 字节传（文件名里可能有 JNI 字符串处理不了的字符）

@@ -17,8 +17,9 @@ import io.github.nasuiyile.autoasmr.R
 import io.github.nasuiyile.autoasmr.Settings
 
 /**
- * 前台服务：连着服务进程时一直开着。通知栏显示状态，可以暂停 / 继续拦截、切效果 / 原声、退出
- * （App 不主动申请通知权限，用户在系统设置里打开通知后才显示；没打开时服务照常运行）。
+ * 前台服务：连着服务进程时一直开着。通知栏显示状态，可以暂停 / 继续拦截、启用 / 关闭效果、退出
+ * （App 第一次打开时问一次通知权限；没给时服务照常运行，只是通知栏里不显示，在系统设置里打开通知后回到 App 就会出来）。
+ * 这期间网页模式的常驻通知不再重复显示（网页在出声时它的播放通知照样有）。
  * root 方式下服务进程跟着 App 进程走，前台服务让 App 进程不容易被系统回收。
  *
  * 被系统杀掉后会被重新拉起（START_STICKY）：这时 App 进程是新的，[Controller] 收到 Shizuku 的 binder 后会连回还在跑的
@@ -35,7 +36,7 @@ class InterceptService : Service() {
         instance = this
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "拦截", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "在处理其他 App 的声音时显示，可以暂停、切换原声"
+                description = "在处理其他 App 的声音时显示，可以暂停拦截、启用 / 关闭效果"
                 setShowBadge(false)
             },
         )
@@ -85,7 +86,7 @@ class InterceptService : Service() {
             c.phase == Controller.Phase.STARTING -> "正在连接服务进程…"
             !c.connected -> "服务进程没连上"
             !c.poll.running -> "已暂停拦截（通过 ${c.how?.label}）"
-            dry -> "拦截中 · 原声（通过 ${c.how?.label}）"
+            dry -> "拦截中 · 原声，效果已关闭（通过 ${c.how?.label}）"
             else -> "拦截中 · ASMR 效果（通过 ${c.how?.label}）"
         }
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).putExtra("page", "global").addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE)
@@ -101,7 +102,7 @@ class InterceptService : Service() {
             .setVisibility(Notification.VISIBILITY_PUBLIC)
         if (c.connected) {
             b.addAction(Notification.Action.Builder(icon, if (c.poll.running) "暂停拦截" else "继续拦截", act(ACT_TOGGLE, 1)).build())
-            b.addAction(Notification.Action.Builder(icon, if (dry) "切到效果" else "切到原声", act(ACT_DRY, 2)).build())
+            b.addAction(Notification.Action.Builder(icon, if (dry) "启用效果" else "关闭效果", act(ACT_DRY, 2)).build())
             b.addAction(Notification.Action.Builder(icon, "退出", act(ACT_EXIT, 3)).build())
         }
         return b.build()

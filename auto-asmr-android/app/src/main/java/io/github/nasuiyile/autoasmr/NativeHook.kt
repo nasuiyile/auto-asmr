@@ -34,7 +34,7 @@ object NativeHook {
     /** 调试用：0 = 直通，1 = ASMR，2 = 左右互换，3 = 静音。界面上的开关用 [setDry]。 */
     @JvmStatic external fun setMode(mode: Int)
 
-    /** 输出效果（false）/ 监听原声（true）：存进配置（和电脑版共用），同时切换处理。 */
+    /** 输出效果（false）/ 监听原声（true）：存进配置（和电脑版共用）。原声时不加效果，只乘输出增益、过峰值限制器。 */
     @JvmStatic external fun setDry(dry: Boolean)
 
     /** 风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音。 */

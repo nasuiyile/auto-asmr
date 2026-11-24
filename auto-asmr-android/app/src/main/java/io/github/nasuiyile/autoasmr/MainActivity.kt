@@ -1,6 +1,9 @@
 package io.github.nasuiyile.autoasmr
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
@@ -106,6 +109,19 @@ import java.io.File
  */
 class MainActivity : ComponentActivity() {
     private lateinit var browser: Browser
+    /** 通知栏点了「退出」：关界面时把网页都销毁。 */
+    private var exiting = false
+    private val closeUi: () -> Unit = {
+        exiting = true
+        finishAndRemoveTask()
+    }
+
+    /** 通知权限（Android 13 起要用户同意）：有了它，App 开着时下拉通知栏能找到 auto-asmr、启用 / 关闭效果。 */
+    private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        PlaybackService.instance?.refresh()
+        InterceptService.instance?.refresh()
+        if (!ok) Toast.makeText(this, "没有通知权限：下拉通知栏里不会显示 auto-asmr，可以在系统设置里给它打开通知", Toast.LENGTH_LONG).show()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -113,6 +129,8 @@ class MainActivity : ComponentActivity() {
         WebViewCompat.getCurrentWebViewPackage(this)?.let { Log.i(TAG, "WebView 提供者：${it.packageName} ${it.versionName}") }
         browser = Browser(this)
         Playback.browser = browser
+        Playback.closeUi = closeUi
+        Playback.uiCreated()
         browser.newTab(intent.getStringExtra("url") ?: Browser.HOME)
         handle(intent)
         // 从别的 App「用其他应用打开」.ron 配置文件启动的（进程被系统回收后重建时不再弹一次）
@@ -121,6 +139,30 @@ class MainActivity : ComponentActivity() {
             AsmrTheme {
                 Surface(Modifier.fillMaxSize()) { Root(browser, ::record) }
             }
+        }
+        if (savedInstanceState == null) askNotificationsOnce()
+    }
+
+    /** 第一次打开时问一次通知权限（拒绝了就不再问，可以在系统设置里打开；回到 App 时通知会补上）。 */
+    private fun askNotificationsOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val prefs = getSharedPreferences("ui", 0)
+        if (prefs.getBoolean("asked_notify", false)) return
+        prefs.edit().putBoolean("asked_notify", true).apply()
+        askNotify.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    override fun onDestroy() {
+        // 被关掉（移出最近任务、通知栏退出）：没声音时通知跟着消失。新的界面已经接手时不动
+        if (isFinishing && Playback.closeUi === closeUi) {
+            Playback.uiAlive = false
+            Playback.closeUi = null
+        }
+        super.onDestroy()
+        if (exiting) {
+            browser.destroyAll()
+            if (Playback.browser === browser) Playback.browser = null
         }
     }
 
@@ -135,7 +177,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         Controller.uiVisible = true
-        InterceptService.instance?.refresh() // 从系统设置回来时可能刚打开了通知
+        // 从系统设置回来时可能刚打开了通知
+        InterceptService.instance?.refresh()
+        PlaybackService.instance?.refresh()
+        Playback.onForeground()
     }
 
     override fun onPause() {

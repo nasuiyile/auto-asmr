@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.nasuiyile.autoasmr.global.Controller
+import io.github.nasuiyile.autoasmr.global.InterceptService
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -96,6 +97,11 @@ object Settings {
     private fun setParams(p: JSONObject, initial: Boolean = false) {
         val old = params
         params = p
+        if (p.optBoolean("dry") != old.optBoolean("dry")) {
+            // 效果开关变了（底栏、通知栏、导入配置……）：两条通知马上跟着换
+            PlaybackService.instance?.update()
+            InterceptService.instance?.refresh()
+        }
         val mode = p.optString("mode")
         if (initial) {
             autoMode = if (mode == "Manual") "Sweep" else mode
@@ -187,10 +193,10 @@ object Settings {
 
     /**
      * 雨声单独一条输出流：背景音音量 > 0、而且不是原声时打开（和电脑版一样，监听原声时没有效果也没有雨声）。
-     * 全局模式在拦截时雨声由服务进程放，这里关掉，免得响两份。
+     * 全局模式在拦截时雨声由服务进程放，这里关掉，免得响两份。从通知栏退出后也关掉。
      */
     private fun syncRain(p: JSONObject) {
-        val want = p.optDouble("bg_level", 0.0) > 0 && !p.optBoolean("dry") && !Playback.pausedByUser && !Controller.intercepting
+        val want = p.optDouble("bg_level", 0.0) > 0 && !p.optBoolean("dry") && !Playback.pausedByUser && !Controller.intercepting && !Playback.exited
         if (want != rainSent) {
             rainSent = want
             NativeHook.setRain(want)

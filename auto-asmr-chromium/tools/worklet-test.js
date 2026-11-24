@@ -129,10 +129,21 @@ function energy(x, from = 0) {
   return { e, finite };
 }
 
-function maxDiff(a, b, from) {
+function maxDiff(a, b, from, lag = 0, gain = 1) {
   let m = 0;
-  for (let i = from; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i]));
+  for (let i = from + lag; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - gain * b[i - lag]));
   return m;
+}
+
+// 原声也过峰值限制器（约 2 ms 前瞻）：找出输出比输入晚几个样本（0–256 里和输入差得最少的那个）
+function dryLag(a, b, from, gain = 1) {
+  let best = 0;
+  let bestD = Infinity;
+  for (let lag = 0; lag <= 256; lag++) {
+    const d = maxDiff(a, b, from, lag, gain);
+    if (d < bestD) [best, bestD] = [lag, d];
+  }
+  return best;
 }
 
 const errors = (msgs) => msgs.filter((m) => m.type === 'error').map((m) => (m.detail ? dec.decode(m.detail) : m.message));
@@ -154,19 +165,31 @@ const errors = (msgs) => msgs.filter((m) => m.type === 'error').map((m) => (m.de
   window.lastRender = r;
 }
 
-// 2. 监听原声：输出就是输入
+// 2. 监听原声：输出就是输入（只晚限制器的约 2 ms）
 {
   const r = await render({ secs: 4, config: '(dry: true)' });
-  const d = Math.max(maxDiff(r.L, r.inL, 0), maxDiff(r.R, r.inR, 0));
-  check('监听原声：原样输出', d < 1e-6, `最大差 ${d.toExponential(2)}`);
+  const lag = dryLag(r.L, r.inL, 0);
+  const d = Math.max(maxDiff(r.L, r.inL, 0, lag), maxDiff(r.R, r.inR, 0, lag));
+  check('监听原声：原样输出', d < 1e-6 && lag > 0 && lag < 0.003 * FS, `晚 ${lag} 个样本（${((lag / FS) * 1000).toFixed(1)} ms），最大差 ${d.toExponential(2)}`);
+}
+
+// 2b. 监听原声时输出增益照样起作用：−12 dB 后每个样本都是原声的 0.251 倍
+{
+  const g = Math.pow(10, -12 / 20);
+  const r = await render({ secs: 4, config: '(dry: true, params: (out_gain_db: -12.0))' });
+  const lag = dryLag(r.L, r.inL, 0, g);
+  const d = Math.max(maxDiff(r.L, r.inL, 0, lag, g), maxDiff(r.R, r.inR, 0, lag, g));
+  check('监听原声：输出增益起作用', d < 1e-6 && lag > 0, `−12 dB，晚 ${lag} 个样本，和原声 × ${g.toFixed(3)} 的最大差 ${d.toExponential(2)}`);
 }
 
 // 3. 处理中途换配置（经 port，同 offscreen.js）：切到原声后原样输出
 {
   const r = await render({ secs: 8, at: [[4, (node) => node.port.postMessage({ type: 'config', config: enc.encode('(dry: true)'), gen: 2 })]] });
   const before = lrWindows(r.L.subarray(0, 4 * FS), r.R.subarray(0, 4 * FS), 1.5);
-  const d = Math.max(maxDiff(r.L, r.inL, Math.round(4.5 * FS)), maxDiff(r.R, r.inR, Math.round(4.5 * FS)));
-  check('中途切到原声', d < 1e-6 && Math.max(...before.map(Math.abs)) > 6, `切换前左右差最大 ${Math.max(...before.map(Math.abs)).toFixed(1)} dB；切换后与原声最大差 ${d.toExponential(2)}`);
+  const from = Math.round(4.5 * FS);
+  const lag = dryLag(r.L, r.inL, from);
+  const d = Math.max(maxDiff(r.L, r.inL, from, lag), maxDiff(r.R, r.inR, from, lag));
+  check('中途切到原声', d < 1e-6 && Math.max(...before.map(Math.abs)) > 6, `切换前左右差最大 ${Math.max(...before.map(Math.abs)).toFixed(1)} dB；切换后与原声（晚 ${lag} 个样本）最大差 ${d.toExponential(2)}`);
 }
 
 // 4. 配置读不懂：报 config-error，照常用默认参数处理

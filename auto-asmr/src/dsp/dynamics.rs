@@ -153,9 +153,14 @@ pub struct Limiter {
 }
 
 impl Limiter {
-    /// `look_ms`：前瞻时间；`release_ms`：恢复时间常数。
+    /// `look_ms`：前瞻时间；`release_ms`：恢复时间常数（48 kHz）。
     pub fn new(look_ms: f32, release_ms: f32) -> Self {
-        let look = ((look_ms / 1000.0 * FS) as usize).max(8);
+        Self::with_rate(look_ms, release_ms, FS)
+    }
+
+    /// 同 [`Limiter::new`]，用在采样率是 `rate` 的信号上。
+    pub fn with_rate(look_ms: f32, release_ms: f32, rate: f32) -> Self {
+        let look = ((look_ms / 1000.0 * rate) as usize).max(8);
         let delay = look - 1 + TP_LOOK;
         Limiter {
             look,
@@ -165,7 +170,7 @@ impl Limiter {
             hpos: 0,
             tp: SincTable::new(TP_TAPS, 4, 6.0, 1.0),
             held: 1.0,
-            rel: (-1.0 / (release_ms / 1000.0 * FS)).exp(),
+            rel: (-1.0 / (release_ms / 1000.0 * rate)).exp(),
             minq: VecDeque::with_capacity(look + 2),
             idx: 0,
             box_buf: vec![1.0; look],
@@ -179,6 +184,22 @@ impl Limiter {
     /// 限制器带来的延时（样本）。
     pub fn delay(&self) -> usize {
         self.look - 1 + TP_LOOK
+    }
+
+    /// 回到刚建好时的状态（清空延时线，不压限），不分配内存。
+    pub fn reset(&mut self) {
+        for v in self.dl.iter_mut().chain(self.hist.iter_mut()) {
+            v.fill(0.0);
+        }
+        self.dpos = 0;
+        self.hpos = 0;
+        self.held = 1.0;
+        self.minq.clear();
+        self.idx = 0;
+        self.box_buf.fill(1.0);
+        self.box_pos = 0;
+        self.box_sum = self.look as f64;
+        self.gr_db = 0.0;
     }
 
     #[inline]
@@ -233,6 +254,62 @@ impl Limiter {
         self.dl[1][self.dpos] = r;
         self.dpos = (self.dpos + 1) % n;
         (ol * g, or * g)
+    }
+}
+
+/// 监听原声时的输出级：原声不经过引擎（没有空间效果、自动响度、背景音），但仍乘「输出增益」、过峰值限制器
+/// （和效果那一路的收尾一样），所以切到原声时音量滑条照样起作用，调大了也不会削波。
+/// 增益变化在一次调用之内线性过渡，拖滑条没有咔哒声。限制器带来约 2 ms 的延时（[`DryOut::delay`]）。
+pub struct DryOut {
+    lim: Limiter,
+    /// 上一次用的线性增益；刚建好 / 刚复位时为 None（第一块直接用目标值，不从 0 淡入）。
+    g: Option<f32>,
+}
+
+impl DryOut {
+    /// `rate`：信号的采样率。
+    pub fn new(rate: f32) -> Self {
+        DryOut { lim: Limiter::with_rate(2.0, 80.0, rate), g: None }
+    }
+
+    /// 带来的延时（样本）。
+    pub fn delay(&self) -> usize {
+        self.lim.delay()
+    }
+
+    /// 从效果切回原声时调用：清掉上次留在限制器里的旧声音。
+    pub fn reset(&mut self) {
+        self.lim.reset();
+        self.g = None;
+    }
+
+    fn gains(&mut self, n: usize, gain_db: f32) -> (f32, f32) {
+        let target = db_to_lin(gain_db);
+        let g0 = self.g.unwrap_or(target);
+        self.g = Some(target);
+        (g0, if n > 0 { (target - g0) / n as f32 } else { 0.0 })
+    }
+
+    /// 原地处理左右两路（等长）。`gain_db`、`ceiling_db` 即参数里的输出增益、峰值上限。
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32], gain_db: f32, ceiling_db: f32) {
+        let n = l.len().min(r.len());
+        let (g0, step) = self.gains(n, gain_db);
+        let ceiling = db_to_lin(ceiling_db - 0.1);
+        for i in 0..n {
+            let g = g0 + step * (i + 1) as f32;
+            (l[i], r[i]) = self.lim.process(l[i] * g, r[i] * g, ceiling);
+        }
+    }
+
+    /// 同 [`DryOut::process`]，原地处理交错的立体声。
+    pub fn process_interleaved(&mut self, x: &mut [f32], gain_db: f32, ceiling_db: f32) {
+        let n = x.len() / 2;
+        let (g0, step) = self.gains(n, gain_db);
+        let ceiling = db_to_lin(ceiling_db - 0.1);
+        for i in 0..n {
+            let g = g0 + step * (i + 1) as f32;
+            (x[2 * i], x[2 * i + 1]) = self.lim.process(x[2 * i] * g, x[2 * i + 1] * g, ceiling);
+        }
     }
 }
 
@@ -295,5 +372,62 @@ mod tests {
         }
         assert!(tp.peak <= 0.89 * 1.02, "true peak {}", tp.peak);
         assert!(lim.max_gr_db > 6.0);
+    }
+
+    #[test]
+    fn dry_out_applies_gain_and_ceiling() {
+        let sine = |amp: f32, rate: f32, n: usize| -> Vec<f32> { (0..n).map(|i| amp * (i as f32 * std::f32::consts::TAU * 440.0 / rate).sin()).collect() };
+        let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+        for rate in [48_000.0f32, 44_100.0] {
+            let n = rate as usize;
+            // 0 dB、没超过峰值上限：原样通过，只晚 delay() 个样本
+            let x = sine(0.3, rate, n);
+            let mut d = DryOut::new(rate);
+            let (mut l, mut r) = (x.clone(), x.clone());
+            for (a, b) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
+                d.process(a, b, 0.0, -1.0);
+            }
+            let k = d.delay();
+            assert!(k > 0 && k < (0.003 * rate) as usize, "delay {k}");
+            assert!(l[k..].iter().zip(&x).all(|(a, b)| (a - b).abs() < 1e-6) && l == r);
+            // −12 dB：响度跟着降 12 dB
+            let mut y = x.iter().flat_map(|&v| [v, v]).collect::<Vec<f32>>();
+            for c in y.chunks_mut(512) {
+                d.process_interleaved(c, -12.0, -1.0);
+            }
+            let left: Vec<f32> = y.iter().step_by(2).copied().collect();
+            let db = 20.0 * (rms(&left[n / 2..]) / rms(&x[n / 2..])).log10();
+            assert!((db + 12.0).abs() < 0.1, "{db} dB");
+            // +12 dB 加在接近满幅的声音上：被限制器压住，真峰值不超过上限
+            let loud = sine(0.8, rate, n);
+            let (mut l, mut r) = (loud.clone(), loud.clone());
+            let mut tp = TruePeak::new();
+            for (a, b) in l.chunks_mut(300).zip(r.chunks_mut(300)) {
+                d.process(a, b, 12.0, -1.0);
+                for (&u, &v) in a.iter().zip(b.iter()) {
+                    tp.push(u, v);
+                }
+            }
+            assert!(tp.peak <= db_to_lin(-1.0) * 1.02, "true peak {}", tp.peak);
+            assert!(rms(&l[n / 2..]) > rms(&loud[n / 2..]) * 1.05, "调大了应该更响");
+            // 复位后不再放出上次留下的声音
+            d.reset();
+            let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+            d.process(&mut l, &mut r, 0.0, -1.0);
+            assert!(l.iter().chain(&r).all(|v| *v == 0.0));
+        }
+    }
+
+    #[test]
+    fn dry_out_gain_change_is_smooth() {
+        // 增益从 0 dB 跳到 −20 dB：一块之内线性过渡，相邻样本之间不会突然跳一下
+        let mut d = DryOut::new(FS);
+        let (mut l, mut r) = (vec![0.5f32; 6144], vec![0.5f32; 6144]);
+        d.process(&mut l[..2048], &mut r[..2048], 0.0, -1.0);
+        d.process(&mut l[2048..4096], &mut r[2048..4096], -20.0, -1.0);
+        d.process(&mut l[4096..], &mut r[4096..], -20.0, -1.0);
+        let jump = l.windows(2).skip(d.delay() + 1).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+        assert!(jump < 0.001, "最大跳变 {jump}");
+        assert!((l[6143] - 0.05).abs() < 1e-4, "{}", l[6143]);
     }
 }

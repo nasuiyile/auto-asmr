@@ -55,8 +55,6 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
     /** [0] 媒体一路，[1] 通话一路；没在拦截时为空。 */
     @Volatile private var lanes: List<Lane> = emptyList()
     @Volatile private var running = false
-    /** 监听原声：不经过引擎，原样放出（和安卓版一样是直接切换）。 */
-    @Volatile var dry = false
     /** 测延迟时打开（--onset）：每个声音的开头放出来时发一行 onset。 */
     @Volatile var reportOnsets = false
 
@@ -415,7 +413,8 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
                         quietRun = 0
                     }
                 }
-                if (proc != 0L && !dry) {
+                // 原声时也交给处理器：Rust 那边不进引擎，只乘输出增益、过峰值限制器
+                if (proc != 0L) {
                     val t0 = System.nanoTime()
                     Engine.procProcess(proc, buf, frames)
                     procNs += System.nanoTime() - t0

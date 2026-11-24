@@ -2,11 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- 后台播放：媒体播放类型的前台服务，通知栏控制 -->
+    <!-- 后台播放 + App 开着时的常驻通知：媒体播放类型的前台服务，通知栏控制 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <!-- 通知：App 不主动申请（Android 13 起没有这个权限时前台服务照常运行，只是通知栏里不显示）；
-         用户想要通知栏控制，可以在系统设置里给 auto-asmr 打开通知 -->
+    <!-- 通知：App 开着时通知栏里常驻 auto-asmr（启用 / 关闭效果）。第一次打开时问一次（Android 13 起要用户同意）；
+         拒绝了前台服务照常运行，只是通知栏里不显示，可以在系统设置里给 auto-asmr 打开通知 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 全局模式：连着服务进程时的前台服务（通知栏控制，root 方式下也让 App 进程不容易被清掉） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />

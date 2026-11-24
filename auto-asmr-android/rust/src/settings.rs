@@ -10,7 +10,7 @@
 //!   「文件转换」页的那个，实时页的 `rt_duo_ms` 不用——网页里是录好的声音，和文件试听一样），
 //!   界面按同样的字段名读写；打开时在这里算好两个声音的合成配置（[`Global::duo`]），处理器按版本号换上。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use auto_asmr::config::{self, ConfigError, Saved};
@@ -47,6 +47,8 @@ fn voice_params(p: &Params) -> Params {
 pub static GLOBAL: Mutex<Option<Global>> = Mutex::new(None);
 /// 配置的版本号：每换一次加一，音频线程据此决定要不要换配置。
 pub static CFG_VER: AtomicU64 = AtomicU64::new(1);
+/// 监听原声（配置里的 `dry`）：音频线程每次回调直接读它（[`crate::Processor`] 原声时不进引擎，只乘输出增益、过限制器）。
+pub static DRY: AtomicBool = AtomicBool::new(false);
 
 pub fn with_global<R>(f: impl FnOnce(&mut Global) -> R) -> R {
     let mut g = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -75,6 +77,7 @@ fn commit(g: &mut Global) {
     g.cfg = Arc::new(EngineConfig::new(g.saved.params.clone(), Some(&g.cfg)));
     g.cfg_voice = Arc::new(EngineConfig::new(voice_params(&g.saved.params), Some(&g.cfg_voice)));
     g.duo = duo_for(&g.saved, &g.cfg_voice, g.duo.as_deref());
+    DRY.store(g.saved.dry, Ordering::Relaxed);
     CFG_VER.fetch_add(1, Ordering::Release);
 }
 
@@ -126,6 +129,7 @@ pub fn update_doc(key: &str, v: Value) -> Result<(), String> {
 
 pub fn set_dry(dry: bool) {
     with_global(|g| g.saved.dry = dry);
+    DRY.store(dry, Ordering::Relaxed);
 }
 
 // ------------------------------------------------------------------ 配置文件
@@ -493,6 +497,7 @@ mod tests {
         assert!(back.params.breath_pause_switch);
         assert_eq!((back.params.puff, back.params.presence_db), (2.5, 5.0));
         assert!(load_config("not ron").is_err());
+        set_dry(false); // 别让后面的处理器测试跑在原声里
     }
 
     /// 别的 App 传来的文件：桌面版 / 安卓版导出的配置能认出来并给出概要；别的文件认不出来；检查不会改当前设置。

@@ -333,6 +333,11 @@ impl Mixer {
         self.engines.len()
     }
 
+    /// 收尾用的配置（第 0 个音源的：自动响度、目标响度、输出增益、峰值上限）。
+    pub fn config(&self) -> &Arc<EngineConfig> {
+        &self.cfg
+    }
+
     pub fn engine(&self, k: usize) -> &Engine {
         &self.engines[k]
     }

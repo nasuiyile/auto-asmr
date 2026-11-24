@@ -19,7 +19,7 @@ import java.util.Locale
  * - `hello` → 版本、身份、系统版本、机型
  * - `start [only=UID,UID]` / `stop` → `ok` 或 `error …`
  * - `params <base64 的 RON>`：换参数（App 改了参数就推过来，和配置文件里 params 那一段同一格式）
- * - `dry 0|1`：监听原声（不经过引擎）/ 输出效果
+ * - `dry 0|1`：监听原声（不经过引擎，只乘输出增益、过峰值限制器）/ 输出效果
  * - `config <base64 的 .ron>`：导入整份配置（调试用；App 用 params + dry）
  * - `style 0..3`、`action <名字>`：调试用，直接改服务进程里的参数
  * - `poll` → JSON：是否在拦截、原声、雨声、位置等状态（和安卓版 telemetry() 同一排列）、统计、日志序号
@@ -160,7 +160,6 @@ internal object EngineCore {
 
     private fun setDry(value: Boolean) {
         dry = value
-        router.dry = value
         Engine.setDry(value)
         syncRain()
     }

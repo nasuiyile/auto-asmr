@@ -5,6 +5,7 @@
 //! （参数、合成配置、跳转、播放位置、位置读数……都是原子量或短锁，音频线程从不阻塞）。
 //! 桌面版（`src/realtime.rs`，cpal）和安卓版（文件转换页的试听，AAudio）各自打开输出设备，处理是同一份代码。
 
+use crate::dsp::dynamics::DryOut;
 use crate::dsp::engine::{Engine, EngineConfig, Telemetry};
 use crate::dsp::mix::{self, MixSetup, Mixer, MAX_VOICES};
 use crate::dsp::resample::Resampler;
@@ -212,6 +213,9 @@ pub struct Pump {
     /// 主播模式的左右双人：麦克风输入的历史（环形，[`HIST`] 个样本）和已经写进去多少个样本。其余情况为空。
     hist: Vec<f32>,
     hist_pos: usize,
+    /// 监听原声时的输出级（输出增益 + 峰值限制器），以及上一块是不是原声（刚切到原声时清掉它的旧状态）。
+    dry_out: DryOut,
+    was_dry: bool,
 }
 
 pub const N: usize = 64;
@@ -272,6 +276,8 @@ impl Pump {
             dl_fade: 0,
             hist: if mic_mix { vec![0.0; HIST] } else { Vec::new() },
             hist_pos: 0,
+            dry_out: DryOut::new(FS),
+            was_dry: false,
         }
     }
 
@@ -452,6 +458,20 @@ impl Pump {
                     }
                 }
             }
+            if dry {
+                // 原声也乘输出增益、过峰值限制器（同效果那一路的收尾），音量滑条照样起作用
+                let p = &match &self.proc {
+                    Proc::One(e) => e.config(),
+                    Proc::Mix(m) => m.config(),
+                }
+                .params;
+                let (gain, ceiling) = (p.out_gain_db, p.ceiling_db);
+                if !self.was_dry {
+                    self.dry_out.reset();
+                }
+                self.dry_out.process(&mut self.el[..N], &mut self.er[..N], gain, ceiling);
+            }
+            self.was_dry = dry;
             if self.qpos > 0 && self.qpos == self.q[0].len() {
                 self.q[0].clear();
                 self.q[1].clear();
@@ -605,6 +625,42 @@ mod tests {
         assert!(after < before * 0.02, "gain did not change: {before} -> {after}");
         assert!(shared.play_pos.load(Ordering::Relaxed) > position);
         assert!(!shared.preview_finished());
+    }
+
+    #[test]
+    fn dry_monitor_follows_output_gain() {
+        // 监听原声时输出增益照样起作用：−12 dB 后响度降 12 dB，+12 dB 加在满幅附近的声音上不削波
+        let audio: Vec<f32> = (0..FS_USIZE * 4).map(|n| 0.5 * (n as f32 * std::f32::consts::TAU * 440.0 / FS).sin()).collect();
+        let (mut pump, shared) = preview_pump(audio, 48_000.0, true);
+        let (mut l, mut r) = ([0.0; 1024], [0.0; 1024]);
+        let mut energy = |pump: &mut Pump| {
+            let mut e = 0.0f32;
+            let mut pk = 0.0f32;
+            for _ in 0..20 {
+                pump.fill(&mut l, &mut r);
+                e += l.iter().chain(&r).map(|x| x * x).sum::<f32>();
+                pk = l.iter().chain(&r).fold(pk, |m, x| m.max(x.abs()));
+                assert_eq!(l, r);
+            }
+            (e, pk)
+        };
+        energy(&mut pump);
+        let (before, pk0) = energy(&mut pump);
+        assert!((pk0 - 0.5).abs() < 0.01, "0 dB 时原样：峰值 {pk0}");
+        let set_gain = |db: f32| {
+            let cfg = shared.cfg.lock().unwrap().clone();
+            let params = Params { out_gain_db: db, ..cfg.params.clone() };
+            shared.set_config(Arc::new(EngineConfig::new(params, Some(&cfg))));
+        };
+        set_gain(-12.0);
+        energy(&mut pump);
+        let (after, _) = energy(&mut pump);
+        let db = 10.0 * (after / before).log10();
+        assert!((db + 12.0).abs() < 0.2, "原声的输出增益没起作用：{db:.2} dB");
+        set_gain(12.0);
+        energy(&mut pump);
+        let (_, pk) = energy(&mut pump);
+        assert!(pk <= 0.9 && pk > 0.85, "调大后应被峰值上限（−1 dB）压住：峰值 {pk}");
     }
 
     #[test]

@@ -382,6 +382,56 @@ pub fn update_ytdlp(ytdlp: PathBuf) -> Task {
     })
 }
 
+/// 下载目录的概况：可以清理的文件（下载的音频、没下完的临时文件）有几个、多大，以及保留的转换结果有几个。
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct DirStats {
+    pub files: usize,
+    pub bytes: u64,
+    /// 本程序转换出来的 `_asmr` 文件（转换默认输出到源文件旁边，也就是这里），清理时保留。
+    pub kept: usize,
+}
+
+/// 文件夹里（不含子文件夹）可以清理的文件：除本程序的转换结果（`_asmr`、`_mix_asmr`……）以外的所有文件。
+fn cleanable(dir: &Path) -> (Vec<(PathBuf, u64)>, usize) {
+    let mut v = Vec::new();
+    let mut kept = 0;
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let Ok(m) = e.metadata() else { continue };
+        if !m.is_file() {
+            continue;
+        }
+        if crate::batch::is_own_output(&p) {
+            kept += 1;
+        } else {
+            v.push((p, m.len()));
+        }
+    }
+    v.sort();
+    (v, kept)
+}
+
+pub fn dir_stats(dir: &Path) -> DirStats {
+    let (v, kept) = cleanable(dir);
+    DirStats { files: v.len(), bytes: v.iter().map(|x| x.1).sum(), kept }
+}
+
+/// 清理下载目录：删掉可以清理的文件（见 [`cleanable`]），转换结果和子文件夹不动。
+/// 返回删掉的文件、释放的字节数和删不掉的原因（比如文件正被别的程序打开）。
+pub fn clean_dir(dir: &Path) -> (Vec<PathBuf>, u64, Vec<String>) {
+    let (mut removed, mut bytes, mut errs) = (Vec::new(), 0, Vec::new());
+    for (p, n) in cleanable(dir).0 {
+        match std::fs::remove_file(&p) {
+            Ok(()) => {
+                bytes += n;
+                removed.push(p);
+            }
+            Err(e) => errs.push(format!("{}：{e}", p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default())),
+        }
+    }
+    (removed, bytes, errs)
+}
+
 /// 用系统的文件管理器打开一个文件夹（没有就先建）。
 pub fn open_folder(p: &Path) {
     let _ = std::fs::create_dir_all(p);
@@ -829,6 +879,30 @@ mod tests {
         assert_eq!(find_in(&[a.clone(), b]), Some(a.join(exe_name())));
         let _ = std::fs::remove_dir_all(&base);
         assert!(release_asset().is_some(), "发布用的平台都该有现成的 yt-dlp");
+    }
+
+    #[test]
+    fn cleaning_keeps_converted_files() {
+        let dir = std::env::temp_dir().join(format!("auto-asmr-clean-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        // 下载的音频、没下完的临时文件：清理
+        std::fs::write(dir.join("标题 [BV17x411w7KC_p1].m4a"), vec![0u8; 1000]).unwrap();
+        std::fs::write(dir.join("标题 [BV17x411w7KC_p2].m4a.part"), vec![0u8; 24]).unwrap();
+        // 转换结果（单个、合成、重名加编号）、子文件夹里的：保留
+        for f in ["标题 [BV17x411w7KC_p1]_asmr.wav", "标题 [BV17x411w7KC_p1]_mix_asmr.wav", "标题 [BV17x411w7KC_p1]_asmr_2.wav", "sub/x.m4a"] {
+            std::fs::write(dir.join(f), b"keep").unwrap();
+        }
+        assert_eq!(dir_stats(&dir), DirStats { files: 2, bytes: 1024, kept: 3 });
+        let (removed, bytes, errs) = clean_dir(&dir);
+        assert_eq!((removed.len(), bytes), (2, 1024));
+        assert!(errs.is_empty() && removed.iter().all(|p| !p.exists()));
+        assert_eq!(dir_stats(&dir), DirStats { files: 0, bytes: 0, kept: 3 });
+        assert!(dir.join("sub/x.m4a").exists());
+        // 文件夹不存在：什么都不做
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(dir_stats(&dir), DirStats::default());
+        assert!(clean_dir(&dir).0.is_empty());
     }
 
     #[test]

@@ -262,6 +262,10 @@ pub struct App {
     dl_ready: Vec<PathBuf>,
     /// 最近几次下载的结果：(是否出错, 说明)，新的在后面。
     dl_notes: Vec<(bool, String)>,
+    /// 下载目录的概况（几个文件、多大），每 2 秒重读一次；None = 下一帧重读。
+    dl_stats: Option<(std::time::Instant, download::DirStats)>,
+    /// 点了「清理下载目录」，正在等确认。
+    dl_confirm_clean: bool,
 }
 
 /// 正在下载的是什么。
@@ -442,6 +446,8 @@ impl App {
             dl_run: None,
             dl_ready: Vec::new(),
             dl_notes: Vec::new(),
+            dl_stats: None,
+            dl_confirm_clean: false,
         };
         if is_shot {
             // AUTO_ASMR_SHOT_MIX=1：打开多音频合成（配合 AUTO_ASMR_SHOT_FILES 预先放进的文件）；AUTO_ASMR_SHOT_EN=1：英文界面
@@ -505,6 +511,12 @@ impl App {
             if let Ok(v) = std::env::var("AUTO_ASMR_SHOT_FETCH") {
                 app.dl_input = v;
                 app.dl_submit();
+            }
+            // AUTO_ASMR_SHOT_CLEAN=ask：显示清理下载目录的确认；=1：直接清理（运行目录的 bilibili 文件夹）
+            match std::env::var("AUTO_ASMR_SHOT_CLEAN").as_deref() {
+                Ok("ask") => app.dl_confirm_clean = true,
+                Ok(_) => app.dl_clean(),
+                Err(_) => {}
             }
             if let Ok(d) = std::env::var("AUTO_ASMR_SHOT_CONVERT") {
                 app.s.out_dir = Some(PathBuf::from(d));
@@ -1305,7 +1317,12 @@ impl App {
             // 可能是程序开着时刚装好的
             self.ytdlp = download::find_ytdlp();
         }
-        self.dl_next();
+        if self.ytdlp.is_none() {
+            // 本机没有 yt-dlp：先自动下载它，装好后 poll_downloads 接着下载排队的链接
+            self.dl_install();
+        } else {
+            self.dl_next();
+        }
     }
 
     /// 没有正在进行的下载时，开始下载队列里的下一个链接（没有 yt-dlp 时等它装好）。
@@ -1343,6 +1360,69 @@ impl App {
             r.task.cancel();
         }
         self.dl_queue.clear();
+    }
+
+    /// 下载目录的概况，每 2 秒重读一次（文件可能在程序外面被删掉或者加进来）。
+    fn dl_dir_stats(&mut self) -> download::DirStats {
+        match self.dl_stats {
+            Some((t0, st)) if t0.elapsed().as_secs_f32() < 2.0 => st,
+            _ => {
+                let st = download::dir_stats(&download::download_dir());
+                self.dl_stats = Some((std::time::Instant::now(), st));
+                st
+            }
+        }
+    }
+
+    /// 现在能不能清理下载目录：正在下载音频（yt-dlp 在写文件）、正在转换（可能在读这些文件）时不行。
+    fn dl_can_clean(&self) -> bool {
+        self.job.is_none() && self.dl_ready.is_empty() && !matches!(self.dl_run, Some(DlRun { kind: DlKind::Audio(_), .. }))
+    }
+
+    /// 清理下载目录：删掉下载的音频和没下完的临时文件（转换出来的 `_asmr` 文件保留），
+    /// 列表里被删掉的文件一起移除。
+    fn dl_clean(&mut self) {
+        self.dl_confirm_clean = false;
+        if !self.dl_can_clean() {
+            return;
+        }
+        let dir = download::download_dir();
+        let (removed, bytes, errs) = download::clean_dir(&dir);
+        self.dl_stats = None;
+        // 列表里在下载目录、已经删掉的文件（按真实路径比较，免得同一个文件夹写法不同对不上）
+        let canon_dir = dir.canonicalize().ok();
+        let gone: Vec<PathBuf> = self.files.iter().filter(|p| !p.exists() && canon_dir.is_some() && p.parent().and_then(|d| d.canonicalize().ok()) == canon_dir).cloned().collect();
+        if !gone.is_empty() {
+            // 先停下试听、放下选中的文件，免得一个个移除时又去选中、解码别的被删掉的文件
+            self.stop();
+            if self.file_in.as_ref().map_or(false, |f| gone.contains(f)) {
+                self.file_in = None;
+                self.file_out = None;
+                self.decoded = None;
+                self.decoded_r = None;
+                self.decoding = None;
+                self.preview_pending = false;
+            }
+            for p in &gone {
+                if let Some(i) = self.files.iter().position(|q| q == p) {
+                    self.remove_file(i);
+                }
+            }
+            if self.file_in.is_none() {
+                if let Some(q) = self.files.first().cloned() {
+                    self.set_file(q);
+                }
+            }
+        }
+        let mut note = format!("{}{}{}{}", t("已清理下载目录：删掉 ", "Download folder cleaned: removed "), removed.len(), t(" 个文件，", " file(s), "), size_text(bytes));
+        if !gone.is_empty() {
+            note.push_str(&format!("{}{}{}", t("，从列表里移除了 ", ", "), gone.len(), t(" 个", " taken off the list")));
+        }
+        let err = !errs.is_empty();
+        if err {
+            note.push_str(&format!("\n{}{}", t("有的删不掉（可能正被别的程序打开）：", "Some could not be removed (open in another program?): "), errs.join("；")));
+        }
+        self.dl_note(err, note);
     }
 
     /// 每帧：收下载任务的消息；下好的文件加进列表（正在转换时列表不能改，等转换完再加）。
@@ -1388,6 +1468,7 @@ impl App {
     /// 一个下载结束：写说明；装好 yt-dlp 后记下它的位置。
     fn dl_finish(&mut self, run: DlRun, r: Result<String, String>) {
         let cancelled = run.task.cancelled();
+        self.dl_stats = None;
         let (err, note) = match (run.kind, r) {
             (_, Err(_)) if cancelled => (false, t("已取消", "Cancelled").to_string()),
             (DlKind::Audio(_), Ok(_)) => (false, format!("{}：{}", t("已下载并加进列表", "Downloaded and added"), run.files.join(" · "))),
@@ -1867,10 +1948,6 @@ impl App {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("⋯", |ui| {
-                    if ui.button(t("打开下载文件夹", "Open download folder")).on_hover_text(dir.display().to_string()).clicked() {
-                        download::open_folder(&dir);
-                        ui.close();
-                    }
                     let can_update = self.dl_run.is_none() && self.ytdlp.is_some();
                     if ui
                         .add_enabled(can_update, egui::Button::new(t("更新 yt-dlp", "Update yt-dlp")))
@@ -1907,6 +1984,7 @@ impl App {
                 }
             });
         });
+        self.ui_download_dir(ui, &dir);
         if let Some(run) = &self.dl_run {
             let f = run.progress.frac;
             let text = match &run.kind {
@@ -1926,7 +2004,13 @@ impl App {
                     }
                     s
                 }
-                DlKind::Install => format!("{} {:.0}%（{:.1} MB）", t("正在下载 yt-dlp", "Downloading yt-dlp"), f.unwrap_or(0.0) * 100.0, run.progress.bytes as f64 / 1e6),
+                DlKind::Install => {
+                    let mut s = format!("{} {:.0}%（{:.1} MB）", t("正在下载 yt-dlp", "Downloading yt-dlp"), f.unwrap_or(0.0) * 100.0, run.progress.bytes as f64 / 1e6);
+                    if !self.dl_queue.is_empty() {
+                        s.push_str(&format!("{}{}{}", t("，好了之后接着下载你贴的 ", ", then the "), self.dl_queue.len(), t(" 个链接", " link(s) you pasted")));
+                    }
+                    s
+                }
                 DlKind::Update => t("正在更新 yt-dlp…", "Updating yt-dlp…").to_string(),
             };
             let mut cancel = false;
@@ -1940,7 +2024,12 @@ impl App {
             }
         } else if self.ytdlp.is_none() {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(t("按链接下载要用 yt-dlp（免费的开源下载工具），本机没找到。", "Downloading by link needs yt-dlp (a free open-source downloader), which was not found.")).small());
+                ui.label(RichText::new(format!(
+                    "{}{}{}",
+                    t("按链接下载要用 yt-dlp（免费的开源下载工具），本机没找到。贴链接回车后会先自动下载它（约 ", "Downloading by link needs yt-dlp (a free open-source downloader), which was not found. Paste a link and press Enter to download it first (about "),
+                    download::release_size_mb(),
+                    t(" MB），再接着下载你的链接；也可以现在就下：", " MB), then your link; or get it now:")
+                )).small());
                 let tip = format!(
                     "{}{}{}\n{}\n{}",
                     t("从 yt-dlp 在 GitHub 的官方发布页下载本系统的单文件版（约 ", "Downloads the single-file build for this system from yt-dlp's official GitHub releases (about "),
@@ -1964,6 +2053,63 @@ impl App {
         }
         if !self.dl_ready.is_empty() && self.job.is_some() {
             ui.label(RichText::new(format!("{}{}{}", t("下好的 ", ""), self.dl_ready.len(), t(" 个文件等转换结束后加进列表", " downloaded file(s) will be added when the conversion finishes"))).small().weak());
+        }
+    }
+
+    /// 下载目录那一行：里面有几个下载的文件、多大，「打开下载目录」「清理下载目录」，以及清理前的确认。
+    fn ui_download_dir(&mut self, ui: &mut egui::Ui, dir: &Path) {
+        let st = self.dl_dir_stats();
+        let can_clean = self.dl_can_clean() && st.files > 0;
+        if !can_clean {
+            self.dl_confirm_clean = false;
+        }
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let clean_tip = t(
+                    "删掉下载目录里下载的音频和没下完的临时文件（点了之后还要再确认一次）；转换出来的 _asmr 文件保留，子文件夹不动。列表里被删掉的文件会一起移除",
+                    "Deletes the downloaded audio and unfinished temporary files in the download folder (asks once more first); converted _asmr files and subfolders are kept. Deleted files are taken off the list",
+                );
+                if ui.add_enabled(can_clean, egui::Button::new(t("清理下载目录", "Clean up")).small()).on_hover_text(clean_tip).on_disabled_hover_text(t("下载目录里没有可以清理的文件，或者正在下载 / 转换", "Nothing to clean up, or downloading / converting")).clicked() {
+                    self.dl_confirm_clean = true;
+                }
+                if ui.add(egui::Button::new(t("打开下载目录", "Open folder")).small()).on_hover_text(dir.display().to_string()).clicked() {
+                    download::open_folder(dir);
+                }
+                let mut text = if st.files == 0 {
+                    t("下载目录：没有下载的音频", "Download folder: empty").to_string()
+                } else {
+                    format!("{}{}{}{}", t("下载目录：", "Download folder: "), st.files, t(" 个文件 · ", " file(s) · "), size_text(st.bytes))
+                };
+                if st.kept > 0 {
+                    text.push_str(&format!("{}{}{}", t("（另有 ", " (+"), st.kept, t(" 个转换结果）", " converted)")));
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).small().weak()).truncate()).on_hover_text(dir.display().to_string());
+                });
+            });
+        });
+        if self.dl_confirm_clean {
+            let warn = ui.visuals().warn_fg_color;
+            let mut msg = format!(
+                "{}{}{}{}{}",
+                t("删除下载目录里的 ", "Delete the "),
+                st.files,
+                t(" 个文件（", " file(s) ("),
+                size_text(st.bytes),
+                t("）？不进回收站，不能恢复", ") in the download folder? They skip the recycle bin and cannot be restored")
+            );
+            if st.kept > 0 {
+                msg.push_str(t("；转换出来的 _asmr 文件保留", "; converted _asmr files are kept"));
+            }
+            ui.add(egui::Label::new(RichText::new(msg).small().color(warn)).wrap());
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new(t("删除", "Delete")).color(warn)).small()).clicked() {
+                    self.dl_clean();
+                }
+                if ui.add(egui::Button::new(t("取消", "Cancel")).small()).clicked() {
+                    self.dl_confirm_clean = false;
+                }
+            });
         }
     }
 
@@ -3362,6 +3508,18 @@ fn duo_slider(v: &mut f32) -> egui::Slider<'_> {
         .fixed_decimals(0)
         .custom_formatter(|x, _| if x < 0.5 { t("0 关", "0 off").to_string() } else { format!("{x:.0} ms") })
         .custom_parser(|s| s.trim().split(|c: char| !(c.is_ascii_digit() || c == '.')).find(|w| !w.is_empty()).and_then(|w| w.parse::<f64>().ok()))
+}
+
+/// 文件大小 → "12.4 MB" / "850 KB"。
+fn size_text(bytes: u64) -> String {
+    let b = bytes as f64;
+    if b >= 1e9 {
+        format!("{:.2} GB", b / 1e9)
+    } else if b >= 1e6 {
+        format!("{:.1} MB", b / 1e6)
+    } else {
+        format!("{:.0} KB", (b / 1e3).ceil())
+    }
 }
 
 /// 下载速度（字节 / 秒）→ "1.2 MB/s" / "350 KB/s"。

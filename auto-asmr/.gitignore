@@ -1,2 +1,7 @@
 /target
 /auto-asmr.ron
+# 按链接下载：下到运行目录的音频、自动下载的 yt-dlp
+/bilibili/
+/yt-dlp
+/yt-dlp.exe
+/yt-dlp*.download

@@ -16,7 +16,7 @@
 //! 文件转换是两遍精确归一化（与转换单个文件相同），试听是自动响度 + 限制器（与单个文件的实时引擎相同）。
 
 use super::balance::{BalanceData, Balancer, LiveLevels};
-use super::dynamics::{Leveler, Limiter, LoudnessMeter};
+use super::dynamics::{KWeight, Leveler, Limiter, LoudnessMeter};
 use super::engine::{sync_rain, Engine, EngineConfig, PostMode, Telemetry};
 use super::rain::Rain;
 use super::filters::ema_coef;
@@ -155,6 +155,8 @@ pub fn voice_params(base: &Params, v: &Voice, k: usize) -> Params {
     p.static_az = v.az.rem_euclid(360.0);
     p.ear_dist = v.distance(base.ear_dist);
     p.seed = base.seed.wrapping_add(7919 * k as u64);
+    // 合成里每个声音是一个声源（立体声的音频已经混成单声道）：音色校正按它自己的这个位置算
+    p.stereo_width = 0.0;
     p
 }
 
@@ -175,6 +177,8 @@ pub struct MixSetup {
     /// 各音源比时间线晚多少个样本（左右双人：[0, 延迟]；多音频合成全是 0）。延迟由读输入的一方加
     /// （文件转换截取各段时、试听读音频时），混音器只用它让自动平衡取对位置。
     pub delays: Vec<usize>,
+    /// 立体声对（见 [`pair_setup`]）：两个音源是同一个立体声输入的左右声道，走位、远近完全一致，不做响度对齐和自动平衡。
+    pub pair: bool,
 }
 
 impl MixSetup {
@@ -184,7 +188,7 @@ impl MixSetup {
         let n = voices.len();
         // 一起移动：每个音源都直接用总配置（同一个移动方式、同一个随机种子）
         let cfgs = if follow { vec![base.clone(); n] } else { voice_configs(base, voices, prev) };
-        MixSetup { cfgs, gains: balance_gains(lufs, voices), offsets: follow_offsets(n, follow), follow, balance: None, balance_strength: 0.0, delays: vec![0; n] }
+        MixSetup { cfgs, gains: balance_gains(lufs, voices), offsets: follow_offsets(n, follow), follow, balance: None, balance_strength: 0.0, delays: vec![0; n], pair: false }
     }
 
     /// 设各音源的延迟（样本；少给的按 0）。
@@ -201,6 +205,19 @@ impl MixSetup {
         self.balance_strength = strength;
         self
     }
+}
+
+/// 立体声对各声源的方位角偏移：左声道往左（逆时针）偏一半，右声道往右偏一半。
+pub fn pair_offsets(width: f32) -> [f32; 2] {
+    let w = width.clamp(0.0, 360.0);
+    [-0.5 * w, 0.5 * w]
+}
+
+/// 立体声对：一个立体声输入的左右声道各当一个声源（`base` 里的「立体声宽度」是两个声源张开的角度），都按 `base` 的
+/// 移动方式走——同一个随机种子、同一份语音分析，所以是一个整体：固定时就是面前的一对音箱，环绕时整个舞台绕着头转。
+/// 两个声源的增益都是 1（左右声道原来的比例不变）。
+pub fn pair_setup(base: &Arc<EngineConfig>) -> MixSetup {
+    MixSetup { cfgs: vec![base.clone(); 2], gains: vec![1.0; 2], offsets: pair_offsets(base.params.stereo_width).to_vec(), follow: true, balance: None, balance_strength: 0.0, delays: vec![0; 2], pair: true }
 }
 
 /// 各音源的方位角偏移：一起移动时均匀分布在一圈上（两个时相隔 180°，正好相对）；各自固定时全是 0。
@@ -282,8 +299,14 @@ pub struct Mixer {
     /// 背景音（实时模式才有，相加之后加一份；文件模式在第二遍里加）。
     rain: Option<Rain>,
     rain_buf: [Vec<f32>; 2],
-    /// 给界面显示的合成状态：输入取各音源中最大的，输出、限幅、自动响度是相加之后的；位置是第 0 个音源的。
+    /// 给界面显示的合成状态：输入取各音源中最大的，输出、限幅、自动响度是相加之后的；位置是第 0 个音源的
+    /// （立体声对：两个声源的正中间）。
     pub tele: Telemetry,
+    /// 立体声对（构造时定的）。
+    pair: bool,
+    /// "和原声一样响"：各音源输入的 K 加权，和这一块每个样本的输入功率。
+    kin: [KWeight; MAX_VOICES],
+    pin: Vec<f32>,
 }
 
 impl Mixer {
@@ -294,8 +317,11 @@ impl Mixer {
         let n = setup.cfgs.len();
         let gains: Vec<f32> = (0..n).map(|k| setup.gains.get(k).copied().unwrap_or(1.0)).collect();
         let mut engines: Vec<Engine> = setup.cfgs.iter().map(|c| Engine::new(c.clone(), PostMode::Offline, lookahead_s)).collect();
+        let pair = setup.pair && n == 2;
         for (e, &o) in engines.iter_mut().zip(&setup.offsets) {
             e.az_offset = o;
+            // 音色校正：立体声对用"一对"的那一组；一起移动时各音源错开了位置，配置里按没错开算的那一组对不上，不校正
+            e.set_tone_sel(if pair { Some(1) } else if setup.follow && n > 1 { None } else { Some(0) });
         }
         Mixer {
             engines,
@@ -318,6 +344,9 @@ impl Mixer {
             rain: None,
             rain_buf: [Vec::new(), Vec::new()],
             tele: Telemetry::default(),
+            pair,
+            kin: [KWeight::new(); MAX_VOICES],
+            pin: vec![0.0; SCRATCH],
         }
         .with_rain()
     }
@@ -325,8 +354,42 @@ impl Mixer {
     fn with_rain(mut self) -> Self {
         if self.post == PostMode::Realtime {
             sync_rain(&mut self.rain, &self.cfg);
+            if self.cfg.params.match_on() {
+                self.leveler.seed_start(-self.level_gain_db());
+            }
         }
         self
+    }
+
+    /// 是不是立体声对（构造时定的）。
+    pub fn is_pair(&self) -> bool {
+        self.pair
+    }
+
+    /// 估计的响度变化（dB）：相加之后的输出比输入响多少（各引擎按自己的位置估计，见 [`Engine::level_gain_db`]）。
+    /// 输入的响度按 [`Mixer::block`] 里量的那样算：立体声对是左右声道的功率之和；几个音源是各自功率（乘上增益）之和，
+    /// 每个音源的输出是它的 2 倍 × 引擎的估计值；一个音源时按"放进两个声道"算。
+    pub fn level_gain_db(&self) -> f32 {
+        let n = self.engines.len();
+        if self.pair || n == 1 {
+            return self.engines[0].level_gain_db();
+        }
+        let (mut num, mut den) = (0f32, 0f32);
+        for (e, &g) in self.engines.iter().zip(&self.target) {
+            num += g * g * db_to_lin(e.level_gain_db()).powi(2);
+            den += g * g;
+        }
+        3.01 + 10.0 * (num / den.max(1e-20)).max(1e-20).log10()
+    }
+
+    /// 自动响度此刻的增益（dB）。
+    pub fn leveler_gain_db(&self) -> f32 {
+        self.leveler.gain_db
+    }
+
+    /// 换成另一个增益（单个引擎和立体声对之间切换时把音量接上）。
+    pub fn set_leveler_gain_db(&mut self, db: f32) {
+        self.leveler.seed(db);
     }
 
     pub fn voices(&self) -> usize {
@@ -371,6 +434,7 @@ impl Mixer {
     /// 换配置（在各引擎的控制块边界生效）：参数、位置、音量。不分配内存，可以在音频线程里调用；
     /// 音源数、排布方式和方位偏移以构造时为准（`setup` 里的这几项不看）。
     pub fn set_setup(&mut self, setup: &MixSetup) {
+        let (was, old_gain) = (self.cfg.params.match_on(), self.level_gain_db());
         for (e, c) in self.engines.iter_mut().zip(&setup.cfgs) {
             e.set_config(c.clone());
         }
@@ -380,12 +444,43 @@ impl Mixer {
         if let Some(c) = setup.cfgs.first() {
             self.cfg = c.clone();
         }
-        if self.post == PostMode::Realtime {
-            sync_rain(&mut self.rain, &self.cfg);
+        if self.pair {
+            // 立体声宽度变了：两个声源跟着张开 / 收拢
+            for (e, o) in self.engines.iter_mut().zip(pair_offsets(self.cfg.params.stereo_width)) {
+                e.az_offset = o;
+            }
         }
+        self.after_config(was, old_gain);
         self.bal_data = setup.balance.clone();
         self.bal_strength = setup.balance_strength;
         self.delays = delay_array(&setup.delays);
+    }
+
+    /// 立体声对换配置：两个引擎都换成 `cfg`，张开的角度跟着「立体声宽度」。不分配内存，可以在音频线程里调用。
+    pub fn set_pair_config(&mut self, cfg: &Arc<EngineConfig>) {
+        debug_assert!(self.pair);
+        let (was, old_gain) = (self.cfg.params.match_on(), self.level_gain_db());
+        for (e, o) in self.engines.iter_mut().zip(pair_offsets(cfg.params.stereo_width)) {
+            e.set_config(cfg.clone());
+            e.az_offset = o;
+        }
+        self.cfg = cfg.clone();
+        self.after_config(was, old_gain);
+    }
+
+    /// 换完配置之后：背景音跟上；"和原声一样响"刚打开时从估计的增益起步，已经开着时位置 / 房间变了带来的响度变化马上跟上。
+    fn after_config(&mut self, was_match: bool, old_gain: f32) {
+        if self.post != PostMode::Realtime {
+            return;
+        }
+        sync_rain(&mut self.rain, &self.cfg);
+        if self.cfg.params.match_on() {
+            if was_match {
+                self.leveler.bump(old_gain - self.level_gain_db());
+            } else {
+                self.leveler.seed_start(-self.level_gain_db());
+            }
+        }
     }
 
     /// 各音源现在的延迟（样本）：试听读输入时按它取（变了就淡过去）。
@@ -440,8 +535,14 @@ impl Mixer {
             while i < m {
                 if self.phase == 0 {
                     let act = self.engines.iter().map(|e| e.upcoming_act()).fold(0.0f32, f32::max);
+                    // 立体声对：说话活动、音量也共用一份（取两个声道里大的），两个声源的走位、远近完全一致
+                    let shared = self.pair.then(|| {
+                        let (a, b) = (self.engines[0].upcoming_feats(), self.engines[1].upcoming_feats());
+                        super::analysis::Features { act, loud_db: a.loud_db.max(b.loud_db), follow_db: a.follow_db.max(b.follow_db) }
+                    });
                     for e in self.engines.iter_mut() {
                         e.clock_act = Some(act);
+                        e.feats_ov = shared;
                     }
                 }
                 let step = (m - i).min(CTRL - self.phase);
@@ -506,6 +607,19 @@ impl Mixer {
             let p = &self.cfg.params;
             let gain = db_to_lin(p.out_gain_db);
             let ceiling = db_to_lin(p.ceiling_db - 0.1);
+            // "和原声一样响"：输入的响度 = 各音源（乘上各自的增益）K 加权之后的功率之和；只有一个音源时按"放进两个声道"算
+            let match_on = p.match_on();
+            if match_on {
+                let n = self.engines.len();
+                self.pin[..m].fill(0.0);
+                for k in 0..n {
+                    let (g, x, kw) = (self.target[k] * if n == 1 { std::f32::consts::SQRT_2 } else { 1.0 }, input(k), &mut self.kin[k]);
+                    for (acc, &v) in self.pin[..m].iter_mut().zip(x) {
+                        let y = g * kw.process(v);
+                        *acc += y * y;
+                    }
+                }
+            }
             // 背景音：相加之后加一份，和单个音源的引擎一样在自动响度之后、限制器之前
             let rain_on = match &mut self.rain {
                 Some(rain) => {
@@ -522,7 +636,13 @@ impl Mixer {
             };
             for i in 0..m {
                 let (l, r) = (out_l[i], out_r[i]);
-                let lg = if p.auto_level { self.leveler.process(l, r, speaking, p.target_lufs) } else { 1.0 };
+                let lg = if match_on {
+                    self.leveler.process_match(l, r, self.pin[i], speaking, p.target_lufs)
+                } else if p.auto_level {
+                    self.leveler.process(l, r, speaking, p.target_lufs)
+                } else {
+                    1.0
+                };
                 let (a, b) = if rain_on {
                     self.limiter.process((l * lg + self.rain_buf[0][i]) * gain, (r * lg + self.rain_buf[1][i]) * gain, ceiling)
                 } else {
@@ -542,6 +662,14 @@ impl Mixer {
 
     fn update_tele(&mut self) {
         let mut t = self.engines[0].tele;
+        if self.pair {
+            // 位置报两个声源的正中间；走位的次数两个引擎一样，只报一份
+            t.az = (t.az - self.engines[0].az_offset).rem_euclid(360.0);
+            t.act = t.act.max(self.engines[1].tele.act);
+            t.in_db = t.in_db.max(self.engines[1].tele.in_db);
+            self.finish_tele(t);
+            return;
+        }
         for e in &self.engines[1..] {
             let u = &e.tele;
             t.act = t.act.max(u.act);
@@ -552,6 +680,10 @@ impl Mixer {
             t.n_updowns += u.n_updowns;
             t.n_strokes += u.n_strokes;
         }
+        self.finish_tele(t);
+    }
+
+    fn finish_tele(&mut self, mut t: Telemetry) {
         t.out_db = lin_to_db(self.out_pk);
         let rt = self.post == PostMode::Realtime;
         t.gr_db = if rt { self.limiter.gr_db } else { 0.0 };
@@ -650,7 +782,7 @@ mod tests {
 
     fn setup(voices: &[Voice], gains: Vec<f32>) -> MixSetup {
         let base = EngineConfig::new(Params::default(), None);
-        MixSetup { cfgs: voice_configs(&base, voices, None), gains, offsets: vec![0.0; voices.len()], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()] }
+        MixSetup { cfgs: voice_configs(&base, voices, None), gains, offsets: vec![0.0; voices.len()], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()], pair: false }
     }
 
     #[test]
@@ -778,9 +910,45 @@ mod tests {
         // 滤波器直接共用总参数里算好的，不重算
         assert!(Arc::ptr_eq(cfgs[1].derived.ear_eq.as_ref().unwrap(), base.derived.ear_eq.as_ref().unwrap()));
         // 参数没变的音源原样复用
-        let prev = MixSetup { cfgs: cfgs.clone(), gains: vec![1.0; 2], offsets: vec![0.0; 2], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()] };
+        let prev = MixSetup { cfgs: cfgs.clone(), gains: vec![1.0; 2], offsets: vec![0.0; 2], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; voices.len()], pair: false };
         let again = voice_configs(&base, &voices, Some(&prev));
         assert!(Arc::ptr_eq(&again[0], &cfgs[0]) && Arc::ptr_eq(&again[1], &cfgs[1]));
+    }
+
+    /// 听歌：一个立体声输入是一对声源（两个引擎共用总配置，位置在两侧各偏半个宽度）；多音频合成里每个音频是一个声源，
+    /// 各自的配置里立体声宽度是 0、音色校正按它自己的位置算；两段音频一左一右、"和原声一样响"时响度的估计差不多。
+    #[test]
+    fn music_style_pairs_a_stereo_input_and_keeps_mix_voices_single() {
+        let base = Arc::new(EngineConfig::new(Params::default().style_music(), None));
+        let st = pair_setup(&base);
+        assert!(st.pair && st.follow && st.offsets == vec![-45.0, 45.0] && st.gains == vec![1.0, 1.0]);
+        assert!(Arc::ptr_eq(&st.cfgs[0], &base) && Arc::ptr_eq(&st.cfgs[1], &base));
+        let mut mx = Mixer::new(&st, PostMode::Offline, 0.0);
+        assert!(mx.is_pair());
+        // 立体声宽度改了：两个声源跟着张开
+        let wide = Arc::new(EngineConfig::new(Params { stereo_width: 120.0, ..Params::default().style_music() }, None));
+        mx.set_pair_config(&wide);
+        let x = test_voice(2.0);
+        let (mut l, mut r) = (vec![0f32; x.len()], vec![0f32; x.len()]);
+        mx.process(&[&x, &x], &mut l, &mut r);
+        assert!((mx.engine(0).tele.az - 300.0).abs() < 0.5 && (mx.engine(1).tele.az - 60.0).abs() < 0.5);
+        // 两个声道一样的内容（中间）：两耳一样响
+        let lr = 10.0 * (energy(&l) / energy(&r)).log10();
+        assert!(lr.abs() < 1.0, "中间的内容两耳应一样响：{lr:.1} dB");
+        // 多音频合成：每个音频一个声源，在自己的位置上；音色校正各算各的（左右对称，所以两边的校正几乎一样）
+        let voices = [Voice::preset(0), Voice::preset(1)];
+        let cfgs = voice_configs(&base, &voices, None);
+        for (c, az) in cfgs.iter().zip([260.0, 100.0]) {
+            assert_eq!((c.params.mode, c.params.static_az, c.params.stereo_width, c.params.ear_dist), (MotionMode::Static, az, 0.0, 0.75));
+            assert!(c.derived.tone[0].is_some() && c.derived.tone[1].is_none());
+        }
+        let (ta, tb) = (cfgs[0].derived.tone[0].as_ref().unwrap(), cfgs[1].derived.tone[0].as_ref().unwrap());
+        // 只到 4 kHz：再往上人工头两只耳朵的实测响应本身就有一两分贝的不对称
+        for (a, b) in ta.gains_db.iter().zip(&tb.gains_db).take(8) {
+            assert!((a - b).abs() < 1.0, "左右两个位置的音色校正应差不多：{:?} / {:?}", ta.gains_db, tb.gains_db);
+        }
+        let two = Mixer::new(&MixSetup::new(&base, &voices, &[None, None], false, None), PostMode::Realtime, 0.0);
+        assert!(!two.is_pair() && (two.level_gain_db() - (3.01 + cfgs[0].derived.level_gain_db[0])).abs() < 1.0);
     }
 
     #[test]

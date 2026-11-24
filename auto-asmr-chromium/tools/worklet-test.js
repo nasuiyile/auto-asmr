@@ -63,10 +63,10 @@ const uiText = () => uiOut(ui.asmr_doc_text());
 /**
  * 渲染一段：一个（或几个）处理器，各自接同一段合成人声。`at` = [[秒, node => {...}]]：渲染到那一刻暂停，执行后继续。
  */
-async function render({ secs = 10, config = '', gen = 1, nodes = 1, at = [] }) {
+async function render({ secs = 10, config = '', gen = 1, nodes = 1, at = [], input = null }) {
   const ctx = new OfflineAudioContext({ numberOfChannels: 2, length: secs * FS, sampleRate: FS });
   await ctx.audioWorklet.addModule('../extension/worklet.js');
-  const [l, r] = speech(secs);
+  const [l, r] = input || speech(secs);
   const buf = ctx.createBuffer(2, secs * FS, FS);
   buf.copyToChannel(l, 0);
   buf.copyToChannel(r, 1);
@@ -221,6 +221,8 @@ const errors = (msgs) => msgs.filter((m) => m.type === 'error').map((m) => (m.de
 // 5b. 左右双人（桌面版同一个设置）：两个声音一左一右，状态里有 2 号；左右两边差不多一样响；处理中途打开也立即生效
 {
   uiSet('duo_ms', 80);
+  // 打开时排布切到一起移动（两个声音跟着穿梭、会换边）；这里看各自固定时一左一右的样子（同 wasm/src/lib.rs 的测试）
+  uiSet('mix_follow', false);
   const text = uiText();
   const r = await render({ secs: 10, config: text });
   const tele = r.msgs.filter((m) => m.type === 'tele');
@@ -237,6 +239,36 @@ const errors = (msgs) => msgs.filter((m) => m.type === 'error').map((m) => (m.de
   const before = t2.find((m) => m.t[8] === 0);
   const after = t2.length ? t2[t2.length - 1].t : null;
   check('左右双人：处理中途打开', !!before && !!after && after[8] === 1 && !errors(r2.msgs).length && energy(r2.L, 5 * FS).finite, after ? `打开后 1 号 ${after[0].toFixed(0)}°，2 号 ${after[9].toFixed(0)}°` : '没有状态');
+}
+
+// 5c. 听歌（4 号风格）：左右声道各当一个声源。只在左声道里的声音从左前方来（左耳响几分贝，右耳也听得到），
+//     状态里是两个声源（记 2：左声道在左前 45°、右声道在右前 45°）；两个声道一样的内容在正中间（两耳一样响）；
+//     处理中途把立体声宽度拖到 0，立即合成一个声源
+{
+  uiSet('style', 4);
+  const text = uiText();
+  const [sl] = speech(10);
+  const r = await render({ secs: 10, config: text, input: [sl, new Float32Array(sl.length)] });
+  const tele = r.msgs.filter((m) => m.type === 'tele');
+  const last = tele.length ? tele[tele.length - 1].t : null;
+  const side = 10 * Math.log10(energy(r.L, 2 * FS).e / energy(r.R, 2 * FS).e);
+  check(
+    '听歌：只在左声道的内容从左前方来，状态里是左右两个声源',
+    // 合成人声的能量集中在 140–420 Hz，那里左前 45° 的两耳声级差只有两三分贝（频率越高差得越多）
+    !!last && last[8] === 2 && Math.abs(last[0] - 315) < 1 && Math.abs(last[9] - 45) < 1 && side > 1.5 && side < 15 && !errors(r.msgs).length,
+    last ? `左声道 ${last[0].toFixed(0)}°，右声道 ${last[9].toFixed(0)}°，左耳比右耳响 ${side.toFixed(1)} dB` : '没有状态',
+  );
+  const c = await render({ secs: 8, config: text, input: [sl.subarray(0, 8 * FS), sl.subarray(0, 8 * FS)] });
+  const mid = 10 * Math.log10(energy(c.L, 2 * FS).e / energy(c.R, 2 * FS).e);
+  check('听歌：两个声道一样的内容在正中间', Math.abs(mid) < 1.5 && !errors(c.msgs).length, `左比右 ${mid.toFixed(1)} dB`);
+  uiSet('stereo_width', 0);
+  const mono = uiText();
+  const r2 = await render({ secs: 8, config: text, input: [sl.subarray(0, 8 * FS), new Float32Array(8 * FS)], at: [[4, (node) => node.port.postMessage({ type: 'config', config: enc.encode(mono), gen: 2 })]] });
+  const t2 = r2.msgs.filter((m) => m.type === 'tele');
+  const after = t2.length ? t2[t2.length - 1].t : null;
+  const tail = 10 * Math.log10(energy(r2.L, 5 * FS).e / energy(r2.R, 5 * FS).e);
+  check('听歌：处理中途把立体声宽度拖到 0', !!after && after[8] === 0 && Math.abs(tail) < 1.5 && !errors(r2.msgs).length, `之后左比右 ${tail.toFixed(1)} dB`);
+  ui.asmr_doc_reset_params();
 }
 
 // 6. 同一个 AudioContext 里两个标签页（共用一个 wasm 实例）
@@ -272,6 +304,9 @@ const errors = (msgs) => msgs.filter((m) => m.type === 'error').map((m) => (m.de
   time('改一个滑块（停留时间）', () => uiSet('hold_s', 3));
   time('换风格 KU100 实录', () => uiSet('style', 1));
   time('换风格 掏耳', () => uiSet('style', 2));
+  time('换风格 听歌（第一次：建两个引擎）', () => uiSet('style', 4));
+  time('听歌里改立体声宽度', () => uiSet('stereo_width', 60));
+  time('换回贴耳加强', () => uiSet('style', 0));
   time('换耳廓', () => uiSet('pinna', 'B'));
   time('换耳机补偿', () => uiSet('playback', 'Diffuse'));
   time('开降噪', () => uiSet('denoise', 100));

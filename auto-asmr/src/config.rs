@@ -7,7 +7,7 @@
 //! 音频设备、缓冲、文件转换这些安卓用不上的设置原样保留，导出后带回桌面版照样能用。
 
 use crate::dsp::mix::DUO_MAX_MS;
-use crate::dsp::params::Params;
+use crate::dsp::params::{MotionMode, Params, BREATH_LUFS, EARCLEAN_LUFS, MUSIC_LUFS};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -67,22 +67,53 @@ impl Default for Saved {
 impl Saved {
     /// 改文件转换的左右双人延迟（0 = 关，最多 [`DUO_MAX_MS`]）。从关着打开时排布切到"一起移动"：左右双人默认两个人
     /// 按「左右移动」一起走、彼此相对（之后可以再改回各自固定，只要不关掉左右双人就不会再被切回来）。
+    /// 移动方式是"固定"时（比如「听歌」）切到"各自固定"：没有走位可以一起走，一起移动只会把两个声音一前一后
+    /// 钉在固定的方位上，一左一右才是想要的。
     /// 排布和多音频合成共用，所以多音频合成的排布也跟着变。桌面版、安卓版、浏览器插件打开左右双人都走这里。
     pub fn set_duo_ms(&mut self, ms: f32) {
         let ms = ms.clamp(0.0, DUO_MAX_MS);
         if self.duo_ms <= 0.0 && ms > 0.0 {
-            self.mix_follow = true;
+            self.mix_follow = self.params.mode != MotionMode::Static;
         }
         self.duo_ms = ms;
     }
 
-    /// 改实时（主播）页的左右双人延迟，同 [`Saved::set_duo_ms`]：从关着打开时排布切到"一起移动"。
+    /// 改实时（主播）页的左右双人延迟，同 [`Saved::set_duo_ms`]：从关着打开时排布切到"一起移动"（"固定"时切到各自固定）。
     pub fn set_rt_duo_ms(&mut self, ms: f32) {
         let ms = ms.clamp(0.0, DUO_MAX_MS);
         if self.rt_duo_ms <= 0.0 && ms > 0.0 {
-            self.mix_follow = true;
+            self.mix_follow = self.params.mode != MotionMode::Static;
         }
         self.rt_duo_ms = ms;
+    }
+
+    /// 按风格按钮（名字见 [`Params::STYLES`]）或恢复默认（"reset"）：换参数，并做跟着风格走的那几件事——
+    /// 关掉文件转换的左右双人（各风格的默认状态都是一个声音）；「听歌」把排布切回"各自固定"（几段音频各在一边，
+    /// 不是按固定的方位一前一后排开）；文件转换的目标响度换成这个风格的（[`style_file_lufs`]）。
+    /// 桌面版界面自己有一套等价的处理（还要管试听和实时页），安卓版用这个。不认识的名字返回 false，什么都不改。
+    pub fn press_style(&mut self, name: &str) -> bool {
+        let next = if name == "reset" { Some(Params::default()) } else { self.params.clone().with_style(name) };
+        let Some(next) = next else { return false };
+        if let Some(l) = style_file_lufs(&self.params, name) {
+            self.file_lufs = l;
+        }
+        self.params = next;
+        self.duo_ms = 0.0;
+        if name == "style_music" {
+            self.mix_follow = false;
+        }
+        true
+    }
+}
+
+/// 按风格按钮（或恢复默认，`name` = "reset"）之后，文件转换的目标响度该换成多少：呼吸音、掏耳、听歌各有自己的；
+/// 从这三个切回别的风格时恢复成默认的 −16；其余情况不动（None）。`before`：按之前的参数。
+pub fn style_file_lufs(before: &Params, name: &str) -> Option<f32> {
+    match name {
+        "style_breath" => Some(BREATH_LUFS),
+        "style_earclean" => Some(EARCLEAN_LUFS),
+        "style_music" => Some(MUSIC_LUFS),
+        _ => (before.inear_cm > 0.0 || before.target_lufs == BREATH_LUFS || before.level_match).then_some(Params::default().target_lufs),
     }
 }
 
@@ -156,5 +187,36 @@ mod tests {
         let mut s = Saved::default();
         s.set_rt_duo_ms(80.0);
         assert_eq!(s.duo_ms, 0.0);
+        // 移动方式是"固定"时（比如听歌）：打开左右双人用各自固定（一左一右），不切到一起移动
+        for rt in [false, true] {
+            let mut s = Saved { params: Params::default().style_music(), mix_follow: true, ..Saved::default() };
+            if rt {
+                s.set_rt_duo_ms(80.0);
+            } else {
+                s.set_duo_ms(80.0);
+            }
+            assert!(!s.mix_follow);
+        }
+    }
+
+    #[test]
+    fn style_buttons_set_file_loudness_and_layout() {
+        // 掏耳、呼吸音、听歌各有自己的文件转换目标响度；切回别的风格、恢复默认时回到 −16；本来就是 −16 的不动
+        let mut s = Saved { file_lufs: -18.0, duo_ms: 80.0, mix_follow: true, ..Saved::default() };
+        assert!(s.press_style("style_ku100"));
+        assert_eq!((s.file_lufs, s.duo_ms, s.mix_follow), (-18.0, 0.0, true), "人声的风格之间切换不动目标响度和排布");
+        assert!(s.press_style("style_music"));
+        assert_eq!(s.params, Params::default().style_music());
+        assert_eq!((s.file_lufs, s.mix_follow), (MUSIC_LUFS, false), "听歌：−14 LUFS，几段音频各自固定");
+        assert!(s.press_style("style_earclean"));
+        assert_eq!(s.file_lufs, EARCLEAN_LUFS);
+        assert!(s.press_style("style_breath"));
+        assert_eq!(s.file_lufs, BREATH_LUFS);
+        assert!(s.press_style("style_ear"));
+        assert_eq!((s.file_lufs, s.params.clone()), (-16.0, Params::default()));
+        s.press_style("style_music");
+        assert!(s.press_style("reset"));
+        assert_eq!((s.file_lufs, s.params.clone()), (-16.0, Params::default()));
+        assert!(!s.press_style("style_x") && !s.press_style(""));
     }
 }

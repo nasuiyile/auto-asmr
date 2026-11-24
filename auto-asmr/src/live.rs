@@ -9,6 +9,7 @@ use crate::dsp::dynamics::DryOut;
 use crate::dsp::engine::{Engine, EngineConfig, Telemetry};
 use crate::dsp::mix::{self, MixSetup, Mixer, MAX_VOICES};
 use crate::dsp::resample::Resampler;
+use crate::dsp::solo::Solo;
 use crate::dsp::{FS, FS_USIZE};
 use crate::spsc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -137,15 +138,31 @@ impl Shared {
     fn store_voice_tele(&self, mx: &Mixer) {
         let n = mx.voices().min(MAX_VOICES);
         for k in 0..n {
-            let t = mx.engine(k).tele;
-            for (j, x) in [t.az, t.el, t.r, t.act].into_iter().enumerate() {
-                self.vtele[k * 4 + j].store(x.to_bits(), Ordering::Relaxed);
-            }
+            self.store_one_voice(k, &mx.engine(k).tele);
         }
         self.n_voices.store(n as u32, Ordering::Relaxed);
     }
 
-    /// 多音频合成试听时各音源此刻的 [方位角, 仰角, 距离, 说话活动]；不是合成试听时为空。
+    fn store_one_voice(&self, k: usize, t: &Telemetry) {
+        for (j, x) in [t.az, t.el, t.r, t.act].into_iter().enumerate() {
+            self.vtele[k * 4 + j].store(x.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// 试听单个文件：立体声对在用时记下左右两个声源的位置，没在用时清空。
+    fn store_pair_tele(&self, s: &Solo) {
+        match s.pair() {
+            Some(e) => {
+                self.store_one_voice(0, &e[0].tele);
+                self.store_one_voice(1, &e[1].tele);
+                self.n_voices.store(2, Ordering::Relaxed);
+            }
+            None => self.n_voices.store(0, Ordering::Relaxed),
+        }
+    }
+
+    /// 多音频合成试听时各音源此刻的 [方位角, 仰角, 距离, 说话活动]；试听单个立体声文件、「立体声宽度」大于 0 时
+    /// 是左右声道两个声源的；其余情况为空。
     pub fn voice_telemetry(&self) -> Vec<[f32; 4]> {
         let n = (self.n_voices.load(Ordering::Relaxed) as usize).min(MAX_VOICES);
         (0..n).map(|k| std::array::from_fn(|j| f32::from_bits(self.vtele[k * 4 + j].load(Ordering::Relaxed)))).collect()
@@ -161,12 +178,16 @@ pub enum Source {
     Memory { data: Arc<Vec<f32>>, pos: usize },
     /// 多音频合成的试听：几段音频（各自已解码成 48 kHz 单声道）同时播放，总长按最长的那段。
     Multi { data: Vec<Arc<Vec<f32>>>, pos: usize, len: usize },
+    /// 试听一个立体声文件：左右声道各一段（48 kHz，一样长）。配 [`Proc::Solo`] 用。
+    Stereo { l: Arc<Vec<f32>>, r: Arc<Vec<f32>>, pos: usize },
 }
 
-/// 输出回调里的处理器：一个引擎（麦克风 / 试听一个文件），或多音频合成（每个音源一个引擎，相加后统一收尾）。
+/// 输出回调里的处理器：一个引擎（麦克风 / 试听一个文件），多音频合成（每个音源一个引擎，相加后统一收尾），
+/// 或者试听立体声文件用的 [`Solo`]（「立体声宽度」大于 0 时左右声道各一个声源，否则合成单声道过一个引擎）。
 pub enum Proc {
     One(Engine),
     Mix(Mixer),
+    Solo(Solo),
 }
 
 impl Proc {
@@ -174,6 +195,7 @@ impl Proc {
         match self {
             Proc::One(e) => e.latency_samples(),
             Proc::Mix(m) => m.latency_samples(),
+            Proc::Solo(s) => s.latency_samples(),
         }
     }
 
@@ -181,6 +203,15 @@ impl Proc {
         match self {
             Proc::One(e) => &e.tele,
             Proc::Mix(m) => &m.tele,
+            Proc::Solo(s) => s.tele(),
+        }
+    }
+
+    fn config(&self) -> &Arc<EngineConfig> {
+        match self {
+            Proc::One(e) => e.config(),
+            Proc::Mix(m) => m.config(),
+            Proc::Solo(s) => s.config(),
         }
     }
 }
@@ -202,6 +233,8 @@ pub struct Pump {
     in_max: f32,
     proc_avg: f32,
     inb: Vec<f32>,
+    /// 立体声源的右声道这一块（左声道在 `inb`）。
+    inb_r: Vec<f32>,
     el: Vec<f32>,
     er: Vec<f32>,
     last_output: [f32; 2],
@@ -242,6 +275,11 @@ impl Pump {
                 shared.play_len.store(*len as u64, Ordering::Relaxed);
                 shared.play_pos.store((*pos).min(*len) as u64, Ordering::Relaxed);
             }
+            Source::Stereo { l, r, pos } => {
+                let len = l.len().min(r.len());
+                shared.play_len.store(len as u64, Ordering::Relaxed);
+                shared.play_pos.store((*pos).min(len) as u64, Ordering::Relaxed);
+            }
             Source::Ring(_) => {}
         }
         // 合成时每个声音一块输入：试听是几段音频，主播模式是同一个麦克风按各自的延迟取
@@ -267,6 +305,7 @@ impl Pump {
             in_max: 0.0,
             proc_avg: 0.0,
             inb: vec![0.0; N],
+            inb_r: vec![0.0; N],
             el: vec![0.0; N],
             er: vec![0.0; N],
             last_output: [0.0; 2],
@@ -321,6 +360,20 @@ impl Pump {
                 }
                 p
             }
+            Source::Stereo { l, r, pos } => {
+                let n = l.len().min(r.len());
+                for i in 0..N {
+                    let ok = *pos + i < n;
+                    self.inb[i] = if ok { l[*pos + i] } else { 0.0 };
+                    self.inb_r[i] = if ok { r[*pos + i] } else { 0.0 };
+                }
+                *pos += N;
+                self.shared.play_pos.store((*pos).min(n) as u64, Ordering::Relaxed);
+                if *pos > n + FS_USIZE {
+                    self.shared.finished.store(true, Ordering::Relaxed);
+                }
+                return true;
+            }
         };
         // 第 k 段按"现在位置 − 它的延迟"取（左右双人的第 2 个声音晚一点）。改了延迟：先把这次的淡变走完，
         // 再在 20 ms 里从旧位置淡到新位置
@@ -361,6 +414,13 @@ impl Pump {
                     }
                     Err(_) => false,
                 },
+                Proc::Solo(s) => match self.shared.cfg.try_lock() {
+                    Ok(g) => {
+                        s.set_config(g.clone());
+                        true
+                    }
+                    Err(_) => false,
+                },
                 // 合成：各音源的配置和增益（界面线程里已经算好，这里只换指针、抄增益，不分配内存）
                 Proc::Mix(m) => match self.shared.mix.try_lock() {
                     Ok(g) => {
@@ -382,9 +442,10 @@ impl Pump {
             let len = match &self.src {
                 Source::Memory { data, .. } => Some(data.len()),
                 Source::Multi { len, .. } => Some(*len),
+                Source::Stereo { l, r, .. } => Some(l.len().min(r.len())),
                 Source::Ring(_) => None,
             };
-            if let (Some(len), Source::Memory { pos, .. } | Source::Multi { pos, .. }) = (len, &mut self.src) {
+            if let (Some(len), Source::Memory { pos, .. } | Source::Multi { pos, .. } | Source::Stereo { pos, .. }) = (len, &mut self.src) {
                 *pos = seek.min(len as u64) as usize;
                 self.shared.play_pos.store(*pos as u64, Ordering::Relaxed);
                 self.shared.finished.store(false, Ordering::Relaxed);
@@ -439,6 +500,18 @@ impl Pump {
                         eng.process(&self.inb[..N], &mut self.el[..N], &mut self.er[..N]);
                     }
                 }
+                Proc::Solo(s) => {
+                    let stereo = matches!(self.src, Source::Stereo { .. });
+                    if dry {
+                        // 监听原声：立体声文件就是原来的立体声
+                        self.el[..N].copy_from_slice(&self.inb[..N]);
+                        self.er[..N].copy_from_slice(if stereo { &self.inb_r[..N] } else { &self.inb[..N] });
+                    } else if stereo {
+                        s.process(&self.inb[..N], &self.inb_r[..N], &mut self.el[..N], &mut self.er[..N]);
+                    } else {
+                        s.process_mono(&self.inb[..N], &mut self.el[..N], &mut self.er[..N]);
+                    }
+                }
                 Proc::Mix(mx) => {
                     if dry {
                         // 监听原声：麦克风就是麦克风本身（左右双人不叠出回声）；试听文件是几段原声相加
@@ -460,11 +533,7 @@ impl Pump {
             }
             if dry {
                 // 原声也乘输出增益、过峰值限制器（同效果那一路的收尾），音量滑条照样起作用
-                let p = &match &self.proc {
-                    Proc::One(e) => e.config(),
-                    Proc::Mix(m) => m.config(),
-                }
-                .params;
+                let p = &self.proc.config().params;
                 let (gain, ceiling) = (p.out_gain_db, p.ceiling_db);
                 if !self.was_dry {
                     self.dry_out.reset();
@@ -524,8 +593,10 @@ impl Pump {
             self.shared.fill_us.store((self.fill_avg / FS * 1e6) as u32, Ordering::Relaxed);
         }
         self.shared.store_tele(self.proc.tele());
-        if let Proc::Mix(mx) = &self.proc {
-            self.shared.store_voice_tele(mx);
+        match &self.proc {
+            Proc::Mix(mx) => self.shared.store_voice_tele(mx),
+            Proc::Solo(s) => self.shared.store_pair_tele(s),
+            Proc::One(_) => {}
         }
         let us = t0.elapsed().as_secs_f32() * 1e6;
         self.proc_avg += 0.05 * (us - self.proc_avg);
@@ -604,6 +675,59 @@ mod tests {
         }
     }
 
+    /// 试听立体声文件（听歌）：左右声道各一个声源，界面读得到两个声源的位置；播放中把立体声宽度拖到 0 就合成一个声源，
+    /// 不用重新开始；监听原声时听到的是原来的立体声。
+    #[test]
+    fn stereo_preview_plays_two_sources_and_follows_the_width_setting() {
+        use crate::dsp::solo::Solo;
+        let music = Params { auto_level: false, ..Params::default().style_music() };
+        let cfg = Arc::new(EngineConfig::new(music.clone(), None));
+        let shared = Arc::new(Shared::new(cfg.clone()));
+        let song = crate::dsp::testsig::test_song(6.0, 9);
+        let (left, right) = (Arc::new(song.clone()), Arc::new(vec![0f32; song.len()]));
+        let solo = Solo::new(cfg, PostMode::Realtime, 0.0).with_pair();
+        let mut pump = Pump::with_proc(Source::Stereo { l: left, r: right, pos: 0 }, Proc::Solo(solo), shared.clone(), 48_000.0);
+        assert_eq!(shared.play_len.load(Ordering::Relaxed), song.len() as u64);
+        let (mut l, mut r) = (vec![0f32; 1024], vec![0f32; 1024]);
+        let (mut el, mut er) = (0f64, 0f64);
+        for i in 0..90 {
+            pump.fill(&mut l, &mut r);
+            if i > 20 {
+                el += l.iter().map(|v| (v * v) as f64).sum::<f64>();
+                er += r.iter().map(|v| (v * v) as f64).sum::<f64>();
+            }
+        }
+        let side = 10.0 * (el / er).log10();
+        assert!((3.0..15.0).contains(&side), "只在左声道的内容：左耳比右耳响 {side:.1} dB");
+        let v = shared.voice_telemetry();
+        assert!(v.len() == 2 && (v[0][0] - 315.0).abs() < 1.0 && (v[1][0] - 45.0).abs() < 1.0, "{v:?}");
+        // 立体声宽度拖到 0：接着放，变成正前方的一个声源
+        let before = shared.play_pos.load(Ordering::Relaxed);
+        shared.set_config(Arc::new(EngineConfig::new(Params { stereo_width: 0.0, ..music.clone() }, None)));
+        let (mut el, mut er) = (0f64, 0f64);
+        for i in 0..60 {
+            pump.fill(&mut l, &mut r);
+            if i > 20 {
+                el += l.iter().map(|v| (v * v) as f64).sum::<f64>();
+                er += r.iter().map(|v| (v * v) as f64).sum::<f64>();
+            }
+        }
+        assert!(shared.voice_telemetry().is_empty() && shared.play_pos.load(Ordering::Relaxed) > before);
+        assert!((10.0 * (el / er).log10()).abs() < 1.5, "一个声源在正前方，两耳应一样响");
+        // 监听原声：原来的立体声（只有左声道有声音）
+        shared.monitor_dry.store(true, Ordering::Relaxed);
+        for _ in 0..4 {
+            pump.fill(&mut l, &mut r);
+        }
+        assert!(l.iter().any(|v| v.abs() > 1e-3) && r.iter().all(|v| v.abs() < 1e-6));
+        // 跳转、播完都和单声道试听一样
+        shared.seek_preview(u64::MAX);
+        for _ in 0..60 {
+            pump.fill(&mut l, &mut r);
+        }
+        assert!(shared.preview_finished());
+    }
+
     #[test]
     fn effect_parameters_change_during_preview_without_restarting() {
         let audio: Vec<f32> = (0..FS_USIZE * 3).map(|n| 0.01 * (n as f32 * std::f32::consts::TAU * 440.0 / FS).sin()).collect();
@@ -671,7 +795,7 @@ mod tests {
         let x = crate::dsp::testsig::test_voice(8.0);
         let len = x.len();
         let base = EngineConfig::new(Params { auto_level: false, ..Params::default() }, None);
-        let setup = |v: [Voice; 2]| Arc::new(MixSetup { cfgs: voice_configs(&base, &v, None), gains: vec![1.0, 1.0], offsets: vec![0.0; 2], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; 2] });
+        let setup = |v: [Voice; 2]| Arc::new(MixSetup { cfgs: voice_configs(&base, &v, None), gains: vec![1.0, 1.0], offsets: vec![0.0; 2], follow: false, balance: None, balance_strength: 0.0, delays: vec![0; 2], pair: false });
         let first = setup([Voice::preset(0), Voice::preset(1)]);
         let shared = Arc::new(Shared::new(first.cfgs[0].clone()));
         *shared.mix.lock().unwrap() = Some(first.clone());

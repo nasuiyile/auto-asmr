@@ -103,7 +103,9 @@ async function poll() {
         const cm = Math.max(0, (r - 0.0875) * 100);
         return cm < 10 ? cm.toFixed(1) : cm.toFixed(0);
       };
-      if (t.duo) {
+      if (t.stereo) {
+        lines.push(['', `立体声 · 左声道（橙）${side(t.az)} · 右声道（蓝）${side(t.az2)} · 离头 ${cmOf(t.r)} cm`]);
+      } else if (t.duo) {
         lines.push(['', `左右双人 · 1 号（橙）${side(t.az)} ${cmOf(t.r)} cm · 2 号（蓝）${side(t.az2)} ${cmOf(t.r2)} cm`]);
       } else {
         lines.push(['', `${side(t.az)} · 离头 ${cmOf(t.r)} cm${t.depthCm > 0.05 ? ` · 入耳 ${t.depthCm.toFixed(1)} cm` : ''}`]);

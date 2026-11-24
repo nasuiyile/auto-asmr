@@ -21,6 +21,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,8 +36,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
@@ -101,8 +105,8 @@ import java.io.File
  *
  * 也可以用 adb 驱动（tools/hook_test.sh）：
  *   am start -n io.github.nasuiyile.autoasmr/.MainActivity --es url <网址>
- * 其它参数（都作用于当前标签页）：--ei mode 0-3（调试：直通 / ASMR / 左右互换 / 静音）；--ei style 0-3；
- * --es action <按钮>（style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off）；
+ * 其它参数（都作用于当前标签页）：--ei mode 0-3（调试：直通 / ASMR / 左右互换 / 静音）；--ei style 0-4；
+ * --es action <按钮>（style_ear / style_ku100 / style_earclean / style_breath / style_music / reset / bg_rain_night / bg_off）；
  * --es params '<RON>'；--ei rec <秒>（录下处理前后的声音）；--es ua desktop|mobile；--es mute 1|0；
  * --es import <文件名> / --es export <文件名>（在 /sdcard/Android/data/<包名>/files/ 里，导入 / 导出配置）。
  * 页面：--es page web|global|files。文件转换：--es files_add <文件名,…>（外部文件目录里的）；--es files_op '<JSON 命令>'。全局模式：--es launch shizuku|root；--es intercept 1|0；--es dry 1|0；--es exit 1。
@@ -213,7 +217,7 @@ class MainActivity : ComponentActivity() {
         if (intent.getStringExtra("exit") == "1") Controller.exit()
         val tab = browser.current ?: return
         intent.getIntExtra("mode", -1).takeIf { it in 0..3 }?.let { NativeHook.setMode(it) }
-        listOf("style_ear", "style_ku100", "style_earclean", "style_breath")
+        listOf("style_ear", "style_ku100", "style_earclean", "style_breath", "style_music")
             .getOrNull(intent.getIntExtra("style", -1))?.let { Settings.action(it) }
         intent.getStringExtra("params")?.let { Settings.setRon(it) }
         intent.getStringExtra("action")?.let { Settings.action(it) }
@@ -257,22 +261,45 @@ fun setPage(ctx: android.content.Context, p: Page) {
     ctx.getSharedPreferences("ui", 0).edit().putString("page", p.name).apply()
 }
 
-/** 底部导航栏：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）/ 文件转换（同电脑版）。 */
+/**
+ * 底部导航栏：网页模式（内嵌浏览器，谁都能用）/ 全局模式（Shizuku 或 root，处理任意 App 的声音）/ 文件转换（同电脑版）。
+ * 比 Material 默认的导航栏（80 dp）矮：52 dp，图标 20 dp、文字用小号，选中的那项图标后面垫一块浅色胶囊。
+ */
 @Composable
 private fun NavBar() {
     val ctx = LocalContext.current
-    NavigationBar {
-        for ((p, label, icon) in listOf(
-            Triple(Page.WEB, "网页", AppIcons.Web),
-            Triple(Page.GLOBAL, "全局", AppIcons.Headset),
-            Triple(Page.FILES, "文件转换", AppIcons.Library),
-        )) {
-            NavigationBarItem(
-                selected = currentPage == p,
-                onClick = { setPage(ctx, p) },
-                icon = { Ic(icon, size = 24.dp) },
-                label = { Text(label) },
-            )
+    val c = MaterialTheme.colorScheme
+    Surface(color = c.surfaceContainer) {
+        Row(
+            Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(52.dp).selectableGroup(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for ((p, label, icon) in listOf(
+                Triple(Page.WEB, "网页", AppIcons.Web),
+                Triple(Page.GLOBAL, "全局", AppIcons.Headset),
+                Triple(Page.FILES, "文件转换", AppIcons.Library),
+            )) {
+                val sel = currentPage == p
+                Column(
+                    Modifier.weight(1f).fillMaxHeight().selectable(selected = sel, onClick = { setPage(ctx, p) }, role = Role.Tab),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Box(
+                        Modifier.size(width = 48.dp, height = 26.dp).background(if (sel) c.secondaryContainer else Color.Transparent, CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Ic(icon, size = 20.dp, tint = if (sel) c.onSecondaryContainer else c.onSurfaceVariant)
+                    }
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (sel) c.onSurface else c.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+            }
         }
     }
 }

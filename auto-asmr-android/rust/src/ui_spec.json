@@ -30,6 +30,13 @@
    "tip_en": "Brings out close-miked inhalations and exhalations in the recording."
   },
   {
+   "action": "style_music",
+   "label": "听歌",
+   "label_en": "Music",
+   "tip": "给音乐用（不是给人声用的）：立体声的歌左右声道各当一个声源，摆在左前 45°、右前 45°，离头约 75 cm，固定不动；加一点实测房间声把声音推到头外面；音色校正到和原声一致，响度和原声一样（最高 −14 LUFS）；人声用的效果全部关掉。多音频合成时两段音频一左一右各在一边。降噪会把音乐当噪声处理，请关掉",
+   "tip_en": "For music (not voice): a stereo song becomes two sources, its left and right channels 45° to the front-left and front-right, about 75 cm away, not moving; a little measured room pushes the sound out of the head; the tone is corrected back to the original and the loudness matches the original (at most −14 LUFS); every voice-only effect is off. In a multi-audio mix the files sit one on each side. Denoise treats music as noise: turn it off"
+  },
+  {
    "action": "reset",
    "label": "恢复默认",
    "label_en": "Reset",
@@ -143,10 +150,10 @@
      "key": "ear_cm",
      "label": "贴耳距离",
      "label_en": "Distance from ear",
-     "tip": "嘴离耳朵多远。1.7 cm = 贴着耳朵",
-     "tip_en": "How far the mouth is from the ear. 1.7 cm = touching",
+     "tip": "嘴离耳朵多远。1.7 cm = 贴着耳朵；听歌时是声源离头多远（约 66 cm）",
+     "tip_en": "How far the mouth is from the ear. 1.7 cm = touching; for music this is how far the sources are from the head (about 66 cm)",
      "min": 0.8,
-     "max": 25.0,
+     "max": 100.0,
      "decimals": 1,
      "log": true,
      "unit": "cm",
@@ -1228,6 +1235,79 @@
    ]
   },
   {
+   "id": "music",
+   "title": "听歌（音乐）",
+   "title_en": "Music",
+   "open_if": {
+    "key": "stereo_width",
+    "gt": 0
+   },
+   "items": [
+    {
+     "type": "slider",
+     "key": "stereo_width",
+     "label": "立体声宽度",
+     "label_en": "Stereo width",
+     "tip": "立体声的音频左右声道各当一个声源，放在声源位置的两侧，一共张开这么多度：90 = 左前 45°、右前 45°，像面前的一对音箱；并跟着「左右移动」一起走（环绕时整个舞台绕着头转）。0 = 关闭，左右声道先合成一个声源。只对一个立体声的输入起作用（网页、其他 App 的声音都是；文件转换的「取哪个声道」要选自动）；多音频合成、左右双人里每个声音仍是一个声源",
+     "tip_en": "The left and right channels of a stereo input become two sources, spread this many degrees around the source position: 90 = 45° front-left and 45° front-right, like a pair of speakers in front of you. They follow Left / right motion together (with Orbit the whole stage circles your head). 0 = off: the channels are mixed into one source. Only for a single stereo input (web pages and other apps are; for file conversion keep Channel on Auto); in a multi-audio mix or Two voices each voice stays one source",
+     "min": 0.0,
+     "max": 180.0,
+     "decimals": 0,
+     "step": 1.0,
+     "unit": "°",
+     "unit_en": "°"
+    },
+    {
+     "type": "slider",
+     "key": "tone",
+     "label": "音色校正",
+     "label_en": "Tone correction",
+     "tip": "声源固定在一个位置时（固定、手动摆位、多音频合成的各自固定），把这个方向、距离和房间带来的整体音色偏差均衡掉：两只耳朵听到的总频谱和原声一致，两耳之间的差别原样保留。0 = 关闭，1 = 完全校正。穿梭、随机走位、环绕时不起作用",
+     "tip_en": "While the source stays at one position (Static, Manual, or fixed voices in a mix), equalises away the overall colouration of that direction, distance and room: the spectrum summed over both ears matches the original, and the differences between the ears stay as they are. 0 = off, 1 = full correction. Inactive with Sweep, Random and Orbit",
+     "min": 0.0,
+     "max": 1.0,
+     "decimals": 2
+    },
+    {
+     "type": "slider",
+     "key": "lowcut_hz",
+     "label": "低切",
+     "label_en": "Low cut",
+     "tip": "输入端高通的转折频率，这以下的低频被切掉。40 Hz 适合人声（去掉喷麦和低频噪声）；听歌调到 20 Hz 左右，保住最低的低音",
+     "tip_en": "Corner of the input high-pass; lower frequencies are removed. 40 Hz suits voice (plosives, rumble); for music go down to about 20 Hz to keep the deepest bass",
+     "min": 10.0,
+     "max": 120.0,
+     "decimals": 0,
+     "step": 1.0,
+     "unit": "Hz",
+     "unit_en": "Hz"
+    },
+    {
+     "type": "slider",
+     "key": "room_lowcut_hz",
+     "label": "房间声低切",
+     "label_en": "Room low cut",
+     "tip": "房间声里这个频率以下的不要，低音只留干净的直达声（实测房间的反射在 300 Hz 以下会让低音忽强忽弱，音乐里很明显）。0 = 关闭。打开「真实房间」后才起作用",
+     "tip_en": "Removes the room sound below this frequency so the bass is direct sound only (below 300 Hz the measured room's reflections make bass notes uneven, which is obvious on music). 0 = off. Needs Real room",
+     "min": 0.0,
+     "max": 800.0,
+     "decimals": 0,
+     "step": 10.0,
+     "unit": "Hz",
+     "unit_en": "Hz",
+     "enable_if": {
+      "key": "room",
+      "eq": true
+     }
+    },
+    {
+     "type": "note",
+     "text": "点上面的「听歌」一键设置。和原声一样响在下面「输出」里",
+     "text_en": "The Music style button sets these in one click. Match the original loudness is under Output below"
+    }
+   ]
+  },
+  {
    "id": "voice",
    "title": "人声处理",
    "title_en": "Voice",
@@ -1298,6 +1378,18 @@
      "decimals": 0,
      "unit": "LUFS",
      "unit_en": "LUFS",
+     "enable_if": {
+      "key": "auto_level",
+      "eq": true
+     }
+    },
+    {
+     "type": "check",
+     "key": "level_match",
+     "label": "和原声一样响",
+     "label_en": "Match the original loudness",
+     "tip": "听歌用：自动响度不再把音量拉到固定的目标响度，而是让输出和输入一样响，音乐自己的强弱起伏原样保留；只有原声比「目标响度」还响时才压到目标响度。转换文件时同理：按原声的响度和文件的目标响度里较低的那个输出，峰值超了宁可整体降低也不多压",
+     "tip_en": "For music: instead of riding to a fixed target, auto level makes the output as loud as the input, so the music keeps its own dynamics; only when the original is louder than the target is it brought down to the target. File conversion does the same: the lower of the original loudness and the file target, and if the peaks are too high the level is lowered rather than limited harder",
      "enable_if": {
       "key": "auto_level",
       "eq": true

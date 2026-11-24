@@ -29,10 +29,11 @@ use auto_asmr::dsp::engine::{Engine, EngineConfig, PostMode, Telemetry};
 use auto_asmr::dsp::mix::{self, MixSetup, Mixer, Voice, MAX_VOICES, PRESETS};
 use auto_asmr::dsp::motion::{lift_tilt, Motion};
 use auto_asmr::dsp::params::MotionMode;
+use auto_asmr::dsp::solo::Solo;
 use auto_asmr::dsp::FS;
 use auto_asmr::live::{Proc, Pump, Shared, Source};
 use auto_asmr::offline::{
-    align_tracks, balance_data, convert_mix, default_mix_output, default_output, load_mono, mix_report_text, report_text, Channel, ConvertOptions, ConvertReport, Duo, MixInput, MixOptions,
+    align_tracks, auto_pick, balance_data, convert_mix, default_mix_output, default_output, load_audio, mix_report_text, report_text, Channel, ConvertOptions, ConvertReport, Duo, MixInput, MixOptions,
 };
 use serde_json::{json, Value};
 
@@ -91,7 +92,8 @@ struct Job {
     dir: PathBuf,
 }
 
-type Decoded = Result<(PathBuf, u8, Arc<Vec<f32>>), String>;
+/// 试听用的解码结果：文件、声道（[`Files::ch_key`]）、48 kHz 的音频，以及右声道（左右声道都要时才有，这时前面那段是左声道）。
+type Decoded = Result<(PathBuf, u8, Arc<Vec<f32>>, Option<Arc<Vec<f32>>>), String>;
 
 struct MixAudio {
     paths: Vec<PathBuf>,
@@ -153,6 +155,19 @@ impl Preview {
         Ok(Preview { out, shared })
     }
 
+    /// 试听一个立体声文件（听歌）：「立体声宽度」大于 0 时左右声道各当一个声源，为 0 时合成单声道过一个引擎；
+    /// 边听边改参数时随时切换（同桌面版 `Realtime::start_preview_stereo`）。
+    fn stereo(cfg: Arc<EngineConfig>, left: Arc<Vec<f32>>, right: Arc<Vec<f32>>, start: usize) -> Result<Preview, String> {
+        let shared = Arc::new(Shared::new(cfg.clone()));
+        let sh = shared.clone();
+        let out = Output::start(shared.clone(), move |rate| {
+            // 立体声对事先建好：播放中改「立体声宽度」时音频线程里不分配内存
+            let solo = Solo::new(cfg, PostMode::Realtime, 0.0).with_pair();
+            Pump::with_proc(Source::Stereo { l: left, r: right, pos: start }, Proc::Solo(solo), sh, rate)
+        })?;
+        Ok(Preview { out, shared })
+    }
+
     fn mix(setup: Arc<MixSetup>, audio: Vec<Arc<Vec<f32>>>, start: usize) -> Result<Preview, String> {
         if audio.is_empty() || audio.len() != setup.cfgs.len() || audio.len() > MAX_VOICES {
             return Err(format!("合成试听需要 1–{MAX_VOICES} 段音频，且与位置一一对应"));
@@ -187,6 +202,10 @@ pub struct Files {
     job: Option<Job>,
     report: String,
     decoded: Option<(PathBuf, u8, Arc<Vec<f32>>)>,
+    /// 解码结果的右声道：听歌（立体声宽度大于 0）、单个立体声音频时才有，这时 `decoded` 里那段是左声道。
+    decoded_r: Option<Arc<Vec<f32>>>,
+    /// 试听单个立体声文件时左右声道两个声源此刻的 [方位角, 仰角, 距离, 说话活动]（没在用立体声对时为空）。
+    pair_tele: Vec<[f32; 4]>,
     decoding: Option<Receiver<Decoded>>,
     tele: Telemetry,
     // ---- 多音频合成
@@ -240,6 +259,8 @@ impl Files {
             job: None,
             report: String::new(),
             decoded: None,
+            decoded_r: None,
+            pair_tele: Vec::new(),
             decoding: None,
             tele: Telemetry::default(),
             voices: HashMap::new(),
@@ -271,6 +292,7 @@ impl Files {
         self.rt_mix = false;
         self.mix_sent = None;
         self.mix_tele.clear();
+        self.pair_tele.clear();
         self.preview_pending = false;
     }
 
@@ -378,7 +400,7 @@ impl Files {
         if self.s.mix_balance <= 0.0 {
             return None;
         }
-        let t = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.s.file_channel)?.tracks(self.align_on())?;
+        let t = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.ch_key())?.tracks(self.align_on())?;
         let key = Arc::as_ptr(t.data.first()?) as usize;
         self.mix_bal.as_ref().filter(|(k, _)| *k == key).map(|(_, b)| b.clone())
     }
@@ -387,7 +409,7 @@ impl Files {
         if !self.mixing() || self.s.mix_balance <= 0.0 {
             return;
         }
-        let Some(t) = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.s.file_channel).and_then(|m| m.tracks(self.align_on())) else { return };
+        let Some(t) = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.ch_key()).and_then(|m| m.tracks(self.align_on())) else { return };
         let Some(first) = t.data.first() else { return };
         let key = Arc::as_ptr(first) as usize;
         if self.mix_bal.as_ref().map_or(false, |(k, _)| *k == key) {
@@ -444,9 +466,25 @@ impl Files {
         }
     }
 
+    /// 解码结果按它区分（变了就要重新解码，同桌面版）：1–3 是「取哪个声道」选的左 / 右 / 混合；「自动」平时是 0
+    /// （更响的那个声道），听歌（立体声宽度大于 0）时单个音频是 4（左右声道都要，各当一个声源），多音频合成、
+    /// 左右双人是 3（左右混合）。
+    fn ch_key(&self) -> u8 {
+        match (self.s.file_channel, self.s.params.stereo_width > 0.0) {
+            (0, true) => {
+                if self.mixing() {
+                    3
+                } else {
+                    4
+                }
+            }
+            (c, _) => c.min(3),
+        }
+    }
+
     fn decode_mix(&mut self) {
         let paths = self.mix_paths();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         if self.duo() {
             let Some(p) = paths.first().cloned() else { return };
             match self.decoded.as_ref().filter(|(q, c, _)| *q == p && *c == ch) {
@@ -466,6 +504,8 @@ impl Files {
             return;
         }
         let chan = self.file_channel();
+        // 合成里每个音频是一个声源：听歌时「自动」取左右混合
+        let pick = auto_pick(&self.s.params, false);
         let align = self.align_on();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -476,7 +516,7 @@ impl Files {
                         s.spawn(move || {
                             let mut o = ConvertOptions::new(p.clone());
                             o.channel = chan;
-                            let (m, _) = load_mono(&o, &AtomicBool::new(false)).map_err(|e| format!("{}：{e}", file_name(p)))?;
+                            let m = load_audio(&o, &AtomicBool::new(false), pick).map(|(mut c, _)| c.swap_remove(0)).map_err(|e| format!("{}：{e}", file_name(p)))?;
                             let l = mix::loudness(&m);
                             let lv = Arc::new(balance::levels(&m));
                             Ok((Arc::new(m), l, lv))
@@ -552,7 +592,7 @@ impl Files {
             self.stop();
         }
         let paths = self.mix_paths();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         if self.mix_audio.as_ref().map_or(false, |m| m.paths == paths && m.ch == ch) {
             if self.align_on() && self.mix_decoding.is_none() && self.mix_audio.as_ref().map_or(false, |m| m.aligned.is_none()) {
                 self.align_mix();
@@ -576,7 +616,7 @@ impl Files {
         self.preview_s = selected_s;
         self.sync_params();
         let paths = self.mix_paths();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         let decoded = self.mix_audio.as_ref().filter(|m| m.paths == paths && m.ch == ch);
         let have = decoded.is_some();
         let ready = decoded.and_then(|m| m.tracks(self.align_on())).map(|t| {
@@ -773,13 +813,18 @@ impl Files {
         self.stop();
         self.preview_s = selected_s;
         self.sync_params();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         if let Some((p, c, audio)) = &self.decoded {
             if *p == input && *c == ch {
                 let start = ((self.preview_s.max(0.0) * FS as f64) as usize).min(audio.len());
-                match Preview::file(self.cfg.clone(), audio.clone(), start) {
+                // 左右声道都解码了（听歌、立体声的音频）：左右声道各当一个声源
+                let started = match &self.decoded_r {
+                    Some(right) => Preview::stereo(self.cfg.clone(), audio.clone(), right.clone(), start),
+                    None => Preview::file(self.cfg.clone(), audio.clone(), start),
+                };
+                match started {
                     Ok(rt) => {
-                        self.status = format!("试听中：{}（{} Hz）", rt.out.name, rt.out.out_rate);
+                        self.status = format!("试听中：{}（{} Hz）{}", rt.out.name, rt.out.out_rate, if self.decoded_r.is_some() { "，立体声：左右声道各一个声源" } else { "" });
                         self.rt = Some(rt);
                         self.rt_preview = true;
                     }
@@ -796,12 +841,17 @@ impl Files {
 
     fn decode_file(&mut self) {
         let Some(input) = self.file_in.clone() else { return };
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         let (tx, rx) = channel();
         let mut o = ConvertOptions::new(input.clone());
         o.channel = self.file_channel();
+        // 听歌时「自动」：单个音频左右声道都要；左右双人（当成一个声源再变成两个人）左右混合
+        let pick = auto_pick(&self.s.params, !self.mixing());
         std::thread::spawn(move || {
-            let r = load_mono(&o, &AtomicBool::new(false)).map(|(m, _)| (input, ch, Arc::new(m)));
+            let r = load_audio(&o, &AtomicBool::new(false), pick).map(|(c, _)| {
+                let mut it = c.into_iter().map(Arc::new);
+                (input, ch, it.next().unwrap_or_default(), it.next())
+            });
             let _ = tx.send(r);
         });
         self.decoding = Some(rx);
@@ -842,6 +892,7 @@ impl Files {
             self.stop();
             self.file_in = None;
             self.decoded = None;
+            self.decoded_r = None;
             self.decoding = None;
             self.preview_pending = false;
             if let Some(q) = self.files.get(i.min(self.files.len().saturating_sub(1))).cloned() {
@@ -859,6 +910,7 @@ impl Files {
         self.statuses.clear();
         self.file_in = None;
         self.decoded = None;
+        self.decoded_r = None;
         self.decoding = None;
         self.preview_pending = false;
         self.report.clear();
@@ -880,6 +932,7 @@ impl Files {
         self.stop();
         self.file_in = Some(p);
         self.decoded = None;
+        self.decoded_r = None;
         self.preview_s = self.start_s.max(0.0) as f64;
         self.preview_dragging = false;
         if !self.multi() {
@@ -900,7 +953,8 @@ impl Files {
         }
     }
 
-    /// 声道变了：重新解码（同桌面版 ui_file 里的处理）。
+    /// 取的声道变了（下拉框换了，或者「立体声宽度」在 0 和大于 0 之间变了——比如按了「听歌」）：重新解码，
+    /// 之前在试听的话解码完从原来的位置接着放（同桌面版 ui_file 里的处理）。
     fn on_channel_changed(&mut self) {
         if self.file_in.is_none() {
             return;
@@ -908,6 +962,7 @@ impl Files {
         let resume = self.rt_preview || self.preview_pending;
         self.stop();
         self.decoded = None;
+        self.decoded_r = None;
         self.mix_audio = None;
         self.preview_pending = resume;
         if self.mixing() {
@@ -958,6 +1013,7 @@ impl Files {
     fn sync_saved(&mut self) {
         let new = saved_now();
         let was_duo = self.duo();
+        let key_before = self.ch_key();
         let old = std::mem::replace(&mut self.s, new);
         if old.mix != self.s.mix {
             self.on_mix_mode_changed();
@@ -971,7 +1027,10 @@ impl Files {
         if old.mix_align != self.s.mix_align {
             self.on_align_changed();
         }
-        if old.file_channel != self.s.file_channel {
+        // 解码结果按 ch_key 区分：声道选择变了，或者听歌的开关（立体声宽度）变了、合成 / 左右双人开关让「自动」的取法变了
+        let key = self.ch_key();
+        let stale = self.decoded.as_ref().map_or(false, |(_, c, _)| *c != key) || self.mix_audio.as_ref().map_or(false, |m| m.ch != key);
+        if old.file_channel != self.s.file_channel || (key != key_before && (stale || self.decoding.is_some() || self.mix_decoding.is_some())) {
             self.on_channel_changed();
         }
     }
@@ -983,7 +1042,7 @@ impl Files {
                 self.mix_decoding = None;
                 match r {
                     Ok(m) => {
-                        if self.mixing() && m.paths == self.mix_paths() && m.ch == self.s.file_channel {
+                        if self.mixing() && m.paths == self.mix_paths() && m.ch == self.ch_key() {
                             if std::mem::take(&mut self.mix_shift) {
                                 if let Some(Ok(a)) = &m.aligned {
                                     self.preview_s = (self.preview_s - a.al.starts[0] as f64 / FS as f64).max(0.0);
@@ -1018,9 +1077,15 @@ impl Files {
             if let Ok(r) = rx.try_recv() {
                 self.decoding = None;
                 match r {
-                    Ok(d) => {
-                        self.decoded = Some(d);
-                        if self.preview_pending {
+                    Ok((path, ch, audio, right)) => {
+                        self.decoded = Some((path, ch, audio));
+                        self.decoded_r = right;
+                        if ch != self.ch_key() {
+                            // 解码期间取的声道变了：这份用不上，按新的再解一次
+                            self.decoded = None;
+                            self.decoded_r = None;
+                            self.decode_file();
+                        } else if self.preview_pending {
                             self.start_preview();
                         } else {
                             self.status = "音频已就绪，点击或拖动播放条即可试听".to_string();
@@ -1028,7 +1093,7 @@ impl Files {
                     }
                     Err(e) => {
                         if self.duo() {
-                            self.mix_failed = Some((self.mix_paths(), self.s.file_channel));
+                            self.mix_failed = Some((self.mix_paths(), self.ch_key()));
                         }
                         self.preview_pending = false;
                         self.status = e;
@@ -1079,6 +1144,9 @@ impl Files {
             self.tele = rt.shared.telemetry();
             if self.rt_mix {
                 self.mix_tele = rt.shared.voice_telemetry();
+            } else {
+                // 试听单个立体声文件：左右声道两个声源的位置（没在用立体声对时是空的）
+                self.pair_tele = rt.shared.voice_telemetry();
             }
             if let Some(e) = rt.shared.take_error() {
                 self.status = e;
@@ -1178,6 +1246,11 @@ impl Files {
             t[1..5].copy_from_slice(&a);
             t[11] = 1.0;
             t[12..16].copy_from_slice(&b);
+        } else if !self.rt_mix && self.pair_tele.len() == 2 {
+            // 立体声（听歌）：左右声道两个声源，记 2（同网页模式）
+            t[1..5].copy_from_slice(&self.pair_tele[0]);
+            t[11] = 2.0;
+            t[12..16].copy_from_slice(&self.pair_tele[1]);
         }
         t
     }
@@ -1207,7 +1280,7 @@ impl Files {
         let n_voices = if mixing { self.mix_voices().len() } else { 0 };
         let align = if self.s.mix_align && multi {
             let paths = self.mix_paths();
-            let ch = self.s.file_channel;
+            let ch = self.ch_key();
             match self.mix_audio.as_ref().filter(|m| m.paths == paths && m.ch == ch).and_then(|m| m.aligned.as_ref()) {
                 Some(Ok(a)) => {
                     let names: Vec<String> = paths.iter().map(|p| file_name(p)).collect();
@@ -1485,6 +1558,57 @@ mod tests {
         assert!(report.contains("1. 甲.wav（左耳）") && report.contains("2. 乙.wav（右耳，-3.0 dB）"), "{report}");
         assert!(staging.join("2/甲_mix_asmr.wav").is_file());
         crate::settings::update_doc("mix", json!(false)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 听歌：按了「听歌」之后，选中的立体声文件左右声道都解码（各当一个声源），转换的说明里写着立体声和响度；
+    /// 目标响度跟着换成 −14；切回人声的风格后重新按"更响的那个声道"解码成一个声源。
+    #[test]
+    fn music_style_decodes_both_channels_and_converts_as_stereo() {
+        let _lock = crate::settings::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::settings::provide_repo_data();
+        crate::settings::load_config("()").unwrap();
+        let dir = std::env::temp_dir().join(format!("asmr-files-music-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let song = dir.join("歌.wav");
+        {
+            let (l, r) = (auto_asmr::dsp::testsig::test_song(4.0, 51), auto_asmr::dsp::testsig::test_song(4.0, 52));
+            let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+            let mut w = hound::WavWriter::create(&song, spec).unwrap();
+            for (a, b) in l.iter().zip(&r) {
+                w.write_sample(*a).unwrap();
+                w.write_sample(*b).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut f = Files::new();
+        f.handle(&json!({"op": "add", "paths": [song.display().to_string()]}));
+        wait(&mut f, |s| s["preview"].is_object());
+        assert!(f.decoded_r.is_none() && f.ch_key() == 0, "人声的风格：取更响的那个声道，一个声源");
+        // 按「听歌」：下一次轮询发现取法变了，重新解码成左右两段
+        crate::settings::run_action("style_music").unwrap();
+        f.handle(&json!({"op": "poll"}));
+        assert_eq!(f.ch_key(), 4);
+        wait(&mut f, |s| s["preview"].is_object() && !s["decoding"].as_bool().unwrap());
+        assert!(f.decoded_r.is_some() && f.decoded.as_ref().is_some_and(|(_, c, _)| *c == 4));
+        assert_eq!(crate::settings::with_global(|g| g.saved.file_lufs), -14.0);
+        let staging = dir.join("out");
+        f.handle(&json!({"op": "convert", "staging": staging.display().to_string()}));
+        let st = wait(&mut f, |s| !s["busy"].as_bool().unwrap());
+        let report = st["report"].as_str().unwrap();
+        assert!(report.contains("左右声道各当一个声源") && report.contains("和原声一样响"), "{report}");
+        // 多音频合成 / 左右双人里是左右混合成一个声源
+        crate::settings::update_doc("duo_ms", json!(80.0)).unwrap();
+        f.handle(&json!({"op": "poll"}));
+        assert_eq!(f.ch_key(), 3);
+        crate::settings::update_doc("duo_ms", json!(0.0)).unwrap();
+        // 切回贴耳加强：重新解码成一个声源
+        crate::settings::run_action("style_ear").unwrap();
+        f.handle(&json!({"op": "poll"}));
+        wait(&mut f, |s| s["preview"].is_object() && !s["decoding"].as_bool().unwrap());
+        assert!(f.decoded_r.is_none() && f.decoded.as_ref().is_some_and(|(_, c, _)| *c == 0));
+        crate::settings::load_config("()").unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

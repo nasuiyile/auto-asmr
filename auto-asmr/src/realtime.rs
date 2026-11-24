@@ -8,6 +8,7 @@
 
 use crate::dsp::engine::{Engine, EngineConfig, PostMode};
 use crate::dsp::mix::{self, MixSetup, Mixer, MAX_VOICES};
+use crate::dsp::solo::Solo;
 use crate::dsp::{FS, FS_USIZE};
 use crate::live::{mic_sink, Proc, Pump, Shared, Source};
 use crate::spsc;
@@ -222,6 +223,8 @@ enum Feed {
     File(Arc<Vec<f32>>, usize),
     /// 多音频合成的试听：（各段 48 kHz 单声道, 合成配置, 从第几个样本开始）。
     Mix(Vec<Arc<Vec<f32>>>, Arc<MixSetup>, usize),
+    /// 试听一个立体声文件：（左声道, 右声道, 从第几个样本开始）。
+    Stereo(Arc<Vec<f32>>, Arc<Vec<f32>>, usize),
 }
 
 impl Realtime {
@@ -245,6 +248,12 @@ impl Realtime {
     /// 试听：用实时引擎把一段已解码的音频（48 kHz 单声道）播到输出设备，可以边听边调参数。
     pub fn start_preview(opts: &RtOptions, cfg: Arc<EngineConfig>, audio: Arc<Vec<f32>>, start_sample: usize) -> Result<Realtime, String> {
         Self::start_inner(opts, cfg, Feed::File(audio, start_sample))
+    }
+
+    /// 试听一个立体声文件（左右声道各一段，48 kHz）：「立体声宽度」大于 0 时左右声道各当一个声源，为 0 时合成单声道
+    /// 过一个引擎；边听边改参数（[`Realtime::set_config`]）时随时切换，不用重新开始。
+    pub fn start_preview_stereo(opts: &RtOptions, cfg: Arc<EngineConfig>, left: Arc<Vec<f32>>, right: Arc<Vec<f32>>, start_sample: usize) -> Result<Realtime, String> {
+        Self::start_inner(opts, cfg, Feed::Stereo(left, right, start_sample))
     }
 
     /// 多音频合成的试听：几段已解码的音频（48 kHz 单声道，与 `setup` 里的音源一一对应）各在自己的位置，同时播放。
@@ -290,6 +299,14 @@ impl Realtime {
                 // 试听不开主播模式的"话少时也一直在动"：动作严格跟着说话走，与文件转换一致
                 let eng = Engine::new(cfg, PostMode::Realtime, 0.0);
                 (None, Source::Memory { data: audio, pos }, Proc::One(eng))
+            }
+            Feed::Stereo(left, right, pos) => {
+                info.input_name = "文件".into();
+                info.in_rate = FS_USIZE as u32;
+                info.in_channels = 2;
+                // 立体声对事先建好：播放中改「立体声宽度」时音频线程里不分配内存
+                let solo = Solo::new(cfg, PostMode::Realtime, 0.0).with_pair();
+                (None, Source::Stereo { l: left, r: right, pos }, Proc::Solo(solo))
             }
             Feed::Mix(audio, setup, pos) => {
                 info.input_name = format!("{} 个文件合成", audio.len());

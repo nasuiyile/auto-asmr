@@ -16,10 +16,12 @@ pub mod pinna;
 pub mod rain;
 pub mod resample;
 pub mod rng;
+pub mod solo;
 pub mod room;
 pub mod tables;
 pub mod testsig;
 pub mod thunder;
+pub mod tone;
 pub mod voice;
 
 /// 数据文件（`assets/ku100.bin`：KU100 HRIR 表、房间、耳机补偿；`assets/pinna.bin`：真人耳廓）。

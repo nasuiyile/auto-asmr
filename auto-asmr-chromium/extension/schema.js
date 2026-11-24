@@ -52,7 +52,7 @@ export const GROUPS = [
   {
     title: '贴耳感',
     rows: [
-      { key: 'ear_cm', derived: true, label: '贴耳距离', min: 0.8, max: 25, log: true, unit: 'cm', dec: 1, tip: '嘴离耳朵多远。1.7 cm = 贴着耳朵' },
+      { key: 'ear_cm', derived: true, label: '贴耳距离', min: 0.8, max: 100, log: true, unit: 'cm', dec: 1, tip: '嘴离耳朵多远。1.7 cm = 贴着耳朵；听歌时是声源离头多远（约 66 cm）' },
       { key: 'isolation_db', label: '远耳压低', min: 0, max: 40, unit: 'dB', dec: 0, tip: '贴耳时另一只耳朵额外压低多少（0 = 纯物理，像真实 KU100）' },
       { key: 'presence_db', label: '临场感', min: 0, max: 8, unit: 'dB', dec: 1, tip: '贴耳时近耳 3.5 kHz 和空气感' },
       { key: 'dark_db', label: '暗度', min: 0, max: 8, unit: 'dB', dec: 1, tip: '贴耳时近耳 5 kHz 附近压低，音色更暗、更柔' },
@@ -182,6 +182,15 @@ export const GROUPS = [
     ],
   },
   {
+    title: '听歌（音乐）',
+    rows: [
+      { key: 'stereo_width', label: '立体声宽度', min: 0, max: 180, unit: '°', dec: 0, tip: '网页声音的左右声道各当一个声源，放在声源位置的两侧，一共张开这么多度：90 = 左前 45°、右前 45°，像面前的一对音箱；并跟着「左右移动」一起走（环绕时整个舞台绕着头转）。0 = 关闭，左右声道先合成一个声源。左右双人里每个声音仍是一个声源' },
+      { key: 'tone', label: '音色校正', min: 0, max: 1, dec: 2, tip: '声源固定在一个位置时（固定、手动），把这个方向、距离和房间带来的整体音色偏差均衡掉：两只耳朵听到的总频谱和原声一致，两耳之间的差别原样保留。0 = 关闭，1 = 完全校正。穿梭、随机走位、环绕时不起作用' },
+      { key: 'lowcut_hz', label: '低切', min: 10, max: 120, unit: 'Hz', dec: 0, tip: '输入端高通的转折频率，这以下的低频被切掉。40 Hz 适合人声（去掉喷麦和低频噪声）；听歌调到 20 Hz 左右，保住最低的低音' },
+      { key: 'room_lowcut_hz', label: '房间声低切', min: 0, max: 800, unit: 'Hz', dec: 0, on: (p) => p.room, tip: '房间声里这个频率以下的不要，低音只留干净的直达声（实测房间的反射在 300 Hz 以下会让低音忽强忽弱，音乐里很明显）。0 = 关闭。打开「真实房间」后才起作用' },
+    ],
+  },
+  {
     title: '人声处理',
     rows: [
       { key: 'denoise', derived: true, label: '降噪', min: 0, max: 100, dec: 0, fmt: (x) => (x < 0.5 ? '0 关' : x >= 99.5 ? '100 最大' : `${x.toFixed(0)} dB`), tip: '输入降噪（RNNoise）：数值 = 底噪最多压低多少分贝，0 = 关闭，100 = 不设上限。开启后多 20 ms 延时' },
@@ -195,6 +204,7 @@ export const GROUPS = [
     rows: [
       { type: 'check', key: 'auto_level', label: '自动响度（慢慢把音量拉到目标）' },
       { key: 'target_lufs', label: '目标响度', min: -30, max: -10, unit: 'LUFS', dec: 0, on: (p) => p.auto_level },
+      { type: 'check', key: 'level_match', label: '和原声一样响', on: (p) => p.auto_level, tip: '听歌用：自动响度不再把音量拉到固定的目标响度，而是让输出和输入一样响，音乐自己的强弱起伏原样保留；只有原声比「目标响度」还响时才压到目标响度' },
       { key: 'out_gain_db', label: '输出增益', min: -60, max: 12, unit: 'dB', dec: 1, tip: '在自动响度之后、峰值限制器之前整体加减音量，相当于耳机音量旋钮。只在实时播放时起作用（「原声」时也起作用，原声不做自动响度；电脑版、安卓版转换文件时不用它，文件的响度由目标响度决定）。往上推到峰值上限后只会被限制器压扁，不会更响' },
       { key: 'ceiling_db', label: '峰值上限', min: -6, max: -0.1, unit: 'dBTP', dec: 1, tip: '限制器的真峰值上限' },
       { type: 'int', key: 'seed', label: '随机种子', tip: '换一个数字就换一套走位（下次开始处理时生效）' },

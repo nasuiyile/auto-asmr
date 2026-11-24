@@ -14,6 +14,9 @@ pub const EARCLEAN_LUFS: f32 = -20.0;
 pub const EARCLEAN_LIVE_LUFS: f32 = -23.0;
 /// 三份枕边呼吸参考整轨响度中位约 −26 LUFS。
 pub const BREATH_LUFS: f32 = -26.0;
+/// 听歌预设的目标响度：流媒体平台通行的 −14 LUFS（Spotify 的 Normal 档等；AES TD1008 按专辑归一化时最响的曲目也是 −14）。
+/// 听歌时它是"上限"：原声比它轻就保持原声的响度，比它响才压到它（见 [`Params::level_match`]）。
+pub const MUSIC_LUFS: f32 = -14.0;
 
 /// 左右移动的方式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,11 +189,28 @@ pub struct Params {
     /// 轻声化（ANSI S3.5 说话力度均衡），0 = 关闭。
     pub soft_voice: f32,
 
+    // ---- 听歌（音乐）：默认都是"关"，这时输出和加入这一组之前逐样本相同
+    /// 立体声宽度（度）：0 = 关，立体声输入先合成单声道，当成一个声源。大于 0 时左右声道各当一个声源，放在声源位置
+    /// 的两侧、各偏一半（60 = 左声道在左前 30°、右声道在右前 30°，像面前的一对音箱），并跟着移动方式一起走。
+    /// 只对"一个立体声输入"起作用；多音频合成、左右双人里每个声音仍是一个声源（左右声道混在一起）。
+    pub stereo_width: f32,
+    /// 音色校正，0–1：声源固定在一个位置时（固定 / 手动摆位 / 多音频合成的各自固定），把这个方向、距离和房间带来的
+    /// 整体音色偏差（两耳平均的频谱）均衡掉，两耳之间的差别原样保留。0 = 关闭；移动的方式不起作用。
+    pub tone: f32,
+    /// 低切（Hz）：输入端高通的转折频率。40 = 人声（去掉喷麦和低频噪声）；听歌时调低，保留最低的那一段低音。
+    pub lowcut_hz: f32,
+    /// 房间声低切（Hz）：房间声里这个频率以下的不要（送进房间之前先过高通），低音只留干净的直达声。0 = 关闭。
+    /// 实测房间的反射在 300 Hz 以下会和直达声互相抵消、叠加，低音忽强忽弱；人声的低频少，听不出来，音乐很明显。
+    pub room_lowcut_hz: f32,
+
     // ---- 输出
     /// 自动响度（实时模式：慢速把输出拉到目标响度；文件模式总是精确归一化）。
     pub auto_level: bool,
     /// 目标响度 LUFS。
     pub target_lufs: f32,
+    /// 和原声一样响：自动响度不再把音量拉到固定的目标响度，而是让输出和输入一样响（音乐自己的强弱起伏原样保留）；
+    /// 原声比目标响度还响时才压到目标响度。文件转换同理：目标响度取"原声的响度"和"目标响度"里较低的那个。
+    pub level_match: bool,
     /// 额外输出增益 dB。
     pub out_gain_db: f32,
     /// 真峰值上限 dBTP。
@@ -285,8 +305,13 @@ impl Default for Params {
             deess_db: 0.0,
             sharp_soften_db: 0.0,
             soft_voice: 0.0,
+            stereo_width: 0.0,
+            tone: 0.0,
+            lowcut_hz: 40.0,
+            room_lowcut_hz: 0.0,
             auto_level: true,
             target_lufs: -16.0,
+            level_match: false,
             out_gain_db: 0.0,
             ceiling_db: -1.0,
             seed: 1,
@@ -304,10 +329,11 @@ impl Default for Params {
 }
 
 impl Params {
-    /// 把"风格"管的那些参数恢复成默认值（= 贴耳加强）：贴耳感、入耳、左右移动的方式和节奏、忽远忽近、上下、
-    /// 房间与回放、去齿音 / 轻声化、目标响度。其余的——降噪、耳廓、自动响度开关、输出增益、峰值上限、
-    /// 随机种子、环绕 / 固定 / 手动模式的位置——保持不变。各风格都先做这一步，所以按哪个按钮结果都是确定的，
-    /// 从"掏耳"切回人声的风格时不会留下"伸进耳道、每只耳朵停 15 秒"之类的设置。
+    /// 把"风格"管的那些参数恢复成默认值（= 贴耳加强）：贴耳感、入耳、左右移动的方式和节奏、固定模式的方位、
+    /// 忽远忽近、上下、房间与回放、去齿音 / 轻声化、听歌那一组（立体声宽度、音色校正、低切）、目标响度和
+    /// "和原声一样响"。其余的——降噪、耳廓、自动响度开关、输出增益、峰值上限、随机种子、环绕的周期和半径、
+    /// 手动模式的位置——保持不变。各风格都先做这一步，所以按哪个按钮结果都是确定的，
+    /// 从"掏耳"切回人声的风格时不会留下"伸进耳道、每只耳朵停 15 秒"之类的设置，从"听歌"切回来也不会留下立体声。
     fn style_base(mut self) -> Self {
         let d = Params::default();
         (self.ear_dist, self.isolation_db, self.presence_db, self.ku100_eq, self.dark_db) = (d.ear_dist, d.isolation_db, d.presence_db, d.ku100_eq, d.dark_db);
@@ -326,6 +352,8 @@ impl Params {
         self.static_ambience = d.static_ambience;
         (self.deess_db, self.soft_voice, self.target_lufs) = (d.deess_db, d.soft_voice, d.target_lufs);
         self.sharp_soften_db = d.sharp_soften_db;
+        (self.static_az, self.stereo_width, self.tone, self.lowcut_hz, self.level_match) = (d.static_az, d.stereo_width, d.tone, d.lowcut_hz, d.level_match);
+        self.room_lowcut_hz = d.room_lowcut_hz;
         self
     }
 
@@ -424,8 +452,53 @@ impl Params {
         p
     }
 
+    /// 听歌：给音乐用的，不是给人声用的。听音实验里决定偏好的是音色有没有被染色，处理越重越不受喜欢，
+    /// 所以这个预设尽量贴近原来的立体声，只把声音从脑袋里挪到面前：
+    /// - 立体声的歌左右声道各当一个声源，摆在左前 45°、右前 45°，离头约 75 cm（近场监听的距离），固定不动；
+    /// - 加一点实测房间声把声音推到头外面（直达声比房间声高约 9 dB），房间声里 250 Hz 以下的不要，低音只留干净的直达声；
+    /// - 音色校正把这个摆位带来的整体音色偏差均衡掉（校正后 100 Hz–5 kHz 在 ±1.5 dB 以内），低切降到 20 Hz 保住低音；
+    /// - 响度和原声一样，音乐自己的强弱起伏不动；原声比 −14 LUFS 还响才压到 −14；
+    /// - 人声用的效果（远耳压低、气声、气流、轻声、忽远忽近、上下、晃动）全部关掉。
+    ///
+    /// 多音频合成（两段音频一左一右）时每段是一个声源，放在各自的位置上，用同样的距离、房间和音色校正。
+    /// 依据和实测见 doc/effects.md。
+    pub fn style_music(self) -> Self {
+        let mut p = self.style_base();
+        // 位置：面前的一对声源，固定不动；响度按物理规律随距离变（直达声和房间声的比例才对）
+        p.mode = MotionMode::Static;
+        p.static_az = 0.0;
+        p.stereo_width = 90.0;
+        p.ear_dist = 0.75;
+        p.level_follow = 1.0;
+        // 人声用的效果全部关掉
+        p.isolation_db = 0.0;
+        p.far_lf_cut_db = 0.0;
+        p.ear_warmth_db = 0.0;
+        p.warmth_db = 0.0;
+        p.presence_db = 0.0;
+        p.breath_db = 0.0;
+        p.puff = 0.0;
+        p.soft_near = 0.0;
+        p.sway = 0.0;
+        p.sway_follow = 0.0;
+        p.micro = 0.0;
+        p.updown = 0.0;
+        p.approach = 0.0;
+        // 音乐没有"停顿里不动"一说：改成环绕等方式时一直按真实时间走
+        p.pause_motion = 1.0;
+        // 房间：一点点，够把声音推到头外面就行
+        p.room = true;
+        p.wet_db = -10.0;
+        p.room_lowcut_hz = 250.0;
+        p.tone = 1.0;
+        p.lowcut_hz = 20.0;
+        p.level_match = true;
+        p.target_lufs = MUSIC_LUFS;
+        p
+    }
+
     /// 风格按钮的名字（和安卓版、插件的 action 同名），按桌面版按钮的顺序。
-    pub const STYLES: [&'static str; 4] = ["style_ear", "style_ku100", "style_breath", "style_earclean"];
+    pub const STYLES: [&'static str; 5] = ["style_ear", "style_ku100", "style_breath", "style_earclean", "style_music"];
 
     /// 按名字套用风格（名字见 [`Params::STYLES`]）；不认识的名字返回 None。
     pub fn with_style(self, name: &str) -> Option<Self> {
@@ -434,6 +507,7 @@ impl Params {
             "style_ku100" => self.style_ku100(),
             "style_breath" => self.style_breath(),
             "style_earclean" => self.style_earclean(),
+            "style_music" => self.style_music(),
             _ => return None,
         })
     }
@@ -453,6 +527,11 @@ impl Params {
         (self.bg_indoor, self.rain_near, self.rain_drip, self.bg_thunder) = (d.bg_indoor, d.rain_near, d.rain_drip, d.bg_thunder);
         self.bg_level = 55.0;
         self
+    }
+
+    /// "和原声一样响"是否生效：自动响度开着，并且勾了它。
+    pub fn match_on(&self) -> bool {
+        self.auto_level && self.level_match
     }
 
     /// 背景音比人声的目标响度低多少 dB（音量 1 → −40 dB，100 → 0 dB）；音量为 0（关闭）时 None。
@@ -573,13 +652,38 @@ mod tests {
         assert!(e.inear_cm > 1.0 && (10.0..=20.0).contains(&e.hold_s) && e.isolation_db >= 40.0);
         assert!(e.breath_db == 0.0 && e.puff == 0.0 && e.sway == 0.0 && e.sway_follow == 0.0 && e.soft_near == 0.0);
         assert!(!e.room && e.target_lufs == EARCLEAN_LIVE_LUFS && EARCLEAN_LUFS < d.target_lufs);
-        // 风格不管的设置保持不变：降噪、耳廓、输出、随机种子、各模式的位置
-        let mine = Params { denoise: true, denoise_db: 12.0, pinna: "B".to_string(), out_gain_db: -3.0, ceiling_db: -2.0, auto_level: false, seed: 9, static_az: 45.0, orbit_radius: 0.5, manual_az: 10.0, ..d.clone() };
-        for q in [mine.clone().style_ear(), mine.clone().style_ku100(), mine.clone().style_breath(), mine.clone().style_earclean()] {
-            assert!(q.denoise && q.denoise_db == 12.0 && q.pinna == "B");
-            assert!(q.out_gain_db == -3.0 && q.ceiling_db == -2.0 && !q.auto_level && q.seed == 9);
-            assert!(q.static_az == 45.0 && q.orbit_radius == 0.5 && q.manual_az == 10.0);
+        // 风格不管的设置保持不变：降噪、耳廓、输出、随机种子、环绕和手动模式的位置
+        let mine = Params { denoise: true, denoise_db: 12.0, pinna: "B".to_string(), out_gain_db: -3.0, ceiling_db: -2.0, auto_level: false, seed: 9, orbit_radius: 0.5, orbit_period: 20.0, manual_az: 10.0, ..d.clone() };
+        for name in Params::STYLES {
+            let q = mine.clone().with_style(name).unwrap();
+            assert!(q.denoise && q.denoise_db == 12.0 && q.pinna == "B", "{name}");
+            assert!(q.out_gain_db == -3.0 && q.ceiling_db == -2.0 && !q.auto_level && q.seed == 9, "{name}");
+            assert!(q.orbit_radius == 0.5 && q.orbit_period == 20.0 && q.manual_az == 10.0, "{name}");
         }
+    }
+
+    #[test]
+    fn music_style_is_a_fixed_stereo_stage_without_voice_effects() {
+        let d = Params::default();
+        let m = d.clone().style_music();
+        // 面前的一对声源：固定在正前方，左右声道张开 90°，不贴耳，远耳不压低
+        assert_eq!((m.mode, m.static_az, m.stereo_width), (MotionMode::Static, 0.0, 90.0));
+        assert!((0.5..=1.5).contains(&m.ear_dist) && m.isolation_db == 0.0 && m.far_lf_cut_db == 0.0);
+        // 人声用的效果、各种自动的动作都关掉
+        assert!(m.breath_db == 0.0 && m.puff == 0.0 && m.soft_near == 0.0 && m.presence_db == 0.0 && m.warmth_db == 0.0 && m.ear_warmth_db == 0.0);
+        assert!(m.sway == 0.0 && m.sway_follow == 0.0 && m.micro == 0.0 && m.updown == 0.0 && m.inear_cm == 0.0);
+        assert!(m.deess_db == 0.0 && m.soft_voice == 0.0 && m.sharp_soften_db == 0.0 && !m.static_ambience);
+        // 听歌那一组：音色校正、低切、和原声一样响（上限 −14 LUFS）
+        assert!(m.tone == 1.0 && m.lowcut_hz < d.lowcut_hz && m.level_match && m.target_lufs == MUSIC_LUFS && m.room && m.room_lowcut_hz > 100.0);
+        // 默认和别的风格里这一组都是关着的：单声道、不校正、40 Hz 低切、拉到目标响度
+        for name in ["style_ear", "style_ku100", "style_breath", "style_earclean"] {
+            let q = d.clone().with_style(name).unwrap();
+            assert!(q.stereo_width == 0.0 && q.tone == 0.0 && q.lowcut_hz == 40.0 && q.room_lowcut_hz == 0.0 && !q.level_match, "{name}");
+            // 从听歌切过去不留痕迹（固定方位也回到默认），先按哪个都一样
+            assert_eq!(m.clone().with_style(name).unwrap(), q, "{name}");
+            assert_eq!(q.style_music(), m, "{name}");
+        }
+        assert_eq!(m.clone().style_ear(), d);
     }
 
     #[test]
@@ -607,6 +711,8 @@ mod tests {
         assert!(!p.static_ambience);
         assert_eq!(p.sharp_soften_db, 0.0);
         assert_eq!((p.front, p.canal_db, p.rumble, p.muffle_db), (0.08, 10.0, 1.0, 6.0));
+        // 听歌那一组也是：旧配置读进来是关着的
+        assert_eq!((p.stereo_width, p.tone, p.lowcut_hz, p.room_lowcut_hz, p.level_match), (0.0, 0.0, 40.0, 0.0, false));
         assert!(p.room && p.ear_dist == 0.15);
         let e = Params::default().style_earclean();
         assert_eq!(ron::from_str::<Params>(&ron::to_string(&e).unwrap()).unwrap(), e);

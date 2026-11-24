@@ -19,9 +19,9 @@ object Engine {
     @JvmStatic external fun procTele(p: Long): FloatArray
     /** 「输出效果 / 监听原声」（存进配置）。原声时处理器不进引擎，只乘输出增益、过峰值限制器。 */
     @JvmStatic external fun setDry(dry: Boolean)
-    /** 0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音。 */
+    /** 0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音，4 = 听歌。 */
     @JvmStatic external fun setStyle(style: Int): Int
-    /** 按钮：style_ear / style_ku100 / style_earclean / style_breath / reset / bg_rain_night / bg_off。 */
+    /** 按钮：style_ear / style_ku100 / style_earclean / style_breath / style_music / reset / bg_rain_night / bg_off。 */
     @JvmStatic external fun action(name: String): Int
     /** 全部参数（JSON 对象，含虚拟字段和 dry）。 */
     @JvmStatic external fun getParamsJson(): String?

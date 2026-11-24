@@ -94,17 +94,18 @@ pub fn update_params(f: impl FnOnce(&mut Params) -> Result<(), String>) -> Resul
     })
 }
 
-/// 按钮（风格、恢复默认、背景音预设，见 [`action`]）。风格按钮和恢复默认还会关掉左右双人：各风格的默认状态都是一个声音
-/// （同桌面版）。
+/// 按钮（风格、恢复默认、背景音预设，见 [`action`]）。风格按钮和恢复默认走库里的 [`Saved::press_style`]（同桌面版）：
+/// 关掉左右双人（各风格的默认状态都是一个声音），文件转换的目标响度换成这个风格的，「听歌」把排布切回各自固定。
 pub fn run_action(name: &str) -> Result<(), String> {
-    let resets_duo = name == "reset" || Params::STYLES.contains(&name);
+    let style = name == "reset" || Params::STYLES.contains(&name);
     with_global(|g| {
         let mut s = g.saved.clone();
-        action(&mut s.params, name)?;
-        if resets_duo {
-            s.duo_ms = 0.0;
+        if style {
+            s.press_style(name);
+        } else {
+            action(&mut s.params, name)?;
         }
-        if s.params != g.saved.params || s.duo_ms != g.saved.duo_ms {
+        if s.params != g.saved.params || (s.duo_ms, s.mix_follow, s.file_lufs) != (g.saved.duo_ms, g.saved.mix_follow, g.saved.file_lufs) {
             g.saved = s;
             commit(g);
         }
@@ -157,6 +158,7 @@ pub fn describe_config(text: &str) -> Result<String, ConfigError> {
     let style = match p.active_style() {
         Some("style_earclean") => "掏耳",
         Some("style_breath") => "呼吸音",
+        Some("style_music") => "听歌",
         Some("style_ku100") => "KU100 实录",
         Some("style_ear") => "贴耳加强",
         _ => "自定义",
@@ -290,6 +292,7 @@ pub fn action(p: &mut Params, name: &str) -> Result<(), String> {
         "style_ku100" => p.clone().style_ku100(),
         "style_earclean" => p.clone().style_earclean(),
         "style_breath" => p.clone().style_breath(),
+        "style_music" => p.clone().style_music(),
         "reset" => Params::default(),
         "bg_rain_night" => p.clone().bg_rain_night(),
         "bg_off" => Params { bg_level: 0.0, ..p.clone() },
@@ -449,6 +452,12 @@ mod tests {
         let expected = p.clone().style_breath();
         action(&mut p, "style_breath").unwrap();
         assert_eq!(p, expected);
+        // 听歌：同一个函数；参数表里那一组按字段改得动
+        action(&mut p, "style_music").unwrap();
+        assert_eq!(p, before.clone().style_music());
+        set_field(&mut p, "stereo_width", json!(60.0)).unwrap();
+        set_field(&mut p, "level_match", json!(false)).unwrap();
+        assert!(p.stereo_width == 60.0 && !p.level_match && p.active_style().is_none());
         action(&mut p, "bg_rain_night").unwrap();
         assert!(p.bg_level > 0.0);
         action(&mut p, "bg_off").unwrap();
@@ -472,6 +481,15 @@ mod tests {
         update_doc("duo_ms", json!(80.0)).unwrap();
         run_action("bg_rain_night").unwrap();
         assert_eq!(with_global(|g| g.saved.duo_ms), 80.0);
+        // 听歌：排布切回各自固定（两段音频一左一右），文件转换的目标响度换成 −14；切回人声的风格恢复 −16
+        update_doc("mix_follow", json!(true)).unwrap();
+        run_action("style_music").unwrap();
+        assert_eq!(with_global(|g| (g.saved.mix_follow, g.saved.file_lufs, g.saved.duo_ms)), (false, -14.0, 0.0));
+        // 听歌的移动方式是固定：这时打开左右双人用各自固定（一左一右），不切到一起移动
+        update_doc("duo_ms", json!(80.0)).unwrap();
+        assert!(with_global(|g| !g.saved.mix_follow && g.duo.as_ref().is_some_and(|d| !d.follow)));
+        run_action("style_ku100").unwrap();
+        assert_eq!(with_global(|g| g.saved.file_lufs), -16.0);
         run_action("reset").unwrap();
         assert!(run_action("no_such").is_err());
     }
@@ -513,6 +531,8 @@ mod tests {
         assert!(d.contains("风格：掏耳") && d.contains("入耳"), "{d}");
         let d = describe_config(&config::to_text(&Saved { params: Params::default().style_breath(), ..Saved::default() }).unwrap()).unwrap();
         assert!(d.contains("风格：呼吸音"), "{d}");
+        let d = describe_config(&config::to_text(&Saved { params: Params::default().style_music(), ..Saved::default() }).unwrap()).unwrap();
+        assert!(d.contains("风格：听歌") && d.contains("固定") && d.contains("真实房间"), "{d}");
         let d = describe_config(&config::to_text(&Saved { params: Params { presence_db: 7.0, ..Params::default() }, ..Saved::default() }).unwrap()).unwrap();
         assert!(d.contains("风格：自定义"), "{d}");
         // 桌面版的窗口状态文件（没有设置）、别的程序的键值文件、普通文本：都认不出来

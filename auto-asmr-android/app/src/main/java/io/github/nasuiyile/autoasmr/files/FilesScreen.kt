@@ -476,7 +476,14 @@ private fun Options(st: JSONObject, busy: Boolean, multi: Boolean) {
     Column(Modifier.padding(top = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("取哪个声道", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-            val names = listOf("自动（更响的）", "左", "右", "混合")
+            // 「自动」：平时取更响的那个声道；听歌（立体声宽度大于 0）时单个音频左右声道都要、各当一个声源，
+            // 多音频合成 / 左右双人里左右混合成一个声源（同电脑版）
+            val auto = when {
+                p.optDouble("stereo_width", 0.0) <= 0.0 -> "自动（更响的）"
+                st.optBoolean("mixing") -> "自动（左右混合）"
+                else -> "自动（立体声）"
+            }
+            val names = listOf(auto, "左", "右", "混合")
             var open by remember { mutableStateOf(false) }
             Box {
                 OutlinedButton(onClick = { open = true }) { Text(names[p.optInt("file_channel", 0).coerceIn(0, 3)]) }

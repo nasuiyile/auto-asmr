@@ -109,7 +109,7 @@ function checkRow(d) {
   const box = h('input', { type: 'checkbox' });
   box.addEventListener('change', () => change(d.key, box.checked, box));
   return {
-    el: h('label', { className: 'check' }, box, d.label),
+    el: h('label', { className: 'check', title: d.tip || '' }, box, d.label),
     update(s) {
       box.checked = !!s.params[d.key];
     },
@@ -194,6 +194,7 @@ function build() {
     if (g.title.startsWith('入耳')) det.open = state.params.inear_cm > 0;
     if (g.title.startsWith('背景音')) det.open = state.params.bg_level > 0;
     if (g.title === '左右双人') det.open = state.doc.duo_ms > 0;
+    if (g.title.startsWith('听歌')) det.open = state.params.stereo_width > 0 || state.params.tone > 0;
     for (const d of g.rows) {
       const r = (BUILDERS[d.type] || sliderRow)(d);
       r.def = d;

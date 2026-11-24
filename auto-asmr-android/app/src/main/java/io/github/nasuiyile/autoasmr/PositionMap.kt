@@ -53,8 +53,10 @@ object Radar {
 @Composable
 fun PositionMap(p: JSONObject, tele: FloatArray, manual: Boolean) {
     val playing = tele.isNotEmpty() && tele[0] > 0f
-    // 左右双人：两个声音（颜色同电脑版：1 号橙、2 号蓝），2 号的位置在 tele[12..16]
+    // 两个声音（颜色同电脑版：第一个橙、第二个蓝），第二个的位置在 tele[12..16]：tele[11] 为 1 是左右双人的 1 号、2 号，
+    // 为 2 是立体声（听歌）的左声道、右声道两个声源
     val duo = playing && tele.size >= 16 && tele[11] > 0f
+    val stereo = duo && tele[11] >= 1.5f
     val c1 = if (duo) Color(0xFFFF7828) else Color(0xFFE5484D)
     val c2 = Color(0xFF4696F0)
     val accent = MaterialTheme.colorScheme.primary
@@ -154,7 +156,9 @@ fun PositionMap(p: JSONObject, tele: FloatArray, manual: Boolean) {
                 if (duo) drawCircle(c2, 5.dp.toPx(), Offset(x, y(tele[13].coerceIn(-80f, 85f))))
             }
         }
-        val read = if (duo) {
+        val read = if (stereo) {
+            String.format(Locale.ROOT, "立体声 · 左声道（橙）方位 %.0f° · 右声道（蓝）方位 %.0f° · 离头 %.1f cm", tele[1], tele[12], (tele[3] - Radar.HEAD_A) * 100f)
+        } else if (duo) {
             String.format(Locale.ROOT, "左右双人 · 1 号（橙）方位 %.0f° 离头 %.1f cm · 2 号（蓝）方位 %.0f° 离头 %.1f cm", tele[1], (tele[3] - Radar.HEAD_A) * 100f, tele[12], (tele[14] - Radar.HEAD_A) * 100f)
         } else if (playing) {
             val cm = (tele[3] - Radar.HEAD_A) * 100f

@@ -93,16 +93,28 @@ impl LoudnessMeter {
 }
 
 /// 实时自动响度：只在说话时测量短时响度（约 3 s），慢慢把输出拉到目标（每秒最多改 2 dB，范围 −12…+18 dB）。
+///
+/// "和原声一样响"（[`Leveler::process_match`]）：不拉到固定的目标，而是同时量输入和输出的短时响度，让输出和输入
+/// 一样响。两个读数跟着音乐一起起伏，比值几乎不变，所以增益是稳的，音乐自己的强弱起伏原样保留。
+/// 原声比目标响度还响时把超出的部分压下来——按"原声里最响的段落"定：最响的 3 秒比目标高出多少（留 2 dB，
+/// 最响的段落本来就比整首的平均响一两分贝）就压多少，压下去之后保持（每分钟只回升 6 dB），所以主歌、副歌之间的
+/// 强弱还在，不会一会儿拉上去一会儿压下来。
 pub struct Leveler {
     kw: [KWeight; 2],
     st: f32,
     heard: f32,
     pub gain_db: f32,
+    /// 和原声一样响：输入的短时功率（与 `st` 同一个时间常数）；原声里最响的段落的响度（LUFS，跟着短时响度往上走，
+    /// 往下每分钟只落 6 dB）。
+    st_in: f32,
+    loud_in: f32,
+    /// 配置变了（位置、房间……）带来的增益变化，还没走完的部分（dB）。
+    bump: f32,
 }
 
 impl Leveler {
     pub fn new() -> Self {
-        Leveler { kw: [KWeight::new(); 2], st: 0.0, heard: 0.0, gain_db: 0.0 }
+        Leveler { kw: [KWeight::new(); 2], st: 0.0, heard: 0.0, gain_db: 0.0, st_in: 0.0, loud_in: -200.0, bump: 0.0 }
     }
 
     /// 输入处理前的样本，返回应乘的线性增益。`speaking`：此刻是否在说话。
@@ -125,7 +137,66 @@ impl Leveler {
         }
         db_to_lin(self.gain_db)
     }
+
+    /// 刚开始放时用的 [`Leveler::seed`]：`match_db` 是估计出来的"和原声一样响"的增益，从比它低
+    /// [`MATCH_START_DB`] 的地方起步。
+    pub fn seed_start(&mut self, match_db: f32) {
+        self.seed(match_db - MATCH_START_DB);
+    }
+
+    /// 从这个增益起步（"和原声一样响"用：由位置估计出来的增益，一开头就差不多是对的）。之前量到的读数作废。
+    pub fn seed(&mut self, gain_db: f32) {
+        (self.gain_db, self.bump) = (gain_db.clamp(-40.0, 40.0), 0.0);
+        (self.st, self.st_in, self.loud_in, self.heard) = (0.0, 0.0, -200.0, 0.0);
+    }
+
+    /// 配置变了，估计的增益跟着变了 `delta_db`：很快地（约每秒 100 dB）走过去，不用等自动响度慢慢追。
+    pub fn bump(&mut self, delta_db: f32) {
+        self.bump = (self.bump + delta_db).clamp(-40.0, 40.0);
+    }
+
+    /// 和原声一样响。`l`、`r`：处理前的输出样本；`pin`：对应的输入功率（K 加权之后各声道的平方和；
+    /// 单声道输入按"放进两个声道"算，即 2x²）；`cap_lufs`：原声比它还响时压到它。
+    #[inline]
+    pub fn process_match(&mut self, l: f32, r: f32, pin: f32, speaking: bool, cap_lufs: f32) -> f32 {
+        const DT: f32 = 1.0 / FS;
+        let (a, b) = (self.kw[0].process(l), self.kw[1].process(r));
+        if self.bump != 0.0 {
+            let s = self.bump.clamp(-0.002, 0.002);
+            self.gain_db += s;
+            self.bump -= s;
+        }
+        if speaking {
+            let po = a * a + b * b;
+            // 开头按"到现在为止的平均"积累（很快有读数），之后是 3 秒的指数平均
+            let k = DT / self.heard.clamp(0.05, 3.0);
+            self.st += k * (po - self.st);
+            self.st_in += k * (pin - self.st_in);
+            self.heard += DT;
+            if self.heard > 0.15 && self.st > 1e-12 && self.st_in > 1e-12 {
+                let ratio = 10.0 * (self.st / self.st_in).log10();
+                // 原声里最响的段落：跟着 3 秒响度往上走，往下每分钟落 6 dB
+                let now = -0.691 + 10.0 * self.st_in.log10();
+                self.loud_in = now.max(self.loud_in - MATCH_RELEASE_DB_S * DT);
+                let want = (-ratio + (cap_lufs + MATCH_HEADROOM_DB - self.loud_in).min(0.0)).clamp(-40.0, 40.0);
+                // 开头两秒快速到位（原声很响时不会先按原声的响度放几秒再慢慢压下去），之后每秒最多改 2 dB
+                let step = if self.heard < 2.0 { 12.0 } else { 2.0 } * DT;
+                self.gain_db += (want - self.gain_db).clamp(-step, step);
+            }
+        }
+        db_to_lin(self.gain_db)
+    }
 }
+
+/// 和原声一样响：原声最响的 3 秒比"目标响度 + 这么多"还响时才往下压。最响的段落比整首的积分响度高一点
+/// （压得很满的流行歌约 0.5 dB，起伏大的两三分贝），留出这一截，整首正好在目标上的歌基本不会被压。
+const MATCH_HEADROOM_DB: f32 = 1.0;
+/// 和原声一样响：刚开始放（还不知道原声多响）时，先比"和原声一样响"低这么多 dB 起步，量到响度后约半秒内到位。
+/// 现在的歌大多比目标响 4–8 dB：从低处起步，最多是开头半秒轻轻地淡入；从"一样响"起步的话，
+/// 响的歌开头会先撞上限制器。
+pub const MATCH_START_DB: f32 = 6.0;
+/// 和原声一样响：压下去之后，"最响的段落"的读数每秒回落多少 dB（6 dB / 分钟）。
+const MATCH_RELEASE_DB_S: f32 = 0.1;
 
 const TP_TAPS: usize = 12;
 /// 真峰值检测要往后看的样本数。

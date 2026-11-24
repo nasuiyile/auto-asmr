@@ -5,3 +5,5 @@ hrtf/
 # 本机下载的呼吸音参考与试听
 /references/breath/*.flac
 /references/breath/*.wav
+# 本机打的发布包（和 GitHub Actions 里的 dist/ 同名）
+/dist/

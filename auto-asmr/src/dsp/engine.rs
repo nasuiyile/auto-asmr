@@ -4,14 +4,15 @@
 use super::ambience::{AmbienceSeparator, AMBIENCE_DELAY};
 use super::analysis::{Analyzer, Features};
 use super::direct::{DirectRenderer, BASE_DELAY};
-use super::dynamics::{Leveler, Limiter};
+use super::dynamics::{KWeight, Leveler, Limiter};
 use super::filters::{Biquad, Fir, OnePoleLp, BUTTER_Q};
 use super::motion::{clock_step, clock_step_live, Motion, Pose};
-use super::params::{Params, Playback};
+use super::params::{MotionMode, Params, Playback};
 use super::pinna::pinnas;
 use super::rain::{Rain, RainSetup};
 use super::room::{conv_energy, Room};
 use super::tables::{tables, Hrir, Tables};
+use super::tone::{self, ToneEq, N_TONE};
 use super::voice::{ear_eq_fir, far_shadow_fir, muffle_fir, soft_voice_fir, BreathDeBoom, BreathFx, BreathTone, CanalComb, ContactFx, DeEsser, Denoiser, SharpSoftener, DENOISE_DELAY, EAR_EQ_TAPS};
 use super::{db_to_lin, lin_to_db, smoothstep, C, CANAL_L0, CTRL, CTRL_DT, EAR_R, FS, NTAP, R_MAX, R_MIN};
 use std::sync::Arc;
@@ -47,9 +48,37 @@ pub struct Derived {
     /// 耳廓选择：真人耳廓在 [`pinnas`] 里的序号；None = KU100 自己的耳廓。
     pub pinna: Option<usize>,
     pub room_gain: f32,
+    /// 定房间声增益用的能量比（贴耳时近耳直达声 ÷ 远耳房间声，都带回放补偿）：只跟回放补偿有关，算一次要几毫秒
+    /// （房间响应和补偿滤波器的卷积），所以单独记着，只改「房间声大小」时不用重算。
+    pub room_ratio: f32,
     pub pref: f32,
     /// 背景音（雨声）的设置；音量为 0 时 None。
     pub rain: Option<Arc<RainSetup>>,
+    /// 音色校正（见 [`tone`]）：[一个声源, 立体声对]。声源不固定、强度为 0、或用不着时 None。
+    pub tone: [Option<Arc<ToneEq>>; 2],
+    /// 这个位置的渲染让响度变化多少 dB（[一个声源, 立体声对]，音色校正已算在内）："和原声一样响"从它的相反数起步。
+    pub level_gain_db: [f32; 2],
+}
+
+/// 低切：输入端高通和输出端高通的转折频率（Hz）。默认 40 Hz 时是原来的 40 / 25 Hz。
+fn lowcut(p: &Params) -> (f32, f32) {
+    let f = p.lowcut_hz.clamp(5.0, 400.0);
+    (f, 25.0 * f / 40.0)
+}
+
+/// 房间声低切的高通：两个二阶巴特沃斯串起来（每倍频程 24 dB，转折频率处 −6 dB）；0 = 关闭时是直通。
+pub(crate) fn room_lowcut(p: &Params) -> [Biquad; 2] {
+    if p.room_lowcut_hz > 0.0 {
+        [Biquad::highpass(p.room_lowcut_hz.clamp(10.0, 4000.0), BUTTER_Q); 2]
+    } else {
+        [Biquad::default(); 2]
+    }
+}
+
+/// 影响音色校正和响度估计的那些参数（都没变时直接复用上一份配置里算好的）。
+fn tone_key(p: &Params) -> (MotionMode, [u32; 14], bool) {
+    let f = [p.static_az, p.ear_dist, p.height, p.manual_az, p.manual_dist, p.manual_tilt, p.orbit_radius, p.ear_angle, p.stereo_width, p.tone, p.wet_db, p.level_follow, p.isolation_db, p.room_lowcut_hz];
+    (p.mode, f.map(f32::to_bits), p.room)
 }
 
 /// 参数 + 派生数据的一份不可变快照。
@@ -88,17 +117,27 @@ impl EngineConfig {
                 Playback::Headphone(name) => tab.headphones.iter().find(|(n, _)| n == name).map(|(_, h)| Arc::new(h.clone())).or_else(|| Some(Arc::new(tab.cdfc.clone()))),
             }
         };
-        let room_gain = if same_pb && same(&|q| q.wet_db == params.wet_db) {
-            pd.unwrap().room_gain
+        let room_ratio = if same_pb {
+            pd.unwrap().room_ratio
         } else {
             // 贴耳（右耳、方位 100°）时近耳直达声的能量，与扇区 3 远耳（左耳）房间声的能量之比定标
-            let mut h = Hrir::default();
-            tab.lookup(260.0, EAR_R, &mut h);
-            let pb = playback.as_ref().map(|v| v.as_slice());
-            let e_near = conv_energy(&h.h[1], pb, usize::MAX);
-            let e_room = conv_energy(tab.room_ir(3, 0), pb, tab.room_len);
-            ((e_near / e_room.max(1e-30)) as f32 * 10f32.powf((REAL_ROOM_DB + params.wet_db) / 10.0)).sqrt()
+            let ratio = || {
+                let mut h = Hrir::default();
+                tab.lookup(260.0, EAR_R, &mut h);
+                let pb = playback.as_ref().map(|v| v.as_slice());
+                let e_near = conv_energy(&h.h[1], pb, usize::MAX);
+                let e_room = conv_energy(tab.room_ir(3, 0), pb, tab.room_len);
+                (e_near / e_room.max(1e-30)) as f32
+            };
+            // 通用扩散场补偿最常用，房间响应和它卷积一次要几毫秒：只算一次（从原机音色的风格切回来时不用再算）
+            static DIFFUSE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+            if params.playback == Playback::Diffuse {
+                *DIFFUSE.get_or_init(ratio)
+            } else {
+                ratio()
+            }
         };
+        let room_gain = if same_pb && same(&|q| q.wet_db == params.wet_db) { pd.unwrap().room_gain } else { (room_ratio * 10f32.powf((REAL_ROOM_DB + params.wet_db) / 10.0)).sqrt() };
         let pref = tab.lookup_power(270.0, 0.14);
         let far_eq = if same(&|q| q.far_shadow_db == params.far_shadow_db) { pd.unwrap().far_eq.clone() } else { far_shadow_fir(params.far_shadow_db).map(Arc::new) };
         let soft_near = if same(&|q| q.soft_near == params.soft_near) {
@@ -123,7 +162,26 @@ impl EngineConfig {
         };
         let pinna = pinnas().index(&params.pinna);
         let rain = if same_pb && same(&|q| q.bg_same(&params)) { pd.unwrap().rain.clone() } else { RainSetup::new(&params, playback.as_deref().map(|v| v.as_slice())).map(Arc::new) };
-        EngineConfig { params, derived: Derived { ear_eq, playback, soft, far_eq, soft_near, muffle, inear_gain, pinna, room_gain, pref, rain } }
+        let tone_used = |q: &Params| q.tone > 0.0 || q.level_match || q.stereo_width > 0.0;
+        let (tone, level_gain_db) = if !tone_used(&params) {
+            // 听歌那一组都没开（人声的风格）：用不着，不算
+            ([None, None], [0.0; 2])
+        } else if same_pb && same(&|q| tone_used(q) && tone_key(q) == tone_key(&params)) {
+            (pd.unwrap().tone.clone(), pd.unwrap().level_gain_db)
+        } else {
+            // 声源待着的位置上，从输入到两耳的整体频响：音色校正把它拉平，响度估计给"和原声一样响"起步用
+            let (pose, fixed) = tone::rest_pose(&params);
+            let pb = playback.as_ref().map(|v| v.as_slice());
+            let one = |width: Option<f32>| {
+                let bands = tone::render_bands(tab, &params, pb, room_gain, pref, pose, width);
+                let eq = if fixed { tone::design(&bands, params.tone) } else { None };
+                (tone::gain_db(&bands, eq.as_ref()), eq.map(Arc::new))
+            };
+            let (g0, t0) = one(None);
+            let (g1, t1) = if params.stereo_width > 0.0 { one(Some(params.stereo_width)) } else { (g0, None) };
+            ([t0, t1], [g0, g1])
+        };
+        EngineConfig { params, derived: Derived { ear_eq, playback, soft, far_eq, soft_near, muffle, inear_gain, pinna, room_gain, room_ratio, pref, rain, tone, level_gain_db } }
     }
 }
 
@@ -372,6 +430,21 @@ pub struct Engine {
     rain: Option<Rain>,
     rain_l: [f32; CTRL],
     rain_r: [f32; CTRL],
+    /// 音色校正：带状态的滤波器、现在用的是哪一组系数、用没用过（没用过时整段跳过，输出与加入它之前逐样本相同）。
+    tone: [Biquad; N_TONE],
+    tone_src: Option<Arc<ToneEq>>,
+    tone_run: bool,
+    /// 用配置里的哪一组音色校正和响度估计：Some(0) = 一个声源，Some(1) = 立体声对里的一个，None = 不校正
+    /// （"一起移动"时各音源的位置是错开的，配置里那一组对不上）。
+    tone_sel: Option<usize>,
+    /// 立体声对：左右两个引擎用同一份语音分析结果（说话活动、音量），所以走位、远近完全一致。None = 用自己的。
+    pub feats_ov: Option<Features>,
+    /// "和原声一样响"：输入的 K 加权，和这一小段每个样本的输入功率。
+    kin: KWeight,
+    pin: [f32; CTRL],
+    /// 房间声低切：送进房间之前的高通；用没用过（没用过时跳过，输出与加入它之前逐样本相同）。
+    room_hp: [Biquad; 2],
+    room_hp_run: bool,
 }
 
 impl Engine {
@@ -388,7 +461,7 @@ impl Engine {
             tab: tables(),
             cfg: cfg.clone(),
             post,
-            in_hp: Biquad::highpass(40.0, BUTTER_Q),
+            in_hp: Biquad::highpass(lowcut(&cfg.params).0, BUTTER_Q),
             fixed_ambience: FixedAmbience::new(la, cfg.params.static_ambience, bed_gain),
             denoiser: Denoiser::new(),
             deess: DeEsser::new(),
@@ -414,7 +487,7 @@ impl Engine {
             lf: [EarLf::new(), EarLf::new()],
             pb: None,
             pb_src: None,
-            out_hp: [Biquad::highpass(25.0, BUTTER_Q); 2],
+            out_hp: [Biquad::highpass(lowcut(&cfg.params).1, BUTTER_Q); 2],
             leveler: Leveler::new(),
             limiter: Limiter::new(2.0, 80.0),
             motion: Motion::new(seed),
@@ -449,9 +522,67 @@ impl Engine {
             rain: None,
             rain_l: [0.0; CTRL],
             rain_r: [0.0; CTRL],
+            tone: [Biquad::default(); N_TONE],
+            tone_src: None,
+            tone_run: false,
+            tone_sel: Some(0),
+            feats_ov: None,
+            kin: KWeight::new(),
+            pin: [0.0; CTRL],
+            room_hp: room_lowcut(&cfg.params),
+            room_hp_run: cfg.params.room_lowcut_hz > 0.0,
         };
         e.set_config(cfg);
+        e.seed_level();
         e
+    }
+
+    /// 用配置里的哪一组音色校正和响度估计（见 `tone_sel`）；多音频合成的混音器在建好引擎后设一次。
+    pub fn set_tone_sel(&mut self, sel: Option<usize>) {
+        if sel != self.tone_sel {
+            self.tone_sel = sel;
+            self.sync_tone();
+            self.seed_level();
+        }
+    }
+
+    /// 估计的响度变化（dB）：这个位置的渲染会让响度变化多少（见 [`Derived::level_gain_db`]）。
+    pub fn level_gain_db(&self) -> f32 {
+        self.cfg.derived.level_gain_db[self.tone_sel.unwrap_or(0)]
+    }
+
+    /// 自动响度此刻的增益（dB）。
+    pub fn leveler_gain_db(&self) -> f32 {
+        self.leveler.gain_db
+    }
+
+    /// 换成另一个增益（单个引擎和立体声对之间切换时把音量接上）。
+    pub fn set_leveler_gain_db(&mut self, db: f32) {
+        self.leveler.seed(db);
+    }
+
+    /// "和原声一样响"：自动响度从估计的增益起步（只有引擎自己做自动响度时，即实时模式）。
+    fn seed_level(&mut self) {
+        if self.post == PostMode::Realtime && self.cfg.params.match_on() {
+            self.leveler.seed_start(-self.level_gain_db());
+        }
+    }
+
+    /// 音色校正的系数换成现在配置里的（保留滤波器的状态，不会咔嗒）；关掉时换成直通的系数。
+    fn sync_tone(&mut self) {
+        let want = self.tone_sel.and_then(|k| self.cfg.derived.tone[k].clone());
+        let same = match (&self.tone_src, &want) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            for (i, f) in self.tone.iter_mut().enumerate() {
+                f.retune(&want.as_ref().map_or_else(Biquad::default, |t| t.sos[i]));
+            }
+            self.tone_run |= want.is_some();
+            self.tone_src = want;
+        }
     }
 
     /// 主播模式（麦克风直通）：停顿超过 1 秒后动作恢复正常速度，话少时声音也一直在动。
@@ -496,7 +627,30 @@ impl Engine {
         if self.post == PostMode::Realtime {
             sync_rain(&mut self.rain, &cfg);
         }
+        if cfg.params.room_lowcut_hz != self.cfg.params.room_lowcut_hz {
+            for (f, n) in self.room_hp.iter_mut().zip(room_lowcut(&cfg.params)) {
+                f.retune(&n);
+            }
+            self.room_hp_run |= cfg.params.room_lowcut_hz > 0.0;
+        }
+        if cfg.params.lowcut_hz != self.cfg.params.lowcut_hz {
+            let (fi, fo) = lowcut(&cfg.params);
+            self.in_hp.retune(&Biquad::highpass(fi, BUTTER_Q));
+            for f in self.out_hp.iter_mut() {
+                f.retune(&Biquad::highpass(fo, BUTTER_Q));
+            }
+        }
+        // "和原声一样响"：刚打开时从估计的增益起步；已经开着时，位置 / 房间变了带来的响度变化马上跟上
+        let (was, old_gain) = (self.cfg.params.match_on(), self.level_gain_db());
         self.cfg = cfg;
+        self.sync_tone();
+        if self.post == PostMode::Realtime && self.cfg.params.match_on() {
+            if was {
+                self.leveler.bump(old_gain - self.level_gain_db());
+            } else {
+                self.leveler.seed_start(-self.level_gain_db());
+            }
+        }
     }
 
     /// 文件模式：用整段音频统计的说话阈值和中位音量。
@@ -508,6 +662,11 @@ impl Engine {
     /// 下一次 `process` 开始那一块用的就是这个值。多音频合成"一起移动"用它算几个音源共同的说话时钟。
     pub fn upcoming_act(&self) -> f32 {
         self.analyzer.features().act
+    }
+
+    /// 下一个控制块的全部语音分析结果（同 [`Engine::upcoming_act`]，立体声对用它让两个引擎共用一份）。
+    pub fn upcoming_feats(&self) -> Features {
+        self.analyzer.features()
     }
 
     /// 算法本身的延时（样本，48 kHz）：可选降噪、可选底响分离、预读、分数延时插值、限制器。
@@ -522,7 +681,7 @@ impl Engine {
     fn begin_block(&mut self) {
         let cfg = self.cfg.clone();
         let p = &cfg.params;
-        self.feats = self.analyzer.features();
+        self.feats = self.feats_ov.unwrap_or_else(|| self.analyzer.features());
         let f = self.feats;
         self.n_blocks += 1;
         if f.act > 0.5 {
@@ -763,9 +922,15 @@ impl Engine {
         // 薄声缺气流时最多补至原气流旋钮约 4 倍档，旋钮关掉后仍然没有气流。
         let puff_boost = (4.0 / p.puff.max(0.25) - 1.0).max(0.0);
         let rumble_on = p.inear_cm > 0.0 && p.rumble > 0.0;
+        let match_on = self.post == PostMode::Realtime && p.match_on();
         let mut bed = [0.0; CTRL];
         for i in 0..m {
             let x = input[i];
+            if match_on {
+                // 输入的响度：单声道按"放进两个声道"算
+                let k = self.kin.process(x);
+                self.pin[i] = 2.0 * k * k;
+            }
             self.in_pk = self.in_pk.max(x.abs());
             let mut v = self.in_hp.process(x);
             if p.denoise {
@@ -790,10 +955,12 @@ impl Engine {
             let a = self.sharp_softener.process(a, sharp_mix);
             let a = self.breath_deboom.process(a, deboom_mix);
             let (a, thin) = self.breath_tone.process(a, tone);
+            // 音色校正：直达声和房间声都经过它
+            let a = if self.tone_run { self.tone.iter_mut().fold(a, |v, f| f.process(v)) } else { a };
             self.xa[i] = a;
             // 房间声的输入和直达声一样多延后几个样本（分数延时插值器的固定时延），两者的相对时间与 Python 版一致
             self.xr[i] = self.room_dl[self.room_dl_pos];
-            self.room_dl[self.room_dl_pos] = a;
+            self.room_dl[self.room_dl_pos] = if self.room_hp_run { self.room_hp.iter_mut().fold(a, |v, f| f.process(v)) } else { a };
             self.room_dl_pos = (self.room_dl_pos + 1) % ROOM_DELAY;
             let wp = (ph + i) as f32 / CTRL as f32;
             let gb = self.warm.0 + (self.warm.1 - self.warm.0) * wp;
@@ -870,7 +1037,13 @@ impl Engine {
             l = self.out_hp[0].process(l);
             r = self.out_hp[1].process(r);
             if self.post == PostMode::Realtime {
-                let lg = if p.auto_level { self.leveler.process(l, r, speaking, p.target_lufs) } else { 1.0 };
+                let lg = if match_on {
+                    self.leveler.process_match(l, r, self.pin[i], speaking, p.target_lufs)
+                } else if p.auto_level {
+                    self.leveler.process(l, r, speaking, p.target_lufs)
+                } else {
+                    1.0
+                };
                 let (a, b) = if rain_on {
                     self.limiter.process((l * lg + self.rain_l[i]) * gain, (r * lg + self.rain_r[i]) * gain, ceiling)
                 } else {
@@ -1106,6 +1279,59 @@ mod tests {
         // 共鸣关掉后深浅不再改变音色
         let (mid0, deep0) = (at(1.2, 0.0), at(2.1, 0.0));
         assert!((deep0 - mid0).abs() < 0.5, "{mid0} {deep0}");
+    }
+
+    /// 低切：听歌时输入端的高通降到 20 Hz，30 Hz 的低音留得住（40 Hz 时被切掉约 8 dB）；
+    /// 房间声低切：房间声里的低频不要了，低音只剩直达声，中高频的房间声还在。
+    #[test]
+    fn low_cut_keeps_deep_bass_and_room_low_cut_keeps_the_room_out_of_the_bass() {
+        let fs = FS as usize;
+        let tone = |f: f32| -> Vec<f32> { (0..3 * fs).map(|i| 0.1 * (std::f32::consts::TAU * f * i as f32 / FS).sin()).collect() };
+        let level = |p: Params, x: &[f32]| {
+            let (l, r) = render(p, x);
+            10.0 * ((l[fs..].iter().chain(&r[fs..]).map(|v| (v * v) as f64).sum::<f64>() / (2 * fs) as f64) + 1e-30).log10() as f32
+        };
+        let dry = Params { mode: MotionMode::Static, static_az: 0.0, ear_dist: 0.75, level_follow: 1.0, warmth_db: 0.0, sway: 0.0, sway_follow: 0.0, micro: 0.0, updown: 0.0, ..Params::default() };
+        let at = |lowcut: f32, f: f32| level(Params { lowcut_hz: lowcut, ..dry.clone() }, &tone(f)) - level(Params { lowcut_hz: lowcut, ..dry.clone() }, &tone(1000.0));
+        let (v40, v20) = (at(40.0, 30.0), at(20.0, 30.0));
+        assert!(v20 - v40 > 4.0, "30 Hz 相对 1 kHz：低切 40 Hz 时 {v40:.1} dB，20 Hz 时 {v20:.1} dB");
+        assert!(at(20.0, 60.0).abs() < 2.5, "低切 20 Hz 时 60 Hz 基本不动：{:.1} dB", at(20.0, 60.0));
+        // 房间声 = 开房间的输出 − 不开房间的输出（同一个输入，其余参数相同）
+        let room_part = |cut: f32, f: f32| {
+            let x = tone(f);
+            let wet = Params { room: true, wet_db: 0.0, room_lowcut_hz: cut, ..dry.clone() };
+            let (a, b) = (render(wet, &x), render(dry.clone(), &x));
+            10.0 * ((a.0[fs..].iter().zip(&b.0[fs..]).map(|(u, v)| ((u - v) * (u - v)) as f64).sum::<f64>() / fs as f64) + 1e-30).log10() as f32
+        };
+        assert!(room_part(0.0, 100.0) - room_part(250.0, 100.0) > 20.0, "100 Hz 的房间声应被切掉：{:.1} → {:.1} dB", room_part(0.0, 100.0), room_part(250.0, 100.0));
+        assert!((room_part(0.0, 2000.0) - room_part(250.0, 2000.0)).abs() < 1.0, "2 kHz 的房间声不变");
+    }
+
+    /// 音色校正：正前方的声源本来 3–5 kHz 偏多；打开校正后各频段和输入的比例基本一致，而且两耳之间的差别没有变。
+    #[test]
+    fn tone_correction_flattens_the_overall_spectrum_and_leaves_the_ear_difference_alone() {
+        let mut rng = crate::dsp::rng::Rng::new(77);
+        let x: Vec<f32> = (0..4 * FS as usize).map(|_| 0.05 * rng.uniform(-1.0, 1.0)).collect();
+        let p = Params { mode: MotionMode::Static, static_az: 30.0, ear_dist: 0.75, level_follow: 1.0, isolation_db: 0.0, warmth_db: 0.0, sway: 0.0, sway_follow: 0.0, micro: 0.0, updown: 0.0, lowcut_hz: 20.0, ..Params::default() };
+        let bands = [(200.0, 400.0), (800.0, 1600.0), (3000.0, 5000.0)];
+        let sum = |l: &[f32], r: &[f32], lo: f32, hi: f32| 10.0 * (10f32.powf(band_db(l, lo, hi) / 10.0) + 10f32.powf(band_db(r, lo, hi) / 10.0)).log10();
+        let measure = |tone: f32| {
+            let (l, r) = render(Params { tone, ..p.clone() }, &x);
+            let (l, r) = (&l[48000..], &r[48000..]);
+            let rel: Vec<f32> = bands.iter().map(|&(lo, hi)| sum(l, r, lo, hi) - band_db(&x, lo, hi)).collect();
+            let ild: Vec<f32> = bands.iter().map(|&(lo, hi)| band_db(r, lo, hi) - band_db(l, lo, hi)).collect();
+            (rel, ild)
+        };
+        let ((off, ild0), (on, ild1)) = (measure(0.0), measure(1.0));
+        assert!(off[2] - off[0] > 2.5, "不校正时 3–5 kHz 比 200–400 Hz 多 {:.1} dB", off[2] - off[0]);
+        assert!((on[2] - on[0]).abs() < 1.5 && (on[1] - on[0]).abs() < 1.5, "校正后各频段相对输入：{on:?} dB（校正前 {off:?}）");
+        for (a, b) in ild0.iter().zip(&ild1) {
+            assert!((a - b).abs() < 0.3, "两耳声级差不该变：{ild0:?} → {ild1:?}");
+        }
+        // 移动的方式不校正：穿梭时开不开校正输出一样
+        let moving = Params { mode: MotionMode::Sweep, ..p.clone() };
+        let (a, b) = (render(Params { tone: 1.0, ..moving.clone() }, &x[..48000]), render(moving, &x[..48000]));
+        assert!(a.0 == b.0 && a.1 == b.1, "穿梭时音色校正不该起作用");
     }
 
     /// 入耳深度为 0 时，入耳这一组参数怎么设都不影响输出（与加入这一组之前逐样本相同）。

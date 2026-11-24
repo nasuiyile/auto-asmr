@@ -20,7 +20,7 @@ auto-asmr 有一份 Rust 引擎和四个版本（安卓版有网页、全局两�
 | 浏览器插件 | `auto-asmr-chromium/wasm`（依赖共用库） | `wasm/src/lib.rs`：`change('style', 编号)`、`bg_preset`、`derived` 换算项；`extension/schema.js`：参数表；`extension/popup.html`、`options.html`：`data-style` 按钮 |
 | Python 版 | `asmr_binaural.py` **独立实现**：`STYLES` 只有 `ear`、`ku100`，参数名也不同 | 新东西要么移植过去，要么在 `doc/python-cli.md` 和 `doc/python-vs-rust.md` 里写明"只有 Rust 版有" |
 
-风格按钮的编号是 0 贴耳加强、1 KU100 实录、2 掏耳、3 呼吸音。安卓的 `asmr_set_style`、插件的 `data-style`、安卓 App 的 adb 列表都按编号对应，所以新风格加在末尾，已有的编号不要动。桌面版界面上的按钮顺序可以不同，它按名字调方法，不用编号。
+风格按钮的编号是 0 贴耳加强、1 KU100 实录、2 掏耳、3 呼吸音、4 听歌。安卓的 `asmr_set_style`、插件的 `data-style`、安卓 App 的 adb 列表都按编号对应，所以新风格加在末尾，已有的编号不要动。桌面版界面上的按钮顺序可以不同，它按名字调方法，不用编号。
 
 ## 新增一个预设
 

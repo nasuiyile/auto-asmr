@@ -12,7 +12,7 @@ KU100 实录风格下，`--breath` 控制原声里轻微送气的最大提升量
 
 `--static-ambience on|off` 控制录音里的持续底噪是否留在固定位置。默认关闭，各风格（包括 `--style ku100`）都不开启；例如 `auto-asmr convert 输入.wav --style ku100 --static-ambience on -o 对照.wav` 可听打开后的效果。实时模拟 `rt-sim` 使用同一选项。房间反射用 `--room` 调节，输入降噪用 `--denoise` 调节，合成雨声仍用 `--bg` 调节。
 
-`--style` 有四个内置预设：`ear`（贴耳加强，默认）、`ku100`（近耳轻语）、`breath`（呼吸音）和 `earclean`（掏耳）。风格先生效，显式参数可覆盖预设。处理单声道呼吸录音、保留原来的吸气和呼气节奏：
+`--style` 有五个内置预设：`ear`（贴耳加强，默认）、`ku100`（近耳轻语）、`breath`（呼吸音）、`earclean`（掏耳）和 `music`（听歌）。风格先生效，显式参数可覆盖预设。处理单声道呼吸录音、保留原来的吸气和呼气节奏：
 
 ```bash
 auto-asmr convert 呼吸干声.wav --style breath -o 枕边呼吸.wav
@@ -27,6 +27,16 @@ auto-asmr convert 呼吸干声.wav --style breath -o 枕边呼吸.wav
 ```bash
 auto-asmr convert 棉签.wav -o 掏耳.wav --style earclean --hold-time 60 --rumble 0.8
 ```
+
+听歌 `--style music`：立体声的歌左右声道各当一个声源，摆在左前 45°、右前 45°、离头 75 cm，固定不动，加一点房间声，音色校正到和原声一致；目标响度默认 −14 LUFS，而且"和原声一样响"——原声比它轻就保持原声的响度，完成后会打印原声多响、按多响输出。这一组的几项可以单独调：`--stereo-width`（立体声宽度，度；0 = 左右合成一个声源）、`--tone`（音色校正 0–1）、`--lowcut`（低切，Hz）、`--room-lowcut`（房间声低切，Hz）、`--level-match on|off`（和原声一样响）。`--channel` 留在 `auto` 时左右声道都要；写 `left` / `right` / `mix` 就是一个声源。做法和依据见[效果与依据 · 听歌](effects.md#听歌音乐--style-music)。
+
+```bash
+auto-asmr convert 歌.flac --style music -o 歌_听歌.wav
+auto-asmr convert 歌.flac --style music --mode orbit --period 24 -o 歌_环绕.wav    # 整个舞台绕着头转（8D）
+auto-asmr convert 版本A.m4a 版本B.m4a --mix --mix-align --style music -o 两个版本.wav  # 两首歌一左一右
+```
+
+两首歌 `--mix` 时每首左右混合成一个声源，默认一个在左、一个在右（各自固定），距离、房间和音色校正都按听歌预设。
 
 批量：给多个文件或文件夹，`--out-dir` 指定输出文件夹（不写就放在源文件旁边），`-j` 指定并行数（默认 CPU 逻辑核数）：
 

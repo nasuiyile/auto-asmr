@@ -12,7 +12,7 @@ mod view3d;
 use crate::batch;
 use crate::dsp::align::Alignment;
 use crate::dsp::balance::{self, BalanceData};
-use crate::offline::{align_tracks, balance_data, convert_mix, default_mix_output, default_output, load_mono, Channel, ConvertOptions, ConvertReport, Duo, MixInput, MixOptions};
+use crate::offline::{align_tracks, auto_pick, balance_data, convert_mix, default_mix_output, default_output, load_audio, Channel, ConvertOptions, ConvertReport, Duo, MixInput, MixOptions};
 use crate::realtime::{self, DeviceInfo, DeviceList, Realtime, RtOptions};
 use eframe::egui;
 use egui::{Color32, RichText};
@@ -123,7 +123,8 @@ struct Job {
     mix: Option<String>,
 }
 
-type Decoded = Result<(PathBuf, u8, Arc<Vec<f32>>), String>;
+/// 试听用的解码结果：文件、声道（[`App::ch_key`]）、48 kHz 的音频，以及右声道（左右声道都要时才有，这时前面那段是左声道）。
+type Decoded = Result<(PathBuf, u8, Arc<Vec<f32>>, Option<Arc<Vec<f32>>>), String>;
 
 /// 合成试听用的解码结果：参与合成的文件、取的声道、各段 48 kHz 单声道、各段的响度（对齐用），
 /// 以及自动对齐的结果（打开"自动对齐"后才算；对不上时是错误说明，按没对齐的原样播放）。
@@ -199,6 +200,12 @@ pub struct App {
     job: Option<Job>,
     report: String,
     decoded: Option<(PathBuf, u8, Arc<Vec<f32>>)>,
+    /// 解码结果的右声道：听歌（立体声宽度大于 0）、单个立体声音频时才有，这时 `decoded` 里那段是左声道。
+    decoded_r: Option<Arc<Vec<f32>>>,
+    /// 上一帧的 [`App::ch_key`]：变了（换了声道，或者听歌的开关变了）就重新解码。
+    ch_key_seen: u8,
+    /// 试听单个立体声文件时左右声道两个声源此刻的 [方位角, 仰角, 距离, 说话活动]（没在用立体声对时为空）。
+    pair_tele: Vec<[f32; 4]>,
     decoding: Option<Receiver<Decoded>>,
     tele: Telemetry,
     trail: Vec<(f32, f32)>,
@@ -359,6 +366,9 @@ impl App {
             job: None,
             report: String::new(),
             decoded: None,
+            decoded_r: None,
+            ch_key_seen: 0,
+            pair_tele: Vec::new(),
             decoding: None,
             tele: Telemetry { az: 270.0, r: 0.105, in_db: -120.0, out_db: -120.0, ..Default::default() },
             trail: Vec::new(),
@@ -471,6 +481,7 @@ impl App {
         self.mix_sent = None;
         self.mix_tele.clear();
         self.mix_trails.clear();
+        self.pair_tele.clear();
         self.preview_pending = false;
     }
 
@@ -622,7 +633,7 @@ impl App {
         if self.s.mix_balance <= 0.0 || self.mic_duo() {
             return None;
         }
-        let t = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.s.file_channel)?.tracks(self.align_on())?;
+        let t = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.ch_key())?.tracks(self.align_on())?;
         let key = Arc::as_ptr(t.data.first()?) as usize;
         self.mix_bal.as_ref().filter(|(k, _)| *k == key).map(|(_, b)| b.clone())
     }
@@ -632,7 +643,7 @@ impl App {
         if !self.mixing() || self.s.mix_balance <= 0.0 || self.mic_duo() {
             return;
         }
-        let Some(t) = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.s.file_channel).and_then(|m| m.tracks(self.align_on())) else { return };
+        let Some(t) = self.mix_audio.as_ref().filter(|m| m.paths == self.mix_paths() && m.ch == self.ch_key()).and_then(|m| m.tracks(self.align_on())) else { return };
         let Some(first) = t.data.first() else { return };
         let key = Arc::as_ptr(first) as usize;
         if self.mix_bal.as_ref().map_or(false, |(k, _)| *k == key) {
@@ -695,7 +706,7 @@ impl App {
     /// 后台解码参与合成的几个文件（同时解码），并测各自的响度。
     fn decode_mix(&mut self) {
         let paths = self.mix_paths();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         if self.duo() {
             // 左右双人：两个声音是同一个文件，直接用单个文件的解码结果（还没有就先解码它，好了再来），只补算响度
             let Some(p) = paths.first().cloned() else { return };
@@ -716,6 +727,8 @@ impl App {
             return;
         }
         let chan = self.file_channel();
+        // 合成里每个音频是一个声源：听歌时「自动」取左右混合
+        let pick = auto_pick(&self.s.params, false);
         let align = self.align_on();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -726,7 +739,7 @@ impl App {
                         s.spawn(move || {
                             let mut o = ConvertOptions::new(p.clone());
                             o.channel = chan;
-                            let (m, _) = load_mono(&o, &AtomicBool::new(false)).map_err(|e| format!("{}：{e}", file_name(p)))?;
+                            let m = load_audio(&o, &AtomicBool::new(false), pick).map(|(mut c, _)| c.swap_remove(0)).map_err(|e| format!("{}：{e}", file_name(p)))?;
                             let l = mix::loudness(&m);
                             let lv = Arc::new(balance::levels(&m));
                             Ok((Arc::new(m), l, lv))
@@ -810,7 +823,7 @@ impl App {
             self.stop();
         }
         let paths = self.mix_paths();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         if self.mix_audio.as_ref().map_or(false, |m| m.paths == paths && m.ch == ch) {
             // 打开了自动对齐但还没对齐过：在后台先算好（列表下面马上能看到从哪里裁）
             if self.align_on() && self.mix_decoding.is_none() && self.mix_audio.as_ref().map_or(false, |m| m.aligned.is_none()) {
@@ -836,7 +849,7 @@ impl App {
         self.preview_s = selected_s;
         self.sync_params();
         let paths = self.mix_paths();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         let decoded = self.mix_audio.as_ref().filter(|m| m.paths == paths && m.ch == ch);
         let have = decoded.is_some();
         let ready = decoded.and_then(|m| m.tracks(self.align_on())).map(|t| {
@@ -963,6 +976,21 @@ impl App {
         }
     }
 
+    /// 解码结果按它区分（变了就要重新解码）：1–3 是「取哪个声道」选的左 / 右 / 混合；「自动」平时是 0（更响的那个声道），
+    /// 听歌（立体声宽度大于 0）时单个音频是 4（左右声道都要，各当一个声源），多音频合成、左右双人是 3（左右混合）。
+    fn ch_key(&self) -> u8 {
+        match (self.s.file_channel, self.s.params.stereo_width > 0.0) {
+            (0, true) => {
+                if self.mixing() {
+                    3
+                } else {
+                    4
+                }
+            }
+            (c, _) => c.min(3),
+        }
+    }
+
     fn convert_options(&self, input: PathBuf, output: PathBuf) -> ConvertOptions {
         let mut o = ConvertOptions::new(input);
         o.output = output;
@@ -1066,13 +1094,18 @@ impl App {
         self.stop();
         self.preview_s = selected_s;
         self.sync_params();
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         if let Some((p, c, audio)) = &self.decoded {
             if *p == input && *c == ch {
                 let start = ((self.preview_s.max(0.0) * FS as f64) as usize).min(audio.len());
-                match Realtime::start_preview(&self.rt_options(), self.cfg.clone(), audio.clone(), start) {
+                // 左右声道都解码了（听歌、立体声的音频）：左右声道各当一个声源
+                let started = match &self.decoded_r {
+                    Some(right) => Realtime::start_preview_stereo(&self.rt_options(), self.cfg.clone(), audio.clone(), right.clone(), start),
+                    None => Realtime::start_preview(&self.rt_options(), self.cfg.clone(), audio.clone(), start),
+                };
+                match started {
                     Ok(rt) => {
-                        self.status = format!("{}：{}（{} Hz）", t("试听中", "Previewing"), rt.info.output_name, rt.info.out_rate);
+                        self.status = format!("{}：{}（{} Hz）{}", t("试听中", "Previewing"), rt.info.output_name, rt.info.out_rate, if self.decoded_r.is_some() { t("，立体声：左右声道各一个声源", ", stereo: one source per channel") } else { "" });
                         self.rt = Some(rt);
                         self.rt_preview = true;
                     }
@@ -1089,12 +1122,17 @@ impl App {
 
     fn decode_file(&mut self) {
         let Some(input) = self.file_in.clone() else { return };
-        let ch = self.s.file_channel;
+        let ch = self.ch_key();
         let (tx, rx) = channel();
         let mut o = ConvertOptions::new(input.clone());
         o.channel = self.file_channel();
+        // 听歌时「自动」：单个音频左右声道都要；左右双人（当成一个声源再变成两个人）左右混合
+        let pick = auto_pick(&self.s.params, !self.mixing());
         std::thread::spawn(move || {
-            let r = load_mono(&o, &AtomicBool::new(false)).map(|(m, _)| (input, ch, Arc::new(m)));
+            let r = load_audio(&o, &AtomicBool::new(false), pick).map(|(c, _)| {
+                let mut it = c.into_iter().map(Arc::new);
+                (input, ch, it.next().unwrap_or_default(), it.next())
+            });
             let _ = tx.send(r);
         });
         self.decoding = Some(rx);
@@ -1137,6 +1175,7 @@ impl App {
             self.file_in = None;
             self.file_out = None;
             self.decoded = None;
+            self.decoded_r = None;
             self.decoding = None;
             self.preview_pending = false;
             if let Some(q) = self.files.get(i.min(self.files.len().saturating_sub(1))).cloned() {
@@ -1152,6 +1191,7 @@ impl App {
         self.file_in = None;
         self.file_out = None;
         self.decoded = None;
+        self.decoded_r = None;
         self.decoding = None;
         self.preview_pending = false;
         self.report.clear();
@@ -1176,6 +1216,7 @@ impl App {
         self.file_out = Some(default_output(&p));
         self.file_in = Some(p);
         self.decoded = None;
+        self.decoded_r = None;
         self.preview_s = self.start_s.max(0.0) as f64;
         self.preview_dragging = false;
         if !self.multi() {
@@ -1453,14 +1494,28 @@ impl App {
         }
 
         let active = self.rt.is_some();
+        // 立体声对（听歌）：左右声道各一个声源。试听中用引擎报告的位置；没在试听时（文件页、会按立体声处理）按参数画出
+        // 摆好的位置，拖「立体声宽度」时马上看得到
+        let pair: Vec<[f32; 4]> = if active {
+            self.pair_tele.clone()
+        } else if self.s.tab == Tab::File && self.ch_key() == 4 && (self.decoded.is_none() || self.decoded_r.is_some()) {
+            let pr = &self.s.params;
+            let ((az, el, r), _) = crate::dsp::tone::rest_pose(pr);
+            (self.tele.az, self.tele.el, self.tele.r) = (az, el, r);
+            mix::pair_offsets(pr.stereo_width).iter().map(|o| [(az + o).rem_euclid(360.0), el, r, 0.0]).collect()
+        } else {
+            Vec::new()
+        };
         // 俯视图里画的是水平投影：声源升高时向头中心靠拢，从头顶绕过去时会穿过头的上方
         let (el, r3) = (self.tele.el.to_radians(), self.tele.r);
         let r_h = r3 * el.cos();
-        if active {
+        if active && pair.is_empty() {
             self.trail.push((self.tele.az, r_h));
             if self.trail.len() > 90 {
                 self.trail.remove(0);
             }
+        } else if !pair.is_empty() {
+            self.trail.clear();
         }
         let n = self.trail.len();
         for (i, w) in self.trail.windows(2).enumerate() {
@@ -1476,7 +1531,19 @@ impl App {
             Color32::from_rgb(170, 120, 90)
         };
         let sp = pos(self.tele.az, r_h);
-        p.circle_filled(sp, if speaking && active { 7.0 } else { 5.5 }, col);
+        if pair.len() == 2 {
+            // 左声道橙色、右声道蓝色（同合成的 1、2 号），之间连一条细线；正中间的小点是舞台的中心
+            let at = |q: &[f32; 4]| pos(q[0], q[2] * q[1].to_radians().cos());
+            p.line_segment([at(&pair[0]), at(&pair[1])], egui::Stroke::new(1.0, grid));
+            for (k, (q, label)) in pair.iter().zip([t("左", "L"), t("右", "R")]).enumerate() {
+                let c = if active { VOICE_COLORS[k] } else { VOICE_COLORS[k].gamma_multiply(0.75) };
+                p.circle_filled(at(q), if active && q[3] > 0.5 { 7.0 } else { 5.5 }, c);
+                p.text(at(q) + egui::vec2(0.0, 9.0), egui::Align2::CENTER_TOP, label, egui::FontId::proportional(11.0), c);
+            }
+            p.circle_filled(sp, 2.5, col);
+        } else {
+            p.circle_filled(sp, if speaking && active { 7.0 } else { 5.5 }, col);
+        }
         if manual {
             // 手动的目标位置：一个可以拖的圈（声音稍微滞后一点跟过来）
             let pr = &self.s.params;
@@ -1733,7 +1800,7 @@ impl App {
             });
             if self.s.mix_align && self.multi() {
                 let paths = self.mix_paths();
-                let ch = self.s.file_channel;
+                let ch = self.ch_key();
                 let warn = ui.visuals().warn_fg_color;
                 let info = self.mix_audio.as_ref().filter(|m| m.paths == paths && m.ch == ch).and_then(|m| m.aligned.as_ref());
                 match info {
@@ -2002,13 +2069,21 @@ impl App {
     }
 
     fn ui_file(&mut self, ui: &mut egui::Ui) {
-        let channel_before = self.s.file_channel;
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             self.ui_file_list(ui);
             egui::Grid::new("fileopts").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
-                ui.label(t("取哪个声道", "Channel"));
-                let names = [t("自动（更响的）", "Auto (louder)"), t("左", "Left"), t("右", "Right"), t("混合", "Mix")];
+                ui.label(t("取哪个声道", "Channel")).on_hover_text(t(
+                    "立体声的音频怎么取。自动：平时取更响的那个声道（人声的两个声道多半是同一个声音）；「立体声宽度」大于 0（听歌）时，单个音频左右声道都要、各当一个声源，多音频合成和左右双人里左右混合成一个声源。选了左 / 右 / 混合就总是按选的取成一个声源",
+                    "How a stereo file is read. Auto: normally the louder channel (voice recordings usually carry the same voice on both); with Stereo width above 0 (music) a single file keeps both channels, one source each, while files in a mix or Two voices are mixed down to one source. Left / Right / Mix always give one source",
+                ));
+                // 「自动」在听歌时的含义不一样，写在选项上
+                let auto = match self.ch_key() {
+                    4 => t("自动（立体声）", "Auto (stereo)"),
+                    3 if self.s.file_channel == 0 => t("自动（左右混合）", "Auto (mix)"),
+                    _ => t("自动（更响的）", "Auto (louder)"),
+                };
+                let names = [auto, t("左", "Left"), t("右", "Right"), t("混合", "Mix")];
                 egui::ComboBox::from_id_salt("fch").width(120.0).selected_text(names[self.s.file_channel.min(3) as usize]).show_ui(ui, |ui| {
                     for (i, n) in names.iter().enumerate() {
                         ui.selectable_value(&mut self.s.file_channel, i as u8, *n);
@@ -2050,16 +2125,24 @@ impl App {
                 ui.end_row();
             });
         });
-        if channel_before != self.s.file_channel && self.file_in.is_some() {
-            let resume = self.rt_preview || self.preview_pending;
-            self.stop();
-            self.decoded = None;
-            self.mix_audio = None;
-            self.preview_pending = resume;
-            if self.mixing() {
-                self.decode_mix();
-            } else {
-                self.decode_file();
+        // 取的声道变了（下拉框换了，或者「立体声宽度」在 0 和大于 0 之间变了——比如按了「听歌」）：重新解码，
+        // 之前在试听的话解码完从原来的位置接着放
+        let key = self.ch_key();
+        if key != self.ch_key_seen {
+            self.ch_key_seen = key;
+            let stale = self.decoded.as_ref().map_or(false, |(_, c, _)| *c != key) || self.mix_audio.as_ref().map_or(false, |m| m.ch != key);
+            if self.file_in.is_some() && (stale || self.decoding.is_some() || self.mix_decoding.is_some()) {
+                let resume = self.rt_preview || self.preview_pending;
+                self.stop();
+                self.decoded = None;
+                self.decoded_r = None;
+                self.mix_audio = None;
+                self.preview_pending = resume;
+                if self.mixing() {
+                    self.decode_mix();
+                } else {
+                    self.decode_file();
+                }
             }
         }
         self.ui_devices(ui, false);
@@ -2194,13 +2277,15 @@ impl App {
     ///
     /// 按下风格按钮或「恢复默认」时返回 Some(需同步的文件转换目标响度)：调用方据此同步目标响度、关掉左右双人
     /// （各风格的默认状态都是一个声音）。
-    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<Option<f32>> {
+    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<(Option<f32>, bool)> {
         let mut file_lufs = None;
         let mut pressed = false;
+        let mut music = false;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(t("风格", "Style")).strong());
-            // 从掏耳切回人声的风格：文件转换的目标响度也恢复成 −16
-            let back = (p.inear_cm > 0.0 || p.target_lufs == crate::dsp::params::BREATH_LUFS).then_some(Params::default().target_lufs);
+            // 文件转换的目标响度跟着风格走：掏耳、呼吸音、听歌各有自己的，切回别的风格时恢复成 −16
+            let before = p.clone();
+            let back = crate::config::style_file_lufs(&before, "style_ear");
             // 选中的风格（参数和它一致）按钮亮起来
             let active = p.active_style();
             let style_button = |ui: &mut egui::Ui, name: &str, label: &str| ui.add(egui::Button::selectable(active == Some(name), label));
@@ -2224,6 +2309,12 @@ impl App {
                 file_lufs = Some(crate::dsp::params::EARCLEAN_LUFS);
                 pressed = true;
             }
+            if style_button(ui, "style_music", t("听歌", "Music")).on_hover_text(t("给音乐用（不是给人声用的）：立体声的歌左右声道各当一个声源，摆在左前 45°、右前 45°，离头约 75 cm，固定不动；加一点实测房间声把声音推到头外面；音色校正到和原声一致，响度和原声一样（最高 −14 LUFS）；人声用的效果全部关掉。多音频合成时两段音频一左一右各在一边。降噪会把音乐当噪声处理，请关掉", "For music (not voice): a stereo song becomes two sources, its left and right channels 45° to the front-left and front-right, about 75 cm away, not moving; a little measured room pushes the sound out of the head; the tone is corrected back to the original and the loudness matches the original (at most −14 LUFS); every voice-only effect is off. In a multi-audio mix the files sit one on each side. Denoise treats music as noise: turn it off")).clicked() {
+                *p = p.clone().style_music();
+                file_lufs = crate::config::style_file_lufs(&before, "style_music");
+                pressed = true;
+                music = true;
+            }
             if ui.button(t("恢复默认", "Reset")).clicked() {
                 *p = Params::default();
                 file_lufs = back;
@@ -2233,7 +2324,7 @@ impl App {
         egui::CollapsingHeader::new(RichText::new(t("贴耳感", "Closeness")).strong()).default_open(true).show(ui, |ui| {
             egui::Grid::new("g1").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 let mut cm = p.ear_cm();
-                if row(ui, t("贴耳距离", "Distance from ear"), t("嘴离耳朵多远。1.7 cm = 贴着耳朵", "How far the mouth is from the ear. 1.7 cm = touching"), egui::Slider::new(&mut cm, 0.8..=25.0).logarithmic(true).suffix(" cm").fixed_decimals(1)) {
+                if row(ui, t("贴耳距离", "Distance from ear"), t("嘴离耳朵多远。1.7 cm = 贴着耳朵；听歌时是声源离头多远（约 66 cm）", "How far the mouth is from the ear. 1.7 cm = touching; for music this is how far the sources are from the head (about 66 cm)"), egui::Slider::new(&mut cm, 0.8..=100.0).logarithmic(true).suffix(" cm").fixed_decimals(1)) {
                     p.set_ear_cm(cm);
                 }
                 row(ui, t("远耳压低", "Far-ear cut"), t("贴耳时另一只耳朵额外压低多少（0 = 纯物理，像真实 KU100）", "Extra attenuation of the far ear when close (0 = pure physics)"), egui::Slider::new(&mut p.isolation_db, 0.0..=40.0).suffix(" dB").fixed_decimals(0));
@@ -2290,7 +2381,7 @@ impl App {
                 ui.add(egui::Label::new(RichText::new(t("手动：声源停在你摆的位置，在左边的位置图上拖动。忽远忽近、上下、自然晃动此时不起作用", "Manual: the source stays where you put it; drag it on the map at the left. Near / far sway, up / down and micro motion are inactive")).weak().small()).wrap());
             }
         });
-        pressed.then_some(file_lufs)
+        pressed.then_some((file_lufs, music))
     }
 
     /// "左右移动"里的模式按钮和各模式的参数（合成时整块变灰）。
@@ -2469,6 +2560,17 @@ impl App {
                 ui.end_row();
             });
         });
+        // 没用上（立体声宽度、音色校正都是 0）时默认折叠，用上了默认展开；两种状态各记各的展开 / 折叠
+        let music_on = p.stereo_width > 0.0 || p.tone > 0.0;
+        egui::CollapsingHeader::new(RichText::new(t("听歌（音乐）", "Music")).strong()).id_salt(if music_on { "music_on" } else { "music_off" }).default_open(music_on).show(ui, |ui| {
+            egui::Grid::new("g8").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
+                row(ui, t("立体声宽度", "Stereo width"), t("立体声的音频左右声道各当一个声源，放在声源位置的两侧，一共张开这么多度：90 = 左前 45°、右前 45°，像面前的一对音箱；并跟着「左右移动」一起走（环绕时整个舞台绕着头转）。0 = 关闭，左右声道先合成一个声源。只对一个立体声的输入起作用（文件的「取哪个声道」要选自动；麦克风是单声道）；多音频合成、左右双人里每个声音仍是一个声源", "The left and right channels of a stereo input become two sources, spread this many degrees around the source position: 90 = 45° front-left and 45° front-right, like a pair of speakers in front of you. They follow Left / right motion together (with Orbit the whole stage circles your head). 0 = off: the channels are mixed into one source. Only for a single stereo input (file Channel on Auto; a microphone is mono); in a multi-audio mix or Two voices each voice stays one source"), egui::Slider::new(&mut p.stereo_width, 0.0..=180.0).suffix("°").fixed_decimals(0));
+                row(ui, t("音色校正", "Tone correction"), t("声源固定在一个位置时（固定、手动摆位、多音频合成的各自固定），把这个方向、距离和房间带来的整体音色偏差均衡掉：两只耳朵听到的总频谱和原声一致，两耳之间的差别原样保留。0 = 关闭，1 = 完全校正。穿梭、随机走位、环绕时不起作用", "While the source stays at one position (Static, Manual, or fixed voices in a mix), equalises away the overall colouration of that direction, distance and room: the spectrum summed over both ears matches the original, and the differences between the ears stay as they are. 0 = off, 1 = full correction. Inactive with Sweep, Random and Orbit"), egui::Slider::new(&mut p.tone, 0.0..=1.0).fixed_decimals(2));
+                row(ui, t("低切", "Low cut"), t("输入端高通的转折频率，这以下的低频被切掉。40 Hz 适合人声（去掉喷麦和低频噪声）；听歌调到 20 Hz 左右，保住最低的低音", "Corner of the input high-pass; lower frequencies are removed. 40 Hz suits voice (plosives, rumble); for music go down to about 20 Hz to keep the deepest bass"), egui::Slider::new(&mut p.lowcut_hz, 10.0..=120.0).suffix(" Hz").fixed_decimals(0));
+                row(ui, t("房间声低切", "Room low cut"), t("房间声里这个频率以下的不要，低音只留干净的直达声（实测房间的反射在 300 Hz 以下会让低音忽强忽弱，音乐里很明显）。0 = 关闭。打开「真实房间」后才起作用", "Removes the room sound below this frequency so the bass is direct sound only (below 300 Hz the measured room's reflections make bass notes uneven, which is obvious on music). 0 = off. Needs Real room"), egui::Slider::new(&mut p.room_lowcut_hz, 0.0..=800.0).suffix(" Hz").fixed_decimals(0));
+            });
+            ui.add(egui::Label::new(RichText::new(t("点上面的「听歌」一键设置。和原声一样响在下面「输出」里", "The Music style button sets these in one click. Match the original loudness is under Output below")).weak().small()).wrap());
+        });
         egui::CollapsingHeader::new(RichText::new(t("人声处理", "Voice")).strong()).default_open(true).show(ui, |ui| {
             egui::Grid::new("g5").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 row(ui, t("去齿音", "De-ess"), t("只在 s / sh / x 出现时压低 4.5 kHz 以上，最多压这么多", "Ducks >4.5 kHz only on sibilants, by at most this much"), egui::Slider::new(&mut p.deess_db, 0.0..=10.0).suffix(" dB").fixed_decimals(1));
@@ -2478,6 +2580,10 @@ impl App {
         });
         egui::CollapsingHeader::new(RichText::new(t("输出", "Output")).strong()).default_open(true).show(ui, |ui| {
             ui.checkbox(&mut p.auto_level, t("自动响度（实时 / 试听：慢慢把音量拉到目标）", "Auto level (real-time / preview: slowly rides to the target)"));
+            ui.add_enabled(p.auto_level, egui::Checkbox::new(&mut p.level_match, t("和原声一样响", "Match the original loudness"))).on_hover_text(t(
+                "听歌用：自动响度不再把音量拉到固定的目标响度，而是让输出和输入一样响，音乐自己的强弱起伏原样保留；只有原声比「目标响度」还响时才压到目标响度。转换文件时同理：按原声的响度和文件的目标响度里较低的那个输出，峰值超了宁可整体降低也不多压",
+                "For music: instead of riding to a fixed target, auto level makes the output as loud as the input, so the music keeps its own dynamics; only when the original is louder than the target is it brought down to the target. File conversion does the same: the lower of the original loudness and the file target, and if the peaks are too high the level is lowered rather than limited harder",
+            ));
             egui::Grid::new("g6").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.add_enabled_ui(p.auto_level, |ui| ui.label(t("目标响度", "Target")));
                 ui.add_enabled(p.auto_level, egui::Slider::new(&mut p.target_lufs, -30.0..=-10.0).clamping(egui::SliderClamping::Never).suffix(" LUFS").fixed_decimals(0));
@@ -2558,7 +2664,7 @@ impl App {
                 self.mix_decoding = None;
                 match r {
                     Ok(m) => {
-                        if self.mixing() && m.paths == self.mix_paths() && m.ch == self.s.file_channel {
+                        if self.mixing() && m.paths == self.mix_paths() && m.ch == self.ch_key() {
                             if std::mem::take(&mut self.mix_shift) {
                                 if let Some(Ok(a)) = &m.aligned {
                                     self.preview_s = (self.preview_s - a.al.starts[0] as f64 / FS as f64).max(0.0);
@@ -2594,9 +2700,15 @@ impl App {
             if let Ok(r) = rx.try_recv() {
                 self.decoding = None;
                 match r {
-                    Ok(d) => {
-                        self.decoded = Some(d);
-                        if self.preview_pending {
+                    Ok((path, ch, audio, right)) => {
+                        self.decoded = Some((path, ch, audio));
+                        self.decoded_r = right;
+                        if self.decoded.as_ref().map_or(true, |(_, c, _)| *c != self.ch_key()) {
+                            // 解码期间取的声道变了：这份用不上，按新的再解一次
+                            self.decoded = None;
+                            self.decoded_r = None;
+                            self.decode_file();
+                        } else if self.preview_pending {
                             self.start_preview();
                         } else {
                             self.status = t("音频已就绪，点击或拖动播放条即可试听", "Audio ready; click or drag the timeline to preview").to_string();
@@ -2604,7 +2716,7 @@ impl App {
                     }
                     Err(e) => {
                         if self.duo() {
-                            self.mix_failed = Some((self.mix_paths(), self.s.file_channel)); // 左右双人不要每帧重试
+                            self.mix_failed = Some((self.mix_paths(), self.ch_key())); // 左右双人不要每帧重试
                         }
                         self.preview_pending = false;
                         self.status = e;
@@ -2653,6 +2765,9 @@ impl App {
             self.tele = rt.shared.telemetry();
             if self.rt_mix {
                 self.mix_tele = rt.shared.voice_telemetry();
+            } else {
+                // 试听单个立体声文件：左右声道两个声源的位置（没在用立体声对时是空的）
+                self.pair_tele = rt.shared.voice_telemetry();
             }
             if let Some(e) = rt.shared.take_error() {
                 self.status = e;
@@ -2786,13 +2901,17 @@ impl eframe::App for App {
                     style_lufs = Self::params_left(&mut c[0], p, layout);
                     Self::params_right(&mut c[1], p, layout == Some(false));
                 });
-                if let Some(l) = style_lufs {
+                if let Some((l, music)) = style_lufs {
                     if let Some(l) = l {
                         self.s.file_lufs = l;
                     }
                     // 各风格的默认状态都是一个声音：按风格按钮 / 恢复默认时关掉左右双人（文件转换页和实时页的都关）
                     self.set_duo(0.0);
                     self.set_rt_duo(0.0);
+                    // 听歌：几段音频各自固定（一左一右各在一边），不按固定的方位一前一后排开
+                    if music {
+                        self.set_mix_follow(false);
+                    }
                 }
             });
         });

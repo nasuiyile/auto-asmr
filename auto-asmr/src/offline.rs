@@ -1,4 +1,5 @@
 //! 文件模式：解码任意常见格式 → 取一个声道 → 48 kHz → 引擎（带约 1 秒预读）→ 精确响度归一化和真峰值限制 → WAV。
+//! 「立体声宽度」大于 0（听歌）时，立体声的音频左右声道都要，各当一个声源（[`mix::pair_setup`]，两个引擎）。
 //! 多音频合成（[`convert_mix`]）：几个文件各过一个引擎、各在一个位置，相加之后同样两遍处理；
 //! 可以先自动对齐（[`align_tracks`]：同一首歌的几个版本，从一起开始唱的地方叠加）。
 //! 左右双人（[`ConvertOptions::duo`]）：一个文件当成两个声音合成，第 2 个晚几十毫秒，走的也是 [`convert_mix`]。
@@ -34,6 +35,33 @@ pub enum Channel {
     Right,
     Mix,
 }
+
+/// 「取哪个声道」选「自动」时，立体声的音频怎么取（由参数和用法决定，见 [`auto_pick`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoPick {
+    /// 取更响的那个声道——人声：两个声道多半是同一个声音，或者只有一边有。
+    Louder,
+    /// 左右混合成一个声源——听歌时的多音频合成、左右双人：歌的左右声道内容不一样，只取一边会丢掉另一边的乐器。
+    Mix,
+    /// 左右声道都要，各当一个声源——听歌时的单个音频。
+    Stereo,
+}
+
+/// 「自动」怎么取：「立体声宽度」为 0（人声的风格）时取更响的声道；大于 0（听歌）时，单个音频（`single`）
+/// 左右声道都要，要当成一个声源的（多音频合成、左右双人）左右混合。
+pub fn auto_pick(params: &Params, single: bool) -> AutoPick {
+    if params.stereo_width <= 0.0 {
+        AutoPick::Louder
+    } else if single {
+        AutoPick::Stereo
+    } else {
+        AutoPick::Mix
+    }
+}
+
+/// "和原声一样响"的文件转换：峰值超过上限时，限制器最多压这么多 dB，再不够就整体降低。
+/// 听音实验里重度的限幅不管响度拉不拉平都损害音质（见 doc/effects.md），所以听歌时宁可轻一点也不多压。
+pub const MATCH_MAX_GR_DB: f32 = 1.5;
 
 #[derive(Clone, Debug)]
 pub struct ConvertOptions {
@@ -151,6 +179,8 @@ pub struct ConvertReport {
     pub duo_note: String,
     /// 背景音的说明（没开背景音时为空）。
     pub bg_note: String,
+    /// "和原声一样响"的说明：原声多响、按多响输出（没开时为空）。
+    pub level_note: String,
     pub n_moves: u32,
     pub n_sways: u32,
     /// 从头顶绕的次数、上下换位的次数。
@@ -191,6 +221,7 @@ pub fn report_text(rep: &ConvertReport, out: &str, english: bool) -> String {
         if rep.channel_note.is_empty() { String::new() } else { format!("\n{}", rep.channel_note) }
     ) + &if rep.duo_note.is_empty() { String::new() } else { format!("\n{}", rep.duo_note) }
         + &if rep.balance_note.is_empty() { String::new() } else { format!("\n{}", rep.balance_note) }
+        + &if rep.level_note.is_empty() { String::new() } else { format!("\n{}", rep.level_note) }
         + &if rep.bg_note.is_empty() { String::new() } else { format!("\n{}", rep.bg_note) }
 }
 
@@ -214,6 +245,7 @@ pub fn mix_report_text(rep: &ConvertReport, out: &str, desc: &str, english: bool
         if rep.channel_note.is_empty() { String::new() } else { format!("\n{}", rep.channel_note) }
     ) + &if rep.align_note.is_empty() { String::new() } else { format!("\n{}", rep.align_note) }
         + &if rep.balance_note.is_empty() { String::new() } else { format!("\n{}", rep.balance_note) }
+        + &if rep.level_note.is_empty() { String::new() } else { format!("\n{}", rep.level_note) }
         + &if rep.bg_note.is_empty() { String::new() } else { format!("\n{}", rep.bg_note) }
 }
 
@@ -264,13 +296,19 @@ fn decode(path: &Path, mut sink: impl FnMut(usize, u32, &[f32]) -> bool) -> Resu
     Ok(())
 }
 
-/// 读入音频并取成 48 kHz 单声道。返回 (样本, 关于声道选择的说明)。
+/// 读入音频并取成 48 kHz 单声道（「自动」取更响的声道）。返回 (样本, 关于声道选择的说明)。
 pub fn load_mono(opts: &ConvertOptions, cancel: &AtomicBool) -> Result<(Vec<f32>, String), String> {
+    load_audio(opts, cancel, AutoPick::Louder).map(|(mut ch, note)| (ch.swap_remove(0), note))
+}
+
+/// 读入音频，48 kHz。返回 (各声道的样本, 关于声道选择的说明)：一般是一段（单声道）；`auto` 为 [`AutoPick::Stereo`]、
+/// 「取哪个声道」是「自动」、音频又是立体声时是两段（左、右）。
+pub fn load_audio(opts: &ConvertOptions, cancel: &AtomicBool, auto: AutoPick) -> Result<(Vec<Vec<f32>>, String), String> {
     // 第一遍：只统计左右声道的能量和相关性，决定取哪个声道
     let mut note = String::new();
     let mut pick = opts.channel;
     let (mut ll, mut rr, mut lr, mut nch) = (0f64, 0f64, 0f64, 0usize);
-    if opts.channel == Channel::Auto {
+    if opts.channel == Channel::Auto && auto == AutoPick::Louder {
         // 只统计要处理的那一段（与 Python 版一致：截取之后再比较两个声道）
         let mut seen = 0u64;
         decode(&opts.input, |ch, sr, s| {
@@ -301,25 +339,48 @@ pub fn load_mono(opts: &ConvertOptions, cancel: &AtomicBool) -> Result<(Vec<f32>
             }
         }
     }
-    let mut mono: Vec<f32> = Vec::new();
-    let mut rs: Option<Resampler> = None;
+    // 听歌：「自动」时左右声道都要（各当一个声源），或者左右混合成一个声源
+    let both = opts.channel == Channel::Auto && auto == AutoPick::Stereo;
+    if opts.channel == Channel::Auto && auto == AutoPick::Mix {
+        pick = Channel::Mix;
+    }
+    let mut out: Vec<Vec<f32>> = Vec::new();
+    let mut rs: Vec<Resampler> = Vec::new();
     let mut rate = 0u32;
     let mut seen = 0u64;
-    let mut tmp: Vec<f32> = Vec::new();
+    let mut tmp: [Vec<f32>; 2] = [Vec::new(), Vec::new()];
     decode(&opts.input, |ch, sr, s| {
         if rate == 0 {
             rate = sr;
+            // 第一个包：定下输出几段
+            let n = if both && ch >= 2 { 2 } else { 1 };
+            out = vec![Vec::new(); n];
             if sr as usize != FS_USIZE {
-                rs = Some(Resampler::new(sr as f64, FS as f64));
+                rs = (0..n).map(|_| Resampler::new(sr as f64, FS as f64)).collect();
+            }
+            if ch >= 2 && opts.channel == Channel::Auto {
+                match auto {
+                    AutoPick::Stereo => note = "立体声输入，左右声道各当一个声源".to_string(),
+                    AutoPick::Mix => note = "立体声输入，左右混合成一个声源".to_string(),
+                    AutoPick::Louder => {}
+                }
             }
         }
+        let n = out.len();
         let i0 = (opts.start * sr as f64) as u64;
         let i1 = opts.duration.map(|d| i0 + (d * sr as f64) as u64 + 64);
-        tmp.clear();
+        for t in tmp.iter_mut() {
+            t.clear();
+        }
         for f in s.chunks_exact(ch.max(1)) {
             let keep = seen >= i0 && i1.map_or(true, |e| seen < e);
             seen += 1;
             if !keep {
+                continue;
+            }
+            if n == 2 && ch >= 2 {
+                tmp[0].push(f[0]);
+                tmp[1].push(f[1]);
                 continue;
             }
             let v = if ch < 2 {
@@ -331,21 +392,68 @@ pub fn load_mono(opts: &ConvertOptions, cancel: &AtomicBool) -> Result<(Vec<f32>
                     _ => f[0],
                 }
             };
-            tmp.push(v);
+            tmp[0].push(v);
+            if n == 2 {
+                tmp[1].push(v); // 中途变成单声道的流：两段一样
+            }
         }
-        match &mut rs {
-            Some(r) => r.process(&tmp, &mut mono),
-            None => mono.extend_from_slice(&tmp),
+        for (k, o) in out.iter_mut().enumerate() {
+            match rs.get_mut(k) {
+                Some(r) => r.process(&tmp[k], o),
+                None => o.extend_from_slice(&tmp[k]),
+            }
         }
         !cancel.load(Ordering::Relaxed) && i1.map_or(true, |e| seen < e)
     })?;
-    if let Some(d) = opts.duration {
-        mono.truncate((d * FS as f64) as usize);
-    }
-    if mono.len() < FS_USIZE / 10 {
+    if out.is_empty() {
         return Err("输入太短".into());
     }
-    Ok((mono, note))
+    if let Some(d) = opts.duration {
+        for o in out.iter_mut() {
+            o.truncate((d * FS as f64) as usize);
+        }
+    }
+    // 两段一样长（重采样后可能差一两个样本）
+    let n = out.iter().map(|o| o.len()).min().unwrap_or(0);
+    for o in out.iter_mut() {
+        o.truncate(n);
+    }
+    if n < FS_USIZE / 10 {
+        return Err("输入太短".into());
+    }
+    Ok((out, note))
+}
+
+/// 原声的积分响度（BS.1770，LUFS）："和原声一样响"用。一段 = 单声道，按放进两个声道算；两段 = 立体声。
+/// 几乎无声时返回 None。
+pub fn input_lufs(ch: &[Vec<f32>]) -> Option<f32> {
+    let mut m = LoudnessMeter::new();
+    match ch {
+        [x] => x.iter().for_each(|&v| m.push(v, v)),
+        [l, r, ..] => l.iter().zip(r).for_each(|(&a, &b)| m.push(a, b)),
+        [] => {}
+    }
+    let l = m.integrated();
+    (l > -69.9).then_some(l)
+}
+
+/// "和原声一样响"：文件转换的目标响度取"原声的响度"和"目标响度"里较低的那个，峰值超了宁可整体降低也不多压。
+/// 返回 (按它转换的选项, 写进报告的说明)；没开时原样返回、说明为空。
+fn match_level(opts: &ConvertOptions, params: &Params, original: Option<f32>) -> (ConvertOptions, String) {
+    let mut o = opts.clone();
+    if !params.level_match {
+        return (o, String::new());
+    }
+    o.max_gr_db = o.max_gr_db.min(MATCH_MAX_GR_DB);
+    let note = match original {
+        Some(l) if l < opts.lufs => {
+            o.lufs = l;
+            format!("和原声一样响：原声 {l:.1} LUFS，比目标 {:.0} LUFS 轻，保持原声的响度", opts.lufs)
+        }
+        Some(l) => format!("和原声一样响：原声 {l:.1} LUFS，不低于目标，按目标 {:.0} LUFS 输出", opts.lufs),
+        None => String::new(),
+    };
+    (o, note)
 }
 
 struct TempFile(PathBuf);
@@ -538,11 +646,19 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
     let t_start = std::time::Instant::now();
     crate::dsp::flush_denormals();
     progress(0.0, "读取音频");
-    let (mono, note) = load_mono(opts, &cancel)?;
-    let n_sig = mono.len();
+    let (mut chans, note) = load_audio(opts, &cancel, auto_pick(params, true))?;
     if cancel.load(Ordering::Relaxed) {
         return Err("已取消".into());
     }
+    let (opts_m, level_note) = match_level(opts, params, if params.level_match { input_lufs(&chans) } else { None });
+    let opts = &opts_m;
+    if chans.len() == 2 {
+        let right = chans.pop().unwrap();
+        let left = chans.pop().unwrap();
+        return convert_pair(opts, params, left, right, note, level_note, &cancel, progress, t_start);
+    }
+    let mono = chans.pop().unwrap();
+    let n_sig = mono.len();
 
     // 文件模式：响度和限幅放到第二遍，引擎里不做自动响度
     let cfg = Arc::new(EngineConfig::new(params.clone(), None));
@@ -567,11 +683,7 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
         eng.process(&inp[..m], ol, or);
     })?;
     if let (Some(path), Some(tr)) = (&opts.save_trajectory, &eng.trace) {
-        let mut f = BufWriter::new(File::create(path).map_err(|e| format!("无法写入轨迹文件：{e}"))?);
-        writeln!(f, "t_sec,az_deg,dist_m,base_dist_m,speech,el_deg,inear_depth_m").map_err(|e| e.to_string())?;
-        for row in tr.iter().step_by(8) {
-            writeln!(f, "{:.4},{:.2},{:.5},{:.5},{:.3},{:.2},{:.5}", row[0], row[1], row[2], row[3], row[4], row[5], row[6]).map_err(|e| e.to_string())?;
-        }
+        write_trajectory(path, tr, 0.0)?;
     }
     let fin = finish(opts, rendered, n_sig, &eng_cfg, &cancel, &mut progress)?;
     Ok(ConvertReport {
@@ -580,6 +692,7 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
         true_peak_db: fin.true_peak_db,
         max_gr_db: fin.max_gr_db,
         bg_note: rain::describe(params, false),
+        level_note,
         channel_note: note,
         align_note: String::new(),
         balance_note: String::new(),
@@ -590,6 +703,75 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
         n_updowns: eng.tele.n_updowns,
         n_strokes: eng.tele.n_strokes,
         speech_pct: 100.0 * eng.n_speech as f32 / eng.n_blocks.max(1) as f32,
+        elapsed_s: t_start.elapsed().as_secs_f64(),
+    })
+}
+
+/// 把走位写成 CSV。`az_shift`：方位角整体减去这么多度（立体声对记的是左声道那个声源，减去它的偏移就是舞台正中间）。
+fn write_trajectory(path: &Path, tr: &[[f32; 7]], az_shift: f32) -> Result<(), String> {
+    let mut f = BufWriter::new(File::create(path).map_err(|e| format!("无法写入轨迹文件：{e}"))?);
+    writeln!(f, "t_sec,az_deg,dist_m,base_dist_m,speech,el_deg,inear_depth_m").map_err(|e| e.to_string())?;
+    for row in tr.iter().step_by(8) {
+        writeln!(f, "{:.4},{:.2},{:.5},{:.5},{:.3},{:.2},{:.5}", row[0], (row[1] - az_shift).rem_euclid(360.0), row[2], row[3], row[4], row[5], row[6]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 立体声对：左右声道各过一个引擎（同一套走位，位置在两侧各偏半个「立体声宽度」），相加之后与单个文件一样两遍处理。
+#[allow(clippy::too_many_arguments)]
+fn convert_pair(opts: &ConvertOptions, params: &Params, left: Vec<f32>, right: Vec<f32>, note: String, level_note: String, cancel: &AtomicBool, mut progress: impl FnMut(f32, &str), t_start: std::time::Instant) -> Result<ConvertReport, String> {
+    let n_sig = left.len().min(right.len());
+    let cfg = Arc::new(EngineConfig::new(params.clone(), None));
+    let setup = mix::pair_setup(&cfg);
+    let mut mixer = Mixer::new(&setup, PostMode::Offline, 1.0);
+    {
+        // 说话 / 出声的阈值按左右混合后的声音统计，两个引擎用同一份
+        let mid: Vec<f32> = left.iter().zip(&right).map(|(a, b)| 0.5 * (a + b)).collect();
+        if let Some((thr, med)) = prescan(&mid) {
+            for k in 0..2 {
+                mixer.engine_mut(k).set_fixed_analysis(thr, med);
+            }
+        }
+    }
+    if opts.save_trajectory.is_some() {
+        mixer.engine_mut(0).trace = Some(Vec::new());
+    }
+    let skip = mixer.latency_samples();
+    let tail = if params.room { (0.65 * FS) as usize } else { 512 };
+    let total = n_sig + skip + tail;
+    let mut bufs = [vec![0f32; CH], vec![0f32; CH]];
+    let rendered = render_to_temp(total, skip, cancel, &mut progress, |done, ol, or| {
+        let m = ol.len();
+        for (b, x) in bufs.iter_mut().zip([&left, &right]) {
+            for (i, v) in b[..m].iter_mut().enumerate() {
+                *v = if done + i < n_sig { x[done + i] } else { 0.0 };
+            }
+        }
+        mixer.process(&[&bufs[0][..m], &bufs[1][..m]], ol, or);
+    })?;
+    if let (Some(path), Some(tr)) = (&opts.save_trajectory, &mixer.engine(0).trace) {
+        write_trajectory(path, tr, mixer.engine(0).az_offset)?;
+    }
+    let fin = finish(opts, rendered, n_sig, &cfg, cancel, &mut progress)?;
+    let t = mixer.engine(0).tele;
+    let speech = (0..2).map(|k| 100.0 * mixer.engine(k).n_speech as f32 / mixer.engine(k).n_blocks.max(1) as f32).sum::<f32>() / 2.0;
+    Ok(ConvertReport {
+        seconds: fin.seconds,
+        lufs: fin.lufs,
+        true_peak_db: fin.true_peak_db,
+        max_gr_db: fin.max_gr_db,
+        bg_note: rain::describe(params, false),
+        level_note,
+        channel_note: note,
+        align_note: String::new(),
+        balance_note: String::new(),
+        duo_note: String::new(),
+        n_moves: t.n_moves,
+        n_sways: t.n_sways,
+        n_tops: t.n_tops,
+        n_updowns: t.n_updowns,
+        n_strokes: t.n_strokes,
+        speech_pct: speech,
         elapsed_s: t_start.elapsed().as_secs_f64(),
     })
 }
@@ -670,7 +852,8 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
             o.duration = None;
         }
         let name = inp.path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let (m, note) = load_mono(&o, &cancel).map_err(|e| format!("{name}：{e}"))?;
+        // 合成里每个音频是一个声源：听歌时「自动」取左右混合（不是更响的那个声道）
+        let (m, note) = load_audio(&o, &cancel, auto_pick(params, false)).map(|(mut c, n)| (c.swap_remove(0), n)).map_err(|e| format!("{name}：{e}"))?;
         if !note.is_empty() {
             notes.push(if unique > 1 { format!("{}. {name}：{note}", k + 1) } else { format!("{name}：{note}") });
         }
@@ -723,6 +906,10 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
         lufs = monos.iter().map(|m| mix::loudness(m)).collect();
     }
     let voices: Vec<Voice> = inputs.iter().map(|i| i.voice).collect();
+    // "和原声一样响"：按几段里最响的那一段的响度（单声道按放进两个声道算，+3 dB）
+    let loudest = lufs.iter().flatten().copied().fold(None, |a: Option<f32>, l| Some(a.map_or(l, |a| a.max(l)))).map(|l| l + 3.01);
+    let (opts_m, level_note) = match_level(opts, params, if params.level_match { loudest } else { None });
+    let opts = &opts_m;
     let base = Arc::new(EngineConfig::new(params.clone(), None));
     let setup = MixSetup::new(&base, &voices, &lufs, follow, None).with_balance(bal, mo.balance).with_delays(delays);
     let mut mixer = Mixer::new(&setup, PostMode::Offline, 1.0);
@@ -764,6 +951,7 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
         balance_note,
         duo_note: String::new(),
         bg_note: rain::describe(params, false),
+        level_note,
         n_moves: t.n_moves,
         n_sways: t.n_sways,
         n_tops: t.n_tops,
@@ -963,6 +1151,83 @@ mod tests {
             w.write_sample(v).unwrap();
         }
         w.finalize().unwrap();
+    }
+
+    fn write_wav2(path: &Path, l: &[f32], r: &[f32]) {
+        let spec = hound::WavSpec { channels: 2, sample_rate: FS_USIZE as u32, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for (&a, &b) in l.iter().zip(r) {
+            w.write_sample(a).unwrap();
+            w.write_sample(b).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    /// 听歌：立体声的文件左右声道都要、各当一个声源（只在左声道里的声音从左前方来，右耳也听得到）；响度和原声一样，
+    /// 原声比目标还响才压到目标，而且不靠限制器硬压；单声道的文件、选了「混合」时是一个声源；多音频合成里每个文件左右混合。
+    #[test]
+    fn music_style_converts_stereo_as_two_sources_and_matches_the_original_loudness() {
+        use crate::dsp::testsig::{lufs, test_song};
+        let dir = std::env::temp_dir().join(format!("auto_asmr_music_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (test_song(10.0, 31), test_song(10.0, 32));
+        let silent = vec![0f32; a.len()];
+        let music = Params::default().style_music();
+        let go = |input: &Path, name: &str, f: &dyn Fn(&mut ConvertOptions)| {
+            let mut o = ConvertOptions::new(input.to_path_buf());
+            o.output = dir.join(name);
+            o.lufs = crate::dsp::params::MUSIC_LUFS;
+            f(&mut o);
+            let rep = convert(&o, &music, Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+            let (l, r) = read_stereo(&o.output);
+            (rep, l, r)
+        };
+        let e = |v: &[f32]| v.iter().map(|x| (x * x) as f64).sum::<f64>() + 1e-30;
+        // 只有左声道有声音的立体声文件
+        let left_only = dir.join("left_only.wav");
+        write_wav2(&left_only, &a, &silent);
+        let (rep, l, r) = go(&left_only, "left_only_out.wav", &|_| {});
+        assert!(rep.channel_note.contains("左右声道各当一个声源"), "{}", rep.channel_note);
+        let side = 10.0 * (e(&l) / e(&r)).log10();
+        assert!((3.0..15.0).contains(&side), "只在左声道的内容：左耳比右耳响 {side:.1} dB");
+        // 原声比目标轻：保持原声的响度（不拉到 −14），限制器没有动作
+        let original = lufs(&a, &silent);
+        assert!(original < -20.0 && (rep.lufs - original).abs() < 0.3, "原声 {original:.1} LUFS，输出 {:.1} LUFS", rep.lufs);
+        assert!(rep.level_note.contains("保持原声的响度") && rep.max_gr_db < 0.1, "{} / 限制器 {:.1} dB", rep.level_note, rep.max_gr_db);
+        assert_eq!(rep.n_moves + rep.n_sways + rep.n_updowns, 0, "听歌不该有任何自动的动作");
+        // 两个声道各是一首歌、放大到比目标响：压到目标，限制器最多压 1.5 dB
+        let loud = dir.join("loud.wav");
+        let (la, lb): (Vec<f32>, Vec<f32>) = (a.iter().map(|v| (8.0 * v).clamp(-0.99, 0.99)).collect(), b.iter().map(|v| (8.0 * v).clamp(-0.99, 0.99)).collect());
+        write_wav2(&loud, &la, &lb);
+        let (rep, ..) = go(&loud, "loud_out.wav", &|_| {});
+        assert!(lufs(&la, &lb) > -12.0 && (rep.lufs - (-14.0)).abs() < 0.6, "原声 {:.1} LUFS，输出 {:.1}", lufs(&la, &lb), rep.lufs);
+        assert!(rep.level_note.contains("按目标") && rep.max_gr_db <= MATCH_MAX_GR_DB + 0.1 && rep.true_peak_db <= -0.9, "{} / 限制器 {:.1} dB / 真峰值 {:.1}", rep.level_note, rep.max_gr_db, rep.true_peak_db);
+        // 选了「混合」，或者文件本来就是单声道：一个声源在正前方，两耳一样响
+        let (rep, l, r) = go(&left_only, "mixed_out.wav", &|o| o.channel = Channel::Mix);
+        assert!(rep.channel_note.is_empty() && (10.0 * (e(&l) / e(&r)).log10()).abs() < 1.5);
+        let mono = dir.join("mono.wav");
+        write_wav(&mono, &a);
+        let (rep, l, r) = go(&mono, "mono_out.wav", &|_| {});
+        assert!(rep.channel_note.is_empty() && (10.0 * (e(&l) / e(&r)).log10()).abs() < 1.5);
+        // 多音频合成：每个文件左右混合成一个声源，一左一右各在一边（「自动」不再只取更响的声道）
+        let (pa, pb) = (dir.join("a.wav"), dir.join("b.wav"));
+        write_wav2(&pa, &a, &silent);
+        write_wav2(&pb, &silent, &b);
+        let mut o = ConvertOptions::new(pa.clone());
+        o.output = dir.join("two.wav");
+        let inputs = [MixInput { path: pa.clone(), voice: Voice::preset(0) }, MixInput { path: pb.clone(), voice: Voice::preset(1) }];
+        let rep = convert_mix(&o, &inputs, &music, MixOptions::default(), Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+        assert_eq!(rep.channel_note.matches("左右混合成一个声源").count(), 2, "{}", rep.channel_note);
+        assert!(!rep.level_note.is_empty());
+        let (l, r) = read_stereo(&o.output);
+        // 两首歌一样响、各在一边：左右两耳的总能量差不多，而且左右不是同一个声音（相关很低）
+        let lr = 10.0 * (e(&l) / e(&r)).log10();
+        let corr = l.iter().zip(&r).map(|(x, y)| (x * y) as f64).sum::<f64>() / (e(&l) * e(&r)).sqrt();
+        assert!(lr.abs() < 2.0 && corr.abs() < 0.6, "两边差 {lr:.1} dB，左右相关 {corr:.2}");
+        // 人声的风格下「自动」还是取更响的声道
+        assert_eq!(auto_pick(&Params::default(), true), AutoPick::Louder);
+        assert_eq!((auto_pick(&music, true), auto_pick(&music, false)), (AutoPick::Stereo, AutoPick::Mix));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn read_stereo(path: &Path) -> (Vec<f32>, Vec<f32>) {

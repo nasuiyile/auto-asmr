@@ -4,6 +4,7 @@
 //! - **插件页面**（弹窗、设置页）用「配置文档」那一组函数：读写和桌面版同一格式的配置文件，按名字改参数、切风格。
 //!   参数的换算（贴耳距离、移动频率、降噪滑条……）都用 `Params` 自己的方法，和桌面版界面完全一致。
 //! - **AudioWorklet**（音频线程）用「处理器」那一组函数：每个被处理的标签页一个 [`Processor`]，立体声进、双耳声出。
+//!   平时左右合成单声道当成一个声源；「立体声宽度」大于 0（听歌）时左右声道各当一个声源（库里的 [`Solo`]）。
 //!
 //! 不用 wasm-bindgen：AudioWorklet 里没有 `TextDecoder` 这类接口，而且只能同步实例化。导出的都是 C 函数，
 //! 字符串用"指针 + 长度"传：JS 用 `asmr_alloc` 要一块内存把 UTF-8 写进去；返回字符串的函数把结果放进一个公共缓冲，
@@ -19,11 +20,12 @@ use std::sync::Arc;
 
 use auto_asmr::config::{self, ConfigError, Saved};
 use auto_asmr::dsp::dynamics::DryOut;
-use auto_asmr::dsp::engine::{Engine, EngineConfig, PostMode};
+use auto_asmr::dsp::engine::{EngineConfig, PostMode};
 use auto_asmr::dsp::mix::{self, LiveMix, MixSetup, DUO_VOICES};
 use auto_asmr::dsp::params::{MotionMode, Params};
 use auto_asmr::dsp::pinna::pinnas;
 use auto_asmr::dsp::rain::RainSetup;
+use auto_asmr::dsp::solo::Solo;
 use auto_asmr::dsp::tables::tables;
 use auto_asmr::dsp::FS_USIZE;
 
@@ -47,7 +49,8 @@ pub mod tele {
     pub const DEPTH_CM: usize = 6;
     /// 引擎算法延时（毫秒）
     pub const LATENCY_MS: usize = 7;
-    /// 是不是左右双人（0 / 1）；是的话上面的位置是 1 号声音，下面是 2 号的方位角、仰角、距离、说话活动
+    /// 有没有第二个声音：0 = 没有，1 = 左右双人，2 = 立体声（听歌）的左右声道两个声源。有的话上面的位置是第一个
+    /// （1 号 / 左声道），下面是第二个（2 号 / 右声道）的方位角、仰角、距离、说话活动
     pub const DUO: usize = 8;
     pub const AZ2: usize = 9;
     pub const EL2: usize = 10;
@@ -213,8 +216,8 @@ pub extern "C" fn asmr_doc_text() -> i32 {
 /// `denoise` 降噪滑条、`bg_db` 雨声比人声低多少 dB，关闭时为 null；`style` 选中的风格，编号同 `style`，
 /// 参数和哪个风格都对不上时为 null）、
 /// `doc`（配置文件里 `params` 之外、和桌面版共用的左右双人设置：`duo_ms`、`mix_follow`、`mix_balance`）。
-/// 插件风格按钮的编号（`style` 0..3）对应的风格名（[`Params::STYLES`]）。
-const STYLE_ORDER: [&str; 4] = ["style_ear", "style_ku100", "style_earclean", "style_breath"];
+/// 插件风格按钮的编号（`style` 0..4）对应的风格名（[`Params::STYLES`]）。
+const STYLE_ORDER: [&str; 5] = ["style_ear", "style_ku100", "style_earclean", "style_breath", "style_music"];
 
 #[no_mangle]
 pub extern "C" fn asmr_doc_ui() -> i32 {
@@ -248,7 +251,7 @@ pub extern "C" fn asmr_doc_ui() -> i32 {
 
 /// 改一项设置。`key` 是参数名（同配置文件里 `params` 的字段名），`value` 是 JSON。另有几个特殊的名字：
 /// - `dry`：true = 监听原声，false = 输出效果
-/// - `style`：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音（同桌面版的风格按钮，只改风格相关的参数）
+/// - `style`：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音，4 = 听歌（同桌面版的风格按钮，只改风格相关的参数）
 /// - `bg_preset`：`"rain_night"` = 雨夜，`"off"` = 关掉背景音
 /// - `ear_cm`、`manual_cm`、`moves_per_min`、`denoise`：界面上的换算值（见 `asmr_doc_ui`）
 /// - `mode`：换左右移动的方式，「响度随位置变化」跟着换成这个方式的默认值（同桌面版）
@@ -285,10 +288,15 @@ fn set_field(doc: &mut Saved, key: &str, v: serde_json::Value) -> Result<(), Str
                 Some(1) => p.clone().style_ku100(),
                 Some(2) => p.clone().style_earclean(),
                 Some(3) => p.clone().style_breath(),
-                _ => return Err("style 只能是 0、1、2、3".into()),
+                Some(4) => p.clone().style_music(),
+                _ => return Err("style 只能是 0、1、2、3、4".into()),
             };
             // 各风格的默认状态都是一个声音：按风格按钮时关掉左右双人（同桌面版）
             doc.duo_ms = 0.0;
+            // 听歌：排布切回各自固定（之后打开左右双人是一左一右，不是按固定的方位一前一后排开；同桌面版）
+            if v.as_u64() == Some(4) {
+                doc.mix_follow = false;
+            }
         }
         "bg_preset" => match v.as_str() {
             Some("rain_night") => *p = p.clone().bg_rain_night(),
@@ -338,10 +346,13 @@ pub extern "C" fn asmr_lists() -> i32 {
 
 /// 预先解开 KU100 数据表、建好雨声用的数据（两样都只建一次）。第一次打开雨声要建约 80 ms，
 /// 放在开始处理时做（那时还没出声），免得播放中打开雨声时在音频线程上卡一下。
+/// 顺带生成一次「听歌」的配置：音色校正要用的房间频谱只算一次，那段代码也先跑一遍（浏览器第一次执行一段 wasm 要现编译），
+/// 播放中第一次按「听歌」时生成配置就只要零点几毫秒。
 #[no_mangle]
 pub extern "C" fn asmr_warm_up() {
     let _ = tables();
     let _ = RainSetup::new(&Params { bg_level: 1.0, ..Params::default() }, None);
+    let _ = EngineConfig::new(Params::default().style_music(), None);
 }
 
 /// 用当前文档的参数生成引擎配置，所有处理器在下一次处理时换上（没变的部分直接复用）。
@@ -354,12 +365,13 @@ pub extern "C" fn asmr_engine_apply() {
     });
 }
 
-/// 一个标签页的处理器：立体声下混成单声道 → `Engine::process`（左右双人时 [`LiveMix`]）→ 双耳；「监听原声」时输出
-/// 原来的立体声，只乘输出增益、过峰值限制器（[`DryOut`]，音量滑条照样起作用；引擎照常在跑，切回效果时动作和响度是接着的）。
+/// 一个标签页的处理器：立体声 → [`Solo`]（平时合成单声道过一个引擎；「立体声宽度」大于 0 时左右声道各一个声源）→ 双耳；
+/// 左右双人时合成单声道交给 [`LiveMix`]；「监听原声」时输出原来的立体声，只乘输出增益、过峰值限制器
+/// （[`DryOut`]，音量滑条照样起作用；引擎照常在跑，切回效果时动作和响度是接着的）。
 /// 只处理 48 kHz（插件的 AudioContext 固定 48 kHz）。
 pub struct Processor {
-    /// 单个声音的引擎（左右双人关着时用；一直跟着换配置，关掉左右双人时接着用）。
-    eng: Engine,
+    /// 一路声音的处理器（左右双人关着时用；一直跟着换配置，关掉左右双人时接着用）。
+    solo: Solo,
     /// 左右双人打开时的两个声音。
     duo: Option<LiveMix>,
     ver: u64,
@@ -381,12 +393,12 @@ impl Processor {
             }
             (st.cfg.clone().unwrap(), st.duo.clone(), st.ver, st.dry)
         });
-        let mut eng = Engine::new(cfg, PostMode::Realtime, 0.0);
+        let mut solo = Solo::new(cfg, PostMode::Realtime, 0.0);
         // 网页内容是连续的录音：动作严格跟着说话走（同桌面版试听、安卓版），不用主播模式的"停顿 1 秒恢复"
-        eng.set_live(false);
+        solo.set_live(false);
         let duo = duo.map(|s| LiveMix::new(&s, false));
         Processor {
-            eng,
+            solo,
             duo,
             ver,
             dry,
@@ -403,7 +415,7 @@ impl Processor {
         let next = with(|st| (st.ver != self.ver).then(|| (st.cfg.clone(), st.duo.clone(), st.ver, st.dry)));
         if let Some((cfg, duo, ver, dry)) = next {
             if let Some(cfg) = cfg {
-                self.eng.set_config(cfg);
+                self.solo.set_config(cfg);
             }
             match (duo, &mut self.duo) {
                 (Some(s), Some(d)) if d.mixer().is_follow() == (s.follow && s.cfgs.len() > 1) => d.set_setup(&s),
@@ -422,12 +434,15 @@ impl Processor {
         let (inl, rest) = self.io.split_at_mut(CAP);
         let (inr, rest) = rest.split_at_mut(CAP);
         let (outl, outr) = rest.split_at_mut(CAP);
-        for i in 0..n {
-            self.mono[i] = 0.5 * (inl[i] + inr[i]);
-        }
         match &mut self.duo {
-            Some(d) => d.process(&self.mono[..n], &mut outl[..n], &mut outr[..n]),
-            None => self.eng.process(&self.mono[..n], &mut outl[..n], &mut outr[..n]),
+            Some(d) => {
+                for i in 0..n {
+                    self.mono[i] = 0.5 * (inl[i] + inr[i]);
+                }
+                d.process(&self.mono[..n], &mut outl[..n], &mut outr[..n])
+            }
+            // 平时合成单声道过一个引擎；立体声宽度大于 0（听歌）时左右声道各一个声源
+            None => self.solo.process(&inl[..n], &inr[..n], &mut outl[..n], &mut outr[..n]),
         }
         if self.dry {
             outl[..n].copy_from_slice(&inl[..n]);
@@ -435,13 +450,15 @@ impl Processor {
             if !self.was_dry {
                 self.dry_out.reset();
             }
-            let p = &self.eng.config().params;
+            let p = &self.solo.config().params;
             self.dry_out.process(&mut outl[..n], &mut outr[..n], p.out_gain_db, p.ceiling_db);
         }
         self.was_dry = self.dry;
-        let (t, t2) = match &self.duo {
-            Some(d) => (&d.mixer().engine(0).tele, Some(&d.mixer().engine(1).tele)),
-            None => (&self.eng.tele, None),
+        // 两个声音：左右双人（记 1），或立体声的左右声道两个声源（记 2）
+        let (t, t2, kind) = match (&self.duo, self.solo.pair()) {
+            (Some(d), _) => (&d.mixer().engine(0).tele, Some(&d.mixer().engine(1).tele), 1.0),
+            (None, Some([a, b])) => (&a.tele, Some(&b.tele), 2.0),
+            (None, None) => (self.solo.tele(), None, 0.0),
         };
         self.tele[tele::AZ] = t.az;
         self.tele[tele::EL] = t.el;
@@ -450,7 +467,7 @@ impl Processor {
         self.tele[tele::IN_DB] = t.in_db;
         self.tele[tele::OUT_DB] = t.out_db;
         self.tele[tele::DEPTH_CM] = t.depth_cm;
-        self.tele[tele::DUO] = if t2.is_some() { 1.0 } else { 0.0 };
+        self.tele[tele::DUO] = kind;
         if let Some(t2) = t2 {
             self.tele[tele::AZ2] = t2.az;
             self.tele[tele::EL2] = t2.el;
@@ -461,7 +478,7 @@ impl Processor {
     }
 
     pub fn latency_ms(&self) -> f32 {
-        let s = self.duo.as_ref().map_or_else(|| self.eng.latency_samples(), |d| d.latency_samples());
+        let s = self.duo.as_ref().map_or_else(|| self.solo.latency_samples(), |d| d.latency_samples());
         s as f32 * 1000.0 / FS_USIZE as f32
     }
 
@@ -637,8 +654,20 @@ mod tests {
         assert_eq!(set("style", "3"), 0);
         assert_eq!(with(|st| st.doc.params.clone()), expected);
         assert_eq!(set("style", "5"), -1);
+        // 听歌是 4 号：同一个函数；按它时排布切回各自固定，之后打开左右双人不切到一起移动（移动方式是固定）
+        assert_eq!(set("mix_follow", "true"), 0);
+        let expected = with(|st| st.doc.params.clone().style_music());
+        assert_eq!(set("style", "4"), 0);
+        assert_eq!(with(|st| st.doc.params.clone()), expected);
+        assert_eq!(ui()["derived"]["style"], 4);
+        assert!(!with(|st| st.doc.mix_follow));
+        assert_eq!(set("duo_ms", "80"), 0);
+        assert!(!with(|st| st.doc.mix_follow), "听歌时打开左右双人应是各自固定");
+        assert_eq!(set("stereo_width", "60"), 0);
+        assert!(ui()["derived"]["style"].is_null() && ui()["params"]["stereo_width"] == 60.0);
+        assert_eq!(set("level_match", "1"), -1);
         // 风格按钮和恢复默认都关掉左右双人
-        for style in ["0", "1", "2", "3"] {
+        for style in ["0", "1", "2", "3", "4"] {
             assert_eq!(set("duo_ms", "80"), 0);
             assert_eq!(set("style", style), 0);
             assert_eq!(with(|st| st.doc.duo_ms), 0.0, "style {style}");
@@ -726,6 +755,52 @@ mod tests {
         asmr_doc_reset_params();
         assert_eq!(set("mix_follow", "false"), 0);
         assert_eq!(set("mix_balance", "0"), 0);
+    }
+
+    /// 听歌：左右声道各当一个声源——只在左声道里的声音从左前方来（左耳响几分贝，右耳也听得到），状态里是两个声源（记 2）；
+    /// 响度和原声差不多；把立体声宽度拖到 0 就合成一个声源；监听原声时还是原来的立体声。
+    #[test]
+    fn music_style_keeps_the_tab_stereo() {
+        asmr_doc_reset_params();
+        assert_eq!(set("style", "4"), 0);
+        asmr_engine_apply();
+        let mut p = Processor::new();
+        let song = auto_asmr::dsp::testsig::test_song(8.0, 61);
+        let run = |p: &mut Processor| {
+            let (mut l, mut r) = (Vec::new(), Vec::new());
+            for c in song.chunks_exact(128) {
+                let io = p.io();
+                io[..128].copy_from_slice(c);
+                io[CAP..CAP + 128].fill(0.0);
+                p.process(128);
+                let io = p.io();
+                l.extend_from_slice(&io[2 * CAP..2 * CAP + 128]);
+                r.extend_from_slice(&io[3 * CAP..3 * CAP + 128]);
+            }
+            (l, r)
+        };
+        let e = |v: &[f32]| v.iter().map(|x| (x * x) as f64).sum::<f64>() + 1e-30;
+        let (l, r) = run(&mut p);
+        let t = *p.tele();
+        assert_eq!(t[tele::DUO], 2.0);
+        assert!((t[tele::AZ] - 315.0).abs() < 1.0 && (t[tele::AZ2] - 45.0).abs() < 1.0, "左声道在左前 45°、右声道在右前 45°：{t:?}");
+        let h = l.len() / 4;
+        let side = 10.0 * (e(&l[h..]) / e(&r[h..])).log10();
+        assert!((3.0..15.0).contains(&side), "只在左声道的内容：左耳比右耳响 {side:.1} dB");
+        let silent = vec![0f32; song.len()];
+        let (li, lo) = (auto_asmr::dsp::testsig::lufs(&song[h..], &silent[h..]), auto_asmr::dsp::testsig::lufs(&l[h..], &r[h..]));
+        assert!((lo - li).abs() < 2.5, "和原声一样响：原声 {li:.1}，输出 {lo:.1} LUFS");
+        // 立体声宽度拖到 0：一个声源在正前方
+        assert_eq!(set("stereo_width", "0"), 0);
+        asmr_engine_apply();
+        let (l, r) = run(&mut p);
+        assert!((10.0 * (e(&l[h..]) / e(&r[h..])).log10()).abs() < 1.5 && p.tele()[tele::DUO] == 0.0);
+        // 监听原声：原来的立体声（右声道是静音）
+        assert_eq!(set("dry", "true"), 0);
+        asmr_engine_apply();
+        let (l, r) = run(&mut p);
+        assert!(e(&l[h..]) > 1e-3 && e(&r[h..]) < 1e-9);
+        asmr_doc_reset_params();
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //! - **设置是全局的**（[`settings`]）：整份桌面版格式的配置，界面线程按字段改参数，在那里算好 `EngineConfig`、
 //!   版本号加一；音频线程在每次回调开头看版本号，拿得到锁就换上，拿不到下次再说，绝不等待（同桌面版实时模式）。
 //! - **每个 AAudio 流一个 [`Processor`]**：Chromium 给的是立体声 float，采样率跟着片源（48 kHz、44.1 kHz……）。
-//!   左右下混成单声道 →（不是 48 kHz 时先重采样到 48 kHz）→ `Engine::process` →（再转回原采样率）→ 写回左右声道。
-//!   缓冲在创建时按 [`CHUNK`] 分配好，回调里不再分配。
+//!   （不是 48 kHz 时左右声道先各自重采样到 48 kHz）→ 库里的 [`Solo`]：平时左右合成单声道过一个引擎；「立体声宽度」
+//!   大于 0（听歌）时左右声道各当一个声源，过两个引擎 →（再转回原采样率）→ 写回左右声道。
+//!   缓冲在创建时按 [`CHUNK`] 分配好，回调里不再分配（立体声的那一对引擎第一次用到时才建，同左右双人）。
 //! - **左右双人**（配置里的 `duo_ms` 大于 0）：同一路声音交给库里的 [`LiveMix`]——一个在左耳、一个在右耳，第 2 个
 //!   从输入的历史里晚一点取（和桌面版主播模式同一套做法），自动平衡的输入响度边听边算。开 / 关、换排布时在音频线程里
 //!   重新建一份（只在用户改这两项的那一下），延迟、位置、强度这些改动直接换配置。
@@ -19,8 +20,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, TryLockError};
 
 use auto_asmr::dsp::dynamics::DryOut;
-use auto_asmr::dsp::engine::{Engine, PostMode};
+use auto_asmr::dsp::engine::PostMode;
 use auto_asmr::dsp::mix::{LiveMix, MixSetup};
+use auto_asmr::dsp::solo::Solo;
 use auto_asmr::dsp::params::Params;
 use auto_asmr::dsp::resample::Resampler;
 use auto_asmr::dsp::FS_USIZE;
@@ -162,7 +164,7 @@ pub unsafe extern "C" fn asmr_get_params_ron(buf: *mut c_char, cap: usize) -> c_
     write_c(&s, buf, cap)
 }
 
-/// 风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音。和桌面版一样，只改风格相关的那些参数。
+/// 风格按钮：0 = 贴耳加强，1 = KU100 实录，2 = 掏耳，3 = 呼吸音，4 = 听歌。和桌面版一样，只改风格相关的那些参数。
 #[no_mangle]
 pub extern "C" fn asmr_set_style(style: c_int) -> c_int {
     let name = match style {
@@ -170,12 +172,13 @@ pub extern "C" fn asmr_set_style(style: c_int) -> c_int {
         1 => "style_ku100",
         2 => "style_earclean",
         3 => "style_breath",
+        4 => "style_music",
         _ => return -1,
     };
     report(catch_unwind(|| settings::run_action(name)))
 }
 
-/// 按钮：`style_ear` / `style_ku100` / `style_earclean` / `style_breath` / `reset` / `bg_rain_night` / `bg_off`。返回 0 = 成功。
+/// 按钮：`style_ear` / `style_ku100` / `style_earclean` / `style_breath` / `style_music` / `reset` / `bg_rain_night` / `bg_off`。返回 0 = 成功。
 ///
 /// # Safety
 /// `name` 是 NUL 结尾的 UTF-8 字符串。
@@ -308,7 +311,8 @@ pub unsafe extern "C" fn asmr_last_error(buf: *mut c_char, cap: usize) -> c_int 
 // ------------------------------------------------------------------ 每个流的处理器
 
 /// 给上报线程读的状态：音频线程每次回调后写，别的线程只读（都是原子量，单独分配，不和 `Processor` 共享引用）。
-/// 左右双人时 `az`… 是 1 号声音，`duo`、`az2`… 是 2 号。
+/// 左右双人时 `az`… 是 1 号声音，`duo`、`az2`… 是 2 号。立体声（听歌，左右声道各一个声源）时 `duo` 是 2，
+/// `az`… 是左声道那个声源、`az2`… 是右声道那个。
 #[derive(Default)]
 pub struct Tele {
     az: AtomicU32,
@@ -334,22 +338,27 @@ fn ld(a: &AtomicU32) -> f32 {
 
 /// 不是 48 kHz 的流：输入端升到 48 kHz，引擎处理后再降回原采样率，输出经一个小 FIFO 对齐到回调长度。
 struct Rs {
-    up: Resampler,
+    /// 左右声道各一个（合成单声道在 48 kHz 上做：重采样是线性的，先合后采和先采后合一样）。
+    up: [Resampler; 2],
     down: [Resampler; 2],
-    x48: Vec<f32>,
+    x48: [Vec<f32>; 2],
     q: [Vec<f32>; 2],
     qpos: usize,
     delay_frames: usize,
 }
 
 pub struct Processor {
-    /// 单个声音的引擎（左右双人关着时用；一直跟着换配置，关掉左右双人时接着用）。
-    eng: Engine,
+    /// 一路声音的处理器（左右双人关着时用；一直跟着换配置，关掉左右双人时接着用）：平时左右合成单声道过一个引擎，
+    /// 「立体声宽度」大于 0 时左右声道各一个声源。
+    solo: Solo,
     /// 左右双人打开时的两个声音。
     duo: Option<LiveMix>,
     ver: u64,
     rate: usize,
     rs: Option<Rs>,
+    /// 这一段的左、右声道（原采样率），和左右双人用的单声道（48 kHz）。
+    inl: Vec<f32>,
+    inr: Vec<f32>,
     mono: Vec<f32>,
     l: Vec<f32>,
     r: Vec<f32>,
@@ -363,9 +372,9 @@ pub struct Processor {
 impl Processor {
     fn new(rate: usize) -> Self {
         let cfg = current_cfg();
-        let mut eng = Engine::new(cfg, PostMode::Realtime, 0.0);
+        let mut solo = Solo::new(cfg, PostMode::Realtime, 0.0);
         // 网页内容是连续的录音：动作严格跟着说话走（同桌面版试听），不用主播模式的"停顿 1 秒恢复"
-        eng.set_live(false);
+        solo.set_live(false);
         let duo = with_global(|g| g.duo.clone()).map(|s| LiveMix::new(&s, false));
         let n48 = if rate == FS_USIZE { CHUNK } else { CHUNK * FS_USIZE / rate + 64 };
         let rs = (rate != FS_USIZE).then(|| {
@@ -377,15 +386,17 @@ impl Processor {
             }
             // 两次重采样各约半个插值核的延时（32 / 36 个样本的一半），换算到原采样率，加上垫的静音
             let delay_frames = PRIME + 16 * rate / FS_USIZE + 18;
-            Rs { up: Resampler::new(rate as f64, fs), down: [Resampler::new(fs, rate as f64), Resampler::new(fs, rate as f64)], x48: Vec::with_capacity(n48), q, qpos: 0, delay_frames }
+            Rs { up: [Resampler::new(rate as f64, fs), Resampler::new(rate as f64, fs)], down: [Resampler::new(fs, rate as f64), Resampler::new(fs, rate as f64)], x48: [Vec::with_capacity(n48), Vec::with_capacity(n48)], q, qpos: 0, delay_frames }
         });
         Processor {
-            eng,
+            solo,
             duo,
             ver: CFG_VER.load(Ordering::Acquire),
             rate,
             rs,
-            mono: vec![0.0; CHUNK],
+            inl: vec![0.0; CHUNK],
+            inr: vec![0.0; CHUNK],
+            mono: vec![0.0; n48],
             l: vec![0.0; n48],
             r: vec![0.0; n48],
             failed: false,
@@ -419,7 +430,7 @@ impl Processor {
         let next = guard.as_ref().map(|g| (g.cfg_voice.clone(), g.duo.clone()));
         drop(guard);
         if let Some((cfg, duo)) = next {
-            self.eng.set_config(cfg);
+            self.solo.set_config(cfg);
             self.sync_duo(duo.as_ref());
             self.ver = v;
         }
@@ -434,39 +445,49 @@ impl Processor {
                 self.dry_out.reset();
                 self.was_dry = true;
             }
-            let p = &self.eng.config().params;
+            let p = &self.solo.config().params;
             let (gain, ceiling) = (p.out_gain_db, p.ceiling_db);
             self.dry_out.process_interleaved(data, gain, ceiling);
             return;
         }
         self.was_dry = false;
-        let Processor { eng, duo, rs, mono, l, r, tele, .. } = self;
-        // 左右双人打开时交给两个声音，否则单个引擎
-        let mut run = |x: &[f32], l: &mut [f32], r: &mut [f32]| match duo {
-            Some(d) => d.process(x, l, r),
-            None => eng.process(x, l, r),
+        let Processor { solo, duo, rs, inl, inr, mono, l, r, tele, .. } = self;
+        // 左右双人打开时把左右合成单声道交给两个声音；否则交给 Solo（它按「立体声宽度」决定合成单声道还是左右各一个声源）
+        let mut run = |xl: &[f32], xr: &[f32], l: &mut [f32], r: &mut [f32]| match duo {
+            Some(d) => {
+                let k = xl.len().min(xr.len()).min(mono.len());
+                for (m, (a, b)) in mono[..k].iter_mut().zip(xl.iter().zip(xr)) {
+                    *m = 0.5 * (a + b);
+                }
+                d.process(&mono[..k], &mut l[..k], &mut r[..k])
+            }
+            None => solo.process(xl, xr, l, r),
         };
         let n = data.len() / 2;
         let mut done = 0;
         while done < n {
             let m = (n - done).min(CHUNK);
             let block = &mut data[done * 2..(done + m) * 2];
-            for (i, v) in mono[..m].iter_mut().enumerate() {
-                *v = 0.5 * (block[2 * i] + block[2 * i + 1]);
+            for (i, f) in block.chunks_exact(2).enumerate() {
+                inl[i] = f[0];
+                inr[i] = f[1];
             }
             match rs {
                 None => {
-                    run(&mono[..m], &mut l[..m], &mut r[..m]);
+                    run(&inl[..m], &inr[..m], &mut l[..m], &mut r[..m]);
                     for i in 0..m {
                         block[2 * i] = l[i];
                         block[2 * i + 1] = r[i];
                     }
                 }
                 Some(rs) => {
-                    rs.x48.clear();
-                    rs.up.process(&mono[..m], &mut rs.x48);
-                    let k = rs.x48.len().min(l.len());
-                    run(&rs.x48[..k], &mut l[..k], &mut r[..k]);
+                    let [xl, xr] = &mut rs.x48;
+                    xl.clear();
+                    xr.clear();
+                    rs.up[0].process(&inl[..m], xl);
+                    rs.up[1].process(&inr[..m], xr);
+                    let k = xl.len().min(xr.len()).min(l.len());
+                    run(&xl[..k], &xr[..k], &mut l[..k], &mut r[..k]);
                     if rs.qpos > 0 {
                         for q in rs.q.iter_mut() {
                             q.drain(..rs.qpos);
@@ -490,15 +511,17 @@ impl Processor {
             }
             done += m;
         }
-        let (t, t2) = match duo {
-            Some(d) => (d.mixer().engine(0).tele, Some(d.mixer().engine(1).tele)),
-            None => (eng.tele, None),
+        // 两个声音：左右双人（记 1），或立体声的左右声道两个声源（记 2）
+        let (t, t2, kind) = match (duo.as_ref(), solo.pair()) {
+            (Some(d), _) => (d.mixer().engine(0).tele, Some(d.mixer().engine(1).tele), 1.0),
+            (None, Some([a, b])) => (a.tele, Some(b.tele), 2.0),
+            (None, None) => (*solo.tele(), None, 0.0),
         };
         st(&tele.az, t.az);
         st(&tele.el, t.el);
         st(&tele.r, t.r);
         st(&tele.act, t.act);
-        st(&tele.duo, if t2.is_some() { 1.0 } else { 0.0 });
+        st(&tele.duo, kind);
         if let Some(t2) = t2 {
             st(&tele.az2, t2.az);
             st(&tele.el2, t2.el);
@@ -508,7 +531,7 @@ impl Processor {
     }
 
     fn latency_ms(&self) -> f32 {
-        let algo = self.duo.as_ref().map_or_else(|| self.eng.latency_samples(), |d| d.latency_samples()) as f32 / FS_USIZE as f32;
+        let algo = self.duo.as_ref().map_or_else(|| self.solo.latency_samples(), |d| d.latency_samples()) as f32 / FS_USIZE as f32;
         let rs = self.rs.as_ref().map_or(0.0, |rs| rs.delay_frames as f32 / self.rate as f32);
         (algo + rs) * 1000.0
     }
@@ -584,7 +607,8 @@ pub unsafe extern "C" fn asmr_proc_tele(p: *const Processor) -> *const Tele {
 }
 
 /// 读状态：out[0..6] = 方位角（度）、仰角（度）、距离（米）、说话活动（0–1）、断流次数、是否出过错；
-/// out[6..11] = 是不是左右双人（0 / 1），以及 2 号声音的方位角、仰角、距离、说话活动（左右双人时前面那 4 项是 1 号）。
+/// out[6..11] = 有没有第二个声音（0 = 没有，1 = 左右双人，2 = 立体声的左右声道两个声源），以及第二个的方位角、仰角、
+/// 距离、说话活动（这时前面那 4 项是第一个：左右双人的 1 号，或立体声的左声道）。
 ///
 /// # Safety
 /// `t` 来自 `asmr_proc_tele` 且处理器还没释放；`out` 可写 11 个 float。
@@ -825,6 +849,63 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// 听歌：按风格按钮（编号 4）后，流的左右声道各当一个声源——只在左声道里的声音从左前方来（左耳响几分贝，右耳也听得到），
+    /// 状态里是两个声源（记 2：左声道在左前、右声道在右前）；44.1 kHz 的流照样不断流；响度和原声差不多（和原声一样响）；
+    /// 播放中把立体声宽度拖到 0 就合成一个声源；这时打开左右双人是各自固定（一左一右），用的是合成单声道后的声音。
+    #[test]
+    fn music_style_keeps_the_stream_stereo() {
+        let _g = settings::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        settings::provide_repo_data();
+        settings::load_config("()").unwrap();
+        assert_eq!(asmr_set_style(4), 0);
+        assert_eq!(current_cfg().params, Params::default().style_music());
+        assert_eq!(settings::current_params_json()["active_style"], "style_music");
+        let lufs = |x: &[f32]| auto_asmr::dsp::testsig::lufs(&x.iter().step_by(2).copied().collect::<Vec<_>>(), &x.iter().skip(1).step_by(2).copied().collect::<Vec<_>>());
+        for rate in [48_000usize, 44_100] {
+            let mut p = Processor::new(rate);
+            // 只有左声道有声音（一段"歌"；按 48 kHz 生成，在 44.1 kHz 的流里只是音调低一点）
+            let song = auto_asmr::dsp::testsig::test_song(8.0 * rate as f32 / 48_000.0, 41);
+            let dry: Vec<f32> = song.iter().flat_map(|&v| [v, 0.0]).collect();
+            let mut x = dry.clone();
+            for c in x.chunks_mut(2 * 960) {
+                p.process(c);
+            }
+            let t = tele_of(&p);
+            assert_eq!(t[6], 2.0, "{rate} Hz：状态里应是立体声的两个声源");
+            assert!((t[0] - 315.0).abs() < 1.0 && (t[7] - 45.0).abs() < 1.0, "{rate} Hz：左声道在左前 45°、右声道在右前 45°：{t:?}");
+            assert_eq!(p.tele.underruns.load(Ordering::Relaxed), 0, "{rate} Hz 断流");
+            let tail = &x[x.len() / 4..];
+            let (el, er) = tail.chunks(2).fold((0f64, 0f64), |(a, b), s| (a + (s[0] as f64).powi(2), b + (s[1] as f64).powi(2)));
+            let side = 10.0 * (el / er).log10();
+            assert!((3.0..15.0).contains(&side), "{rate} Hz：只在左声道的内容，左耳比右耳响 {side:.1} dB");
+            let (li, lo) = (lufs(&dry[dry.len() / 4..]), lufs(tail));
+            assert!((lo - li).abs() < 2.5, "{rate} Hz：和原声一样响：原声 {li:.1}，输出 {lo:.1} LUFS");
+        }
+        // 立体声宽度拖到 0：合成一个声源（正前方，两耳一样响）
+        let mut p = Processor::new(48_000);
+        let song = auto_asmr::dsp::testsig::test_song(4.0, 42);
+        let run = |p: &mut Processor| {
+            let mut x: Vec<f32> = song.iter().flat_map(|&v| [v, 0.0]).collect();
+            for c in x.chunks_mut(2 * 960) {
+                p.process(c);
+            }
+            let tail = &x[x.len() / 2..];
+            let (el, er) = tail.chunks(2).fold((0f64, 0f64), |(a, b), s| (a + (s[0] as f64).powi(2), b + (s[1] as f64).powi(2)));
+            10.0 * (el / er).log10()
+        };
+        assert!(run(&mut p) > 3.0);
+        assert_eq!(set_field("stereo_width", "0"), 0);
+        let centre = run(&mut p);
+        assert!(centre.abs() < 1.5 && tele_of(&p)[6] == 0.0, "合成一个声源后两耳应一样响：{centre:.1} dB");
+        // 听歌的移动方式是"固定"：打开左右双人是各自固定（1 号在左、2 号在右）
+        assert_eq!(asmr_set_style(4), 0);
+        assert_eq!(set_field("duo_ms", "80"), 0);
+        run(&mut p);
+        let t = tele_of(&p);
+        assert!(t[6] == 1.0 && t[0] > 180.0 && t[7] < 180.0 && !p.duo.as_ref().unwrap().mixer().is_follow(), "{t:?}");
+        settings::load_config("()").unwrap();
     }
 
     /// 网页声音里没有雨声：打开雨声、再改别的参数之后，处理器换上的仍是去掉背景音的配置（雨声只在单独的输出流里），

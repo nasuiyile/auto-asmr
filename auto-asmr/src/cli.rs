@@ -46,11 +46,21 @@ convert 的选项（括号里是默认值）：
                           50–120 ms 像两个人一前一后地说，150 ms 以上像回声。默认一起移动（两个人按 --mode 的方式
                           一起走、彼此相对，同 --mix-follow）；给了 --pos 就各自固定在这两个位置（--pos left,right =
                           一左一右各自固定）。可以和 --mix-gain、--mix-balance 一起用；输出比原音频长出这段延迟
-  --style ear|ku100|breath|earclean   ear=贴耳加强；ku100=KU100 近耳轻语；breath=呼吸音（近耳呼吸与气流）；
+  --style ear|ku100|breath|earclean|music   ear=贴耳加强；ku100=KU100 近耳轻语；breath=呼吸音（近耳呼吸与气流）；
                           earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
-                          带耳道共鸣和耳内低频，每只耳朵约 15 秒换一次边，目标响度默认 −20 LUFS）
+                          带耳道共鸣和耳内低频，每只耳朵约 15 秒换一次边，目标响度默认 −20 LUFS）；
+                          music=听歌（给音乐用：立体声的歌左右声道各当一个声源，摆在左前 45°、右前 45°、离头 75 cm，
+                          固定不动，加一点房间声，音色校正到和原声一致，响度和原声一样、最高 −14 LUFS；
+                          --mix 两段音频时一左一右各在一边。人声用的效果全部关掉）
   --start <秒> --duration <秒>      只处理一段
-  --channel auto|left|right|mix     立体声取哪个声道（auto=更响的那个）
+  --channel auto|left|right|mix     立体声取哪个声道（auto=更响的那个；--stereo-width 大于 0 时 auto=左右声道都要，
+                          多音频合成 / 左右双人里是左右混合）
+ 听歌（音乐；默认都是关，--style music 一起打开）
+  --stereo-width <度>     立体声宽度：立体声输入的左右声道各当一个声源，在声源位置两侧各偏一半（0=关，合成单声道；music 90）
+  --tone <0–1>            音色校正：声源固定在一个位置时，把这个方向、距离和房间带来的整体音色偏差均衡掉（0=关；music 1）
+  --lowcut <Hz>           低切：输入端高通的转折频率（40；music 20，保住最低的低音）
+  --room-lowcut <Hz>      房间声低切：房间声里这个频率以下的不要，低音只留直达声（0=关；music 250）
+  --level-match on|off    和原声一样响：目标响度取原声的响度和 --lufs 里较低的那个，峰值超了宁可整体降低也不多压（off；music on）
  背景音（实时生成的雨声，不用录音素材；人声不受影响。界面里叫「背景音」）
   --bg rain-night|off     雨夜预设：四面八方的小到中雨，重心绕着头慢慢转（8D 环绕），身边地上的落地声比参考的 8D 雨声轻一点，
                           不隔窗、没有屋檐滴水，比人声低约 18 dB；后面写的背景音选项再覆盖它
@@ -383,7 +393,8 @@ fn style_from_args(args: &[String]) -> Result<(Params, f32), String> {
         Some("ku100") => Ok((p.style_ku100(), default_lufs)),
         Some("breath" | "呼吸音") => Ok((p.style_breath(), crate::dsp::params::BREATH_LUFS)),
         Some("earclean" | "ear-clean" | "掏耳") => Ok((p.style_earclean(), crate::dsp::params::EARCLEAN_LUFS)),
-        _ => Err("--style 只能是 ear、ku100、breath 或 earclean".into()),
+        Some("music" | "听歌") => Ok((p.style_music(), crate::dsp::params::MUSIC_LUFS)),
+        _ => Err("--style 只能是 ear、ku100、breath、earclean 或 music".into()),
     }
 }
 
@@ -568,6 +579,11 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             "--deess" => p.deess_db = f(&mut it)?,
             "--sharp-soften" => p.sharp_soften_db = f(&mut it)?.clamp(0.0, 8.0),
             "--soft-voice" => p.soft_voice = f(&mut it)?,
+            "--stereo-width" => p.stereo_width = f(&mut it)?.clamp(0.0, 180.0),
+            "--tone" => p.tone = f(&mut it)?.clamp(0.0, 1.0),
+            "--lowcut" => p.lowcut_hz = f(&mut it)?.clamp(5.0, 400.0),
+            "--room-lowcut" => p.room_lowcut_hz = f(&mut it)?.clamp(0.0, 4000.0),
+            "--level-match" => p.level_match = parse_on_off(it.next(), name)?,
             "--lufs" => lufs = f(&mut it)?,
             "--peak" => peak = f(&mut it)?,
             "--max-gr" => max_gr = f(&mut it)?,
@@ -703,6 +719,9 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         if !rep.balance_note.is_empty() {
             println!("{}", rep.balance_note);
         }
+        if !rep.level_note.is_empty() {
+            println!("{}", rep.level_note);
+        }
         if !rep.bg_note.is_empty() {
             println!("{}", rep.bg_note);
         }
@@ -802,7 +821,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             last = pc;
         }
     })?;
-    for note in [&rep.channel_note, &rep.duo_note, &rep.balance_note, &rep.bg_note] {
+    for note in [&rep.channel_note, &rep.duo_note, &rep.balance_note, &rep.level_note, &rep.bg_note] {
         if !note.is_empty() {
             println!("{note}");
         }
@@ -1169,5 +1188,22 @@ fn bench() {
         }
         let secs = x.len() as f64 / FS_USIZE as f64;
         println!("  多音频合成 {n} 个音源{}（试听）：单核占用约 {:.1}%；每块平均 {:.0} µs，最慢 {:.0} µs", if follow { "、一起移动" } else { "" }, 100.0 * total / secs, 1e6 * total / (x.len() / 128) as f64, 1e6 * worst);
+    }
+    // 听歌：立体声输入，左右声道各一个声源（两个引擎，真实房间 + 音色校正），相加后统一收尾
+    {
+        let cfg = Arc::new(EngineConfig::new(Params::default().style_music(), None));
+        let mut solo = crate::dsp::solo::Solo::new(cfg, PostMode::Realtime, 0.0).with_pair();
+        let right: Vec<f32> = x.iter().copied().skip(4800).chain(std::iter::repeat(0.0).take(4800)).collect();
+        let (mut l, mut r) = ([0f32; 128], [0f32; 128]);
+        let (mut worst, mut total) = (0f64, 0f64);
+        for o in (0..x.len() - 128).step_by(128) {
+            let t0 = std::time::Instant::now();
+            solo.process(&x[o..o + 128], &right[o..o + 128], &mut l, &mut r);
+            let dt = t0.elapsed().as_secs_f64();
+            worst = worst.max(dt);
+            total += dt;
+        }
+        let secs = x.len() as f64 / FS_USIZE as f64;
+        println!("  听歌（立体声：左右声道各一个声源）：单核占用约 {:.1}%；每块平均 {:.0} µs，最慢 {:.0} µs", 100.0 * total / secs, 1e6 * total / (x.len() / 128) as f64, 1e6 * worst);
     }
 }

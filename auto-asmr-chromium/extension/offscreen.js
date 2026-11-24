@@ -99,8 +99,8 @@ function status() {
     out[id] = {
       error: t.error,
       seconds: (Date.now() - t.started) / 1000,
-      // 左右双人时 az… 是 1 号声音，duo 为真，az2… 是 2 号
-      tele: tl && { az: tl[0], el: tl[1], r: tl[2], act: tl[3], inDb: tl[4], outDb: tl[5], depthCm: tl[6], engineMs: tl[7], duo: tl[8] > 0, az2: tl[9], el2: tl[10], r2: tl[11], act2: tl[12] },
+      // 有两个声音时 duo 为真：az… 是第一个，az2… 是第二个。左右双人是 1 号、2 号；stereo 为真时是立体声（听歌）的左声道、右声道
+      tele: tl && { az: tl[0], el: tl[1], r: tl[2], act: tl[3], inDb: tl[4], outDb: tl[5], depthCm: tl[6], engineMs: tl[7], duo: tl[8] > 0, stereo: tl[8] > 1.5, az2: tl[9], el2: tl[10], r2: tl[11], act2: tl[12] },
     };
   }
   return {

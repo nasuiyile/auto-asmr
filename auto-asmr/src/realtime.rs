@@ -92,7 +92,8 @@ impl Default for RtOptions {
     }
 }
 
-/// cpal 报来的设备错误：短暂断流只计数（后端仍在运行，不能因此停掉音频流），其余的记下来让界面停掉。
+/// cpal 报来的设备错误：短暂断流只计数（后端仍在运行，不能因此停掉音频流）；音频线程没能提到实时优先级时照常运行
+/// （只是别的程序占满 CPU 时更容易断流）；其余的记下来让界面停掉。
 trait StreamError {
     fn stream_error(&self, device: &str, error: cpal::Error);
 }
@@ -103,8 +104,17 @@ impl StreamError for Shared {
             self.xruns.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        if realtime_denied(&error) {
+            return;
+        }
         self.record_error(format!("{device}设备出错：{error}"));
     }
+}
+
+/// cpal 的 realtime 特性在音频线程开始时提升优先级（Windows：MMCSS，失败时改用 TIME_CRITICAL）；系统不让提升时报的错。
+/// Windows 两步都失败时报的是 BackendError，只能按说明文字认出来。
+fn realtime_denied(error: &cpal::Error) -> bool {
+    error.kind() == cpal::ErrorKind::RealtimeDenied || error.message().is_some_and(|m| m.contains("promote audio thread to real-time priority"))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -428,6 +438,22 @@ mod tests {
         }
         assert_eq!(shared.xruns.load(Ordering::Relaxed), 2);
         assert!(shared.take_error().is_none());
+    }
+
+    /// 音频线程没能提到实时优先级（cpal 的 realtime 特性报的错）：照常运行，不停掉、不算断流。
+    #[test]
+    fn realtime_priority_refusal_keeps_audio_running() {
+        let shared = Shared::new(Arc::new(EngineConfig::new(Params::default(), None)));
+        for device in ["输入", "输出"] {
+            shared.stream_error(device, cpal::ErrorKind::RealtimeDenied.into());
+            // Windows：MMCSS 和 TIME_CRITICAL 都失败时，cpal 报的是带这句说明的 BackendError
+            shared.stream_error(device, cpal::Error::with_message(cpal::ErrorKind::BackendError, "Failed to promote audio thread to real-time priority: Access is denied."));
+        }
+        assert!(shared.take_error().is_none());
+        assert_eq!(shared.xruns.load(Ordering::Relaxed), 0);
+        // 别的后端错误照样停掉
+        shared.stream_error("输出", cpal::Error::with_message(cpal::ErrorKind::BackendError, "Failed to get current padding"));
+        assert!(shared.take_error().is_some());
     }
 
     #[test]

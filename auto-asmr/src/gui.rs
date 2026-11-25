@@ -86,6 +86,13 @@ const RADAR_MAX_R: f32 = 0.8;
 const OUT_GAIN_TIP_ZH: &str = "在自动响度之后、峰值限制器之前整体加减音量，相当于耳机音量旋钮。只在实时 / 试听时起作用（监听原声时也起作用，原声不做自动响度）；转换文件不用它，文件的响度精确归一化到「目标响度」。往上推到峰值上限后只会被限制器压扁，不会更响";
 const OUT_GAIN_TIP_EN: &str = "Overall gain after auto level and before the peak limiter, like a headphone volume knob. Real-time / preview only (also while monitoring dry, which skips auto level); file conversion ignores it and normalizes exactly to the target loudness. Above the ceiling the limiter only squashes it, it won't get louder";
 
+/// 右侧三栏的滑条按栏宽缩放：一行 = 缩进 + 标签（COL）+ 滑条 + 数值框，栏窄时滑条变短，不把数值框挤出栏外。
+fn fit_sliders(ui: &mut egui::Ui) {
+    // 参数表都在折叠标题里，要扣掉缩进；数值框按最宽的（"35 · 1.9 mm/h"）留
+    let w = ui.available_width() - ui.spacing().indent - COL - 10.0 - 100.0;
+    ui.spacing_mut().slider_width = w.clamp(48.0, 150.0);
+}
+
 /// 参数表的一行：滑轨用常用范围，手输或拖动数值可以超出该范围。
 fn row(ui: &mut egui::Ui, label: &str, tip: &str, w: egui::Slider<'_>) -> bool {
     let l = ui.label(label);
@@ -344,7 +351,7 @@ pub fn run(screenshot: Option<(PathBuf, bool, Option<PathBuf>)>) -> Result<(), S
     let config_path = std::env::current_dir().map_err(|e| format!("无法获取当前运行目录：{e}"))?.join(CONFIG_FILE);
     let opts = eframe::NativeOptions {
         persistence_path: Some(config_path),
-        viewport: egui::ViewportBuilder::default().with_inner_size([1260.0, 840.0]).with_min_inner_size([1040.0, 640.0]).with_title("auto-asmr · KU100 双耳 ASMR").with_icon(window_icon()),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 840.0]).with_min_inner_size([1200.0, 640.0]).with_title("auto-asmr · KU100 双耳 ASMR").with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native("auto-asmr", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, screenshot))))).map_err(|e| e.to_string())
@@ -2831,12 +2838,12 @@ impl App {
         ui.add_space(3.0);
     }
 
-    /// 右侧第一栏：风格、贴耳感、左右移动。`mix`：多音频合成中时是 Some(是否一起移动)——各自固定时左右移动不起作用，
-    /// 一起移动时几个音频按这里的方式一起走。
+    /// 右侧第一栏：风格、贴耳感、入耳。
     ///
     /// 按下风格按钮或「恢复默认」时返回 Some(需同步的文件转换目标响度)：调用方据此同步目标响度、关掉左右双人
     /// （各风格的默认状态都是一个声音）。
-    fn params_left(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) -> Option<(Option<f32>, bool)> {
+    fn params_left(ui: &mut egui::Ui, p: &mut Params) -> Option<(Option<f32>, bool)> {
+        fit_sliders(ui);
         let mut file_lufs = None;
         let mut pressed = false;
         let mut music = false;
@@ -2920,25 +2927,6 @@ impl App {
                 });
             });
             ui.add(egui::Label::new(RichText::new(t("入耳深度为 0 时这一组不起作用。人声用的气声增强、气流扑耳、忽远忽近等，掏耳时建议关掉（点上面的「掏耳」一键设置）", "This group is inactive while the depth is 0. For ear cleaning, switch off the voice-only effects (breath lift, puff, near / far sway…): the Ear cleaning style button does it in one click")).weak().small()).wrap());
-        });
-        egui::CollapsingHeader::new(RichText::new(t("左右移动", "Left / right motion")).strong()).default_open(true).show(ui, |ui| {
-            let accent = Color32::from_rgb(70, 150, 240);
-            match mix {
-                Some(false) => {
-                    ui.add(egui::Label::new(RichText::new(t("几个声音各自固定（多音频合成 / 左右双人）：每个声音固定在自己的位置（在左边选，或在位置图上拖），下面的移动方式暂不起作用；忽远忽近、上下、自然晃动照常。想让它们一起动，把左边的「排布」改成「一起移动」", "Voices fixed (multi-audio mix / two voices): each voice stays at its own position (pick it on the left or drag it on the map), so the motion modes below are inactive; near / far sway, up / down and micro motion still apply. Set Layout to Together on the left to move them")).small().color(accent)).wrap());
-                }
-                Some(true) => {
-                    ui.add(egui::Label::new(RichText::new(t("几个声音一起移动（多音频合成 / 左右双人）：按下面的方式一起走，彼此始终相隔 360°/个数（两个时正好相对：一个贴左耳时另一个贴右耳）", "Voices moving together (multi-audio mix / two voices): they follow the motion below together and always stay 360° / count apart (two voices: one at the left ear while the other is at the right)")).small().color(accent)).wrap());
-                }
-                None => {}
-            }
-            ui.add_enabled_ui(mix != Some(false), |ui| Self::motion_controls(ui, p));
-            egui::Grid::new("g2b").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
-                row(ui, t("响度随位置变化", "Level follows position"), t("1 = 物理真实（贴耳很响、到脸前会弱很多），0 = 处处一样响", "1 = physical (loud at the ear, much quieter in front), 0 = constant"), egui::Slider::new(&mut p.level_follow, 0.0..=1.0).fixed_decimals(2));
-            });
-            if p.mode == MotionMode::Manual && mix != Some(false) {
-                ui.add(egui::Label::new(RichText::new(t("手动：声源停在你摆的位置，在左边的位置图上拖动。忽远忽近、上下、自然晃动此时不起作用", "Manual: the source stays where you put it; drag it on the map at the left. Near / far sway, up / down and micro motion are inactive")).weak().small()).wrap());
-            }
         });
         pressed.then_some((file_lufs, music))
     }
@@ -3052,10 +3040,30 @@ impl App {
         });
     }
 
-    /// 右侧第二栏：忽远忽近、KU100 临场感、人声处理、输出。`fixed_mix`：多音频合成·各自固定中（各音源用"固定"，
-    /// 手动摆位不起作用，忽远忽近、上下照常）。
-    fn params_right(ui: &mut egui::Ui, p: &mut Params, fixed_mix: bool) {
-        Self::params_bg(ui, p);
+    /// 右侧第二栏：左右移动、忽远忽近、上下。`mix`：多音频合成中时是 Some(是否一起移动)——各自固定时左右移动不起作用，
+    /// 一起移动时几个音频按这里的方式一起走；各自固定时手动摆位不起作用，忽远忽近、上下照常。
+    fn params_middle(ui: &mut egui::Ui, p: &mut Params, mix: Option<bool>) {
+        fit_sliders(ui);
+        let fixed_mix = mix == Some(false);
+        egui::CollapsingHeader::new(RichText::new(t("左右移动", "Left / right motion")).strong()).default_open(true).show(ui, |ui| {
+            let accent = Color32::from_rgb(70, 150, 240);
+            match mix {
+                Some(false) => {
+                    ui.add(egui::Label::new(RichText::new(t("几个声音各自固定（多音频合成 / 左右双人）：每个声音固定在自己的位置（在左边选，或在位置图上拖），下面的移动方式暂不起作用；忽远忽近、上下、自然晃动照常。想让它们一起动，把左边的「排布」改成「一起移动」", "Voices fixed (multi-audio mix / two voices): each voice stays at its own position (pick it on the left or drag it on the map), so the motion modes below are inactive; near / far sway, up / down and micro motion still apply. Set Layout to Together on the left to move them")).small().color(accent)).wrap());
+                }
+                Some(true) => {
+                    ui.add(egui::Label::new(RichText::new(t("几个声音一起移动（多音频合成 / 左右双人）：按下面的方式一起走，彼此始终相隔 360°/个数（两个时正好相对：一个贴左耳时另一个贴右耳）", "Voices moving together (multi-audio mix / two voices): they follow the motion below together and always stay 360° / count apart (two voices: one at the left ear while the other is at the right)")).small().color(accent)).wrap());
+                }
+                None => {}
+            }
+            ui.add_enabled_ui(mix != Some(false), |ui| Self::motion_controls(ui, p));
+            egui::Grid::new("g2b").num_columns(2).min_col_width(COL).spacing([10.0, 6.0]).show(ui, |ui| {
+                row(ui, t("响度随位置变化", "Level follows position"), t("1 = 物理真实（贴耳很响、到脸前会弱很多），0 = 处处一样响", "1 = physical (loud at the ear, much quieter in front), 0 = constant"), egui::Slider::new(&mut p.level_follow, 0.0..=1.0).fixed_decimals(2));
+            });
+            if p.mode == MotionMode::Manual && mix != Some(false) {
+                ui.add(egui::Label::new(RichText::new(t("手动：声源停在你摆的位置，在左边的位置图上拖动。忽远忽近、上下、自然晃动此时不起作用", "Manual: the source stays where you put it; drag it on the map at the left. Near / far sway, up / down and micro motion are inactive")).weak().small()).wrap());
+            }
+        });
         egui::CollapsingHeader::new(RichText::new(t("忽远忽近", "Near / far sway")).strong()).default_open(true).show(ui, |ui| {
             if p.mode == MotionMode::Manual && !fixed_mix {
                 ui.disable(); // 手动摆位时不起作用（多音频合成·各自固定时各音源照常忽远忽近）
@@ -3083,6 +3091,12 @@ impl App {
             });
             ui.add(egui::Label::new(RichText::new(t("上下比左右、远近弱，因人而异；气声、轻语更明显", "Height is a weaker cue than left / right or distance and varies between listeners; clearer on breathy voices")).weak().small()).wrap());
         });
+    }
+
+    /// 右侧第三栏：背景音、KU100 临场感、听歌、人声处理、输出。
+    fn params_right(ui: &mut egui::Ui, p: &mut Params) {
+        fit_sliders(ui);
+        Self::params_bg(ui, p);
         egui::CollapsingHeader::new(RichText::new(t("KU100 临场感", "KU100 presence")).strong()).default_open(true).show(ui, |ui| {
             ui.checkbox(&mut p.room, t("真实房间（KU100 实测，远耳听到的是房间声而不是寂静）", "Real room (measured with a KU100: the far ear hears the room, not silence)"));
             ui.checkbox(&mut p.static_ambience, t("固定原声底噪", "Keep recorded ambience stationary"))
@@ -3096,7 +3110,7 @@ impl App {
                     Some(i) => format!("{} {}", t("真人", "Human"), crate::dsp::pinna::pinnas().items[i].name),
                     None => t("KU100（人工头）", "KU100 (dummy head)").to_string(),
                 };
-                egui::ComboBox::from_id_salt("pinna").width(190.0).selected_text(cur).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("pinna").width(ui.available_width().min(190.0)).selected_text(cur).show_ui(ui, |ui| {
                     ui.selectable_value(&mut p.pinna, "KU100".to_string(), t("KU100（人工头）", "KU100 (dummy head)"));
                     for q in &crate::dsp::pinna::pinnas().items {
                         ui.selectable_value(&mut p.pinna, q.name.clone(), format!("{} {}", t("真人", "Human"), q.name));
@@ -3109,7 +3123,7 @@ impl App {
                     Playback::Native => t("KU100 原机音色", "KU100 native").to_string(),
                     Playback::Headphone(n) => n.clone(),
                 };
-                egui::ComboBox::from_id_salt("pb").width(190.0).selected_text(cur).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("pb").width(ui.available_width().min(190.0)).selected_text(cur).show_ui(ui, |ui| {
                     ui.selectable_value(&mut p.playback, Playback::Diffuse, t("通用扩散场", "Diffuse field"));
                     ui.selectable_value(&mut p.playback, Playback::Native, t("KU100 原机音色", "KU100 native"));
                     for (n, _) in &tables().headphones {
@@ -3464,9 +3478,17 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().id_salt("rightscroll").show(ui, |ui| {
                 let p = &mut self.s.params;
                 let mut style_lufs = None;
-                ui.columns(2, |c| {
-                    style_lufs = Self::params_left(&mut c[0], p, layout);
-                    Self::params_right(&mut c[1], p, layout == Some(false));
+                ui.columns(3, |c| {
+                    style_lufs = Self::params_left(&mut c[0], p);
+                    Self::params_middle(&mut c[1], p, layout);
+                    Self::params_right(&mut c[2], p);
+                    // 三栏之间画一条竖线，高度到最长的一栏为止
+                    let (top, bottom) = (c[0].max_rect().top(), c.iter().map(|u| u.min_rect().bottom()).fold(0.0, f32::max));
+                    let stroke = c[0].visuals().widgets.noninteractive.bg_stroke;
+                    for k in 1..c.len() {
+                        let x = (c[k - 1].max_rect().right() + c[k].max_rect().left()) / 2.0;
+                        c[k].painter().vline(x, top..=bottom, stroke);
+                    }
                 });
                 if let Some((l, music)) = style_lufs {
                     if let Some(l) = l {
@@ -3698,10 +3720,11 @@ mod tests {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2000.0, 3000.0))),
                     ..Default::default()
                 }, |ui| {
-                    ui.columns(2, |columns| {
+                    ui.columns(3, |columns| {
                         let layout = [None, Some(false), Some(true)][k % 3];
-                        App::params_left(&mut columns[0], &mut params, layout);
-                        App::params_right(&mut columns[1], &mut params, layout == Some(false));
+                        App::params_left(&mut columns[0], &mut params);
+                        App::params_middle(&mut columns[1], &mut params, layout);
+                        App::params_right(&mut columns[2], &mut params);
                     });
                 });
                 assert_eq!(params, expected, "drawing controls changed a manually entered value");

@@ -121,6 +121,55 @@ JNIEXPORT jfloatArray JNICALL JNI_FN(procTele)(JNIEnv *env, jclass cls, jlong p)
     return a;
 }
 
+// ---- 输出节拍（rust/src/pace.rs）
+
+JNIEXPORT jlong JNICALL JNI_FN(paceNew)(JNIEnv *env, jclass cls) {
+    (void)env, (void)cls;
+    return (jlong)(intptr_t)asmr_pace_new();
+}
+
+JNIEXPORT void JNICALL JNI_FN(paceFree)(JNIEnv *env, jclass cls, jlong p) {
+    (void)env, (void)cls;
+    asmr_pace_free((AsmrPacer *)(intptr_t)p);
+}
+
+JNIEXPORT jint JNICALL JNI_FN(paceBegin)(JNIEnv *env, jclass cls, jlong p, jint first) {
+    (void)env, (void)cls;
+    return asmr_pace_begin((AsmrPacer *)(intptr_t)p, first);
+}
+
+JNIEXPORT jint JNICALL JNI_FN(paceStartFill)(JNIEnv *env, jclass cls, jlong p) {
+    (void)env, (void)cls;
+    return asmr_pace_start_fill((const AsmrPacer *)(intptr_t)p);
+}
+
+// data 里的 frames 帧 → out（要写进输出流的帧），返回帧数；0 = 这一块丢掉
+JNIEXPORT jint JNICALL JNI_FN(pacePush)(JNIEnv *env, jclass cls, jlong p, jfloatArray data, jint frames, jint fill, jint underruns,
+                                        jfloatArray out) {
+    (void)cls;
+    jsize in_len = (*env)->GetArrayLength(env, data), out_len = (*env)->GetArrayLength(env, out);
+    if (frames <= 0 || frames * 2 > in_len) return 0;
+    float *o = (*env)->GetPrimitiveArrayCritical(env, out, NULL);
+    if (o == NULL) return 0;
+    float *d = (*env)->GetPrimitiveArrayCritical(env, data, NULL);
+    int m = 0;
+    if (d != NULL) {
+        m = asmr_pace_push((AsmrPacer *)(intptr_t)p, d, frames, fill, underruns, o, out_len / 2);
+        (*env)->ReleasePrimitiveArrayCritical(env, data, d, JNI_ABORT);
+    }
+    (*env)->ReleasePrimitiveArrayCritical(env, out, o, 0);
+    return m;
+}
+
+JNIEXPORT jfloatArray JNICALL JNI_FN(paceStats)(JNIEnv *env, jclass cls, jlong p) {
+    (void)cls;
+    float out[4] = {0};
+    asmr_pace_stats((const AsmrPacer *)(intptr_t)p, out);
+    jfloatArray a = (*env)->NewFloatArray(env, 4);
+    if (a) (*env)->SetFloatArrayRegion(env, a, 0, 4, out);
+    return a;
+}
+
 JNIEXPORT jlong JNICALL JNI_FN(rainNew)(JNIEnv *env, jclass cls) {
     (void)env, (void)cls;
     return (jlong)(intptr_t)asmr_rain_new();

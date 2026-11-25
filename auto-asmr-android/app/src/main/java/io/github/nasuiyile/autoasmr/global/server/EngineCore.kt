@@ -210,20 +210,23 @@ internal object EngineCore {
         o.put("tele", JSONArray().apply { tele.forEach { put(it.toDouble()) } })
         o.put("in", peakIn.toDouble())
         o.put("out", peakOut.toDouble())
+        // 延迟各段（毫秒，量不到时 -1）：截取（录音端）、缓冲（输出流里攒着的）、设备（声卡 / 蓝牙耳机本身）
         o.put("lag_in", r.lagInMs.toDouble().takeIf { it.isFinite() } ?: -1.0)
-        o.put("lag_out", r.lagOutMs.toDouble().takeIf { it.isFinite() } ?: -1.0)
+        o.put("lag_buf", r.lagBufMs.toDouble().takeIf { it.isFinite() } ?: -1.0)
+        o.put("lag_dev", r.lagDevMs.toDouble().takeIf { it.isFinite() } ?: -1.0)
         o.put("engine", r.engineLatencyMs.toDouble())
         o.put("underruns", r.underruns)
-        o.put("out_buf", r.outBufMs.toDouble())
+        o.put("drops", r.drops)
         o.put("stat", statLine)
         return o.toString()
     }
 
-    /** 拦截带来的延迟估计：录音端积压 + 引擎 + 输出流里还没放出去的。 */
+    /** 从声音被截下到真正放出来的延迟估计：截取 + 引擎 + 输出节拍 + 输出流里攒着的 + 设备本身。 */
     private fun latencyMs(r: AudioRouter): Float {
         val a = r.lagInMs.takeIf { it.isFinite() } ?: 0f
-        val b = r.lagOutMs.takeIf { it.isFinite() } ?: 0f
-        return a + b + (if (dry) 0f else r.engineLatencyMs)
+        val b = r.lagBufMs.takeIf { it.isFinite() } ?: 0f
+        val c = r.lagDevMs.takeIf { it.isFinite() } ?: 0f
+        return a + b + c + r.paceLatencyMs + (if (dry) 0f else r.engineLatencyMs)
     }
 
     private fun logsSince(seq: Long): String = synchronized(logs) {
@@ -250,9 +253,9 @@ internal object EngineCore {
             peakOut = r.peakOut
             statLine = String.format(
                 Locale.ROOT,
-                "in=%.3f out=%.3f frames=%d gated=%b lag_in=%.1f lag_out=%.1f engine=%.1f cpu=%.1f underruns=%d out_buf=%.0f read_err=%d",
-                peakIn, peakOut, frames - lastFrames, r.gated, r.lagInMs, r.lagOutMs,
-                r.engineLatencyMs, cpuPct, r.underruns, r.outBufMs, r.readErrors,
+                "in=%.3f out=%.3f frames=%d gated=%b lag_in=%.1f buf=%.1f dev=%.1f engine=%.1f cpu=%.1f underruns=%d target=%.1f trim=%.0f drops=%d read_err=%d",
+                peakIn, peakOut, frames - lastFrames, r.gated, r.lagInMs, r.lagBufMs, r.lagDevMs,
+                r.engineLatencyMs, cpuPct, r.underruns, r.targetMs, r.trimPpm, r.drops, r.readErrors,
             )
             if (stdout != null) emit("stat $statLine")
             r.peakIn = 0f

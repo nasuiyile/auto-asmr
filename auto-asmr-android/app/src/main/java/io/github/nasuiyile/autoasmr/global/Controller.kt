@@ -49,11 +49,14 @@ object Controller {
         val tele: FloatArray = FloatArray(0),
         val inPeak: Float = 0f,
         val outPeak: Float = 0f,
+        /** 延迟各段（毫秒，量不到时 -1）：截取、输出流里攒着的缓冲、设备（声卡 / 蓝牙耳机）本身。 */
         val lagIn: Float = -1f,
-        val lagOut: Float = -1f,
+        val lagBuf: Float = -1f,
+        val lagDev: Float = -1f,
         val engine: Float = 0f,
         val underruns: Int = 0,
-        val outBuf: Float = 0f,
+        /** 积压太多、丢掉旧声音追上实时的次数。 */
+        val drops: Int = 0,
         val fatal: String? = null,
     )
 
@@ -363,10 +366,11 @@ object Controller {
             inPeak = o.optDouble("in").toFloat(),
             outPeak = o.optDouble("out").toFloat(),
             lagIn = o.optDouble("lag_in", -1.0).toFloat(),
-            lagOut = o.optDouble("lag_out", -1.0).toFloat(),
+            lagBuf = o.optDouble("lag_buf", -1.0).toFloat(),
+            lagDev = o.optDouble("lag_dev", -1.0).toFloat(),
             engine = o.optDouble("engine").toFloat(),
             underruns = o.optInt("underruns"),
-            outBuf = o.optDouble("out_buf").toFloat(),
+            drops = o.optInt("drops"),
             fatal = o.optString("fatal").ifEmpty { null },
         )
         val seq = o.optLong("log")

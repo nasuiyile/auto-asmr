@@ -30,6 +30,20 @@ object Engine {
     /** 导入配置文件（和电脑版同一格式的 .ron），整份换掉。 */
     @JvmStatic external fun loadConfig(text: String): Int
     @JvmStatic external fun lastError(): String?
+    /** 输出节拍（rust/src/pace.rs，每路一个）：按输出流里的积压量微调速度，卡顿后追回实时。 */
+    @JvmStatic external fun paceNew(): Long
+    @JvmStatic external fun paceFree(p: Long)
+    /** 输出流（重新）开始放：第一块是 [first] 帧时前面要先垫多少帧静音。 */
+    @JvmStatic external fun paceBegin(p: Long, first: Int): Int
+    @JvmStatic external fun paceStartFill(p: Long): Int
+    /**
+     * 送进 [data] 里的 [frames] 帧（处理好的交错立体声）：[fill] 是写之前输出流里还没放出去的帧数，[underruns] 是输出流累计的
+     * 断流次数。要写进输出流的帧写到 [out]（至少比输入多 64 帧；再多 4800 帧，断流后才垫得下静音），返回帧数；0 = 这一块丢掉。
+     * [p] 为 0 时原样拷过去。
+     */
+    @JvmStatic external fun pacePush(p: Long, data: FloatArray, frames: Int, fill: Int, underruns: Int, out: FloatArray): Int
+    /** 目标（写之前至少剩多少，毫秒）、速度偏差（ppm）、丢掉旧声音的次数、这一层的延时（毫秒）。 */
+    @JvmStatic external fun paceStats(p: Long): FloatArray
     @JvmStatic external fun rainNew(): Long
     @JvmStatic external fun rainFree(p: Long)
     @JvmStatic external fun rainRender(p: Long, data: FloatArray, frames: Int): Int

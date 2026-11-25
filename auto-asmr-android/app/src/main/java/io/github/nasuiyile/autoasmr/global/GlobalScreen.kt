@@ -88,6 +88,17 @@ fun globalStatusLine(): String {
     }
 }
 
+/** 延迟各段（另起一行）：截取 + 缓冲 + 设备；其他 App 没在出声、还没量到时为空。 */
+private fun latencyParts(p: Controller.Poll): String {
+    if (p.tele.isEmpty() || p.tele[0] <= 0f || p.lagBuf < 0f) return ""
+    val parts = buildList {
+        if (p.lagIn >= 0f) add(String.format(Locale.ROOT, "截取 %.0f", p.lagIn))
+        add(String.format(Locale.ROOT, "缓冲 %.0f", p.lagBuf))
+        if (p.lagDev >= 0f) add(String.format(Locale.ROOT, "设备 %.0f", p.lagDev))
+    }
+    return "\n延迟：" + parts.joinToString(" + ") + " ms"
+}
+
 /** 全局页的说明：都收在标题右边的「?」里，页面上只留控件和状态。 */
 private fun globalHelp(): List<HelpItem> = listOf(
     HelpItem("全局模式是什么", "把其他 App 播放的声音截下来，做成 KU100 双耳 ASMR 效果再放出来。戴耳机听。"),
@@ -98,7 +109,14 @@ private fun globalHelp(): List<HelpItem> = listOf(
             "root 启动的服务进程跟着 App 走：App 被杀时它也退出。想让它常驻，用 Shizuku（Shizuku 本身也可以用 root 启动）。",
     ),
     HelpItem("拦截其他 App 的声音", "打开时，各 App 的原声不再直接进耳机，听到的是处理后的声音。关掉（暂停）时各 App 的声音照常直接放出，服务进程还在。"),
-    HelpItem("拦截时的那行数字", "峰值 a → b：截到的声音（a）和放出去的声音（b）有多响，1 = 满幅。断流：输出没来得及送声音的次数，一直涨说明手机忙不过来。输出缓冲：放出去之前排队的声音有多长，越长延迟越大。"),
+    HelpItem("拦截时的那行数字", "峰值 a → b：截到的声音（a）和放出去的声音（b）有多响，1 = 满幅。断流：输出没来得及送声音的次数，一直涨说明手机忙不过来。"),
+    HelpItem(
+        "延迟的三段",
+        "截取：声音从 App 放出到被截下来（系统的拦截通道本身，约 60–90 ms）。\n" +
+            "缓冲：处理好的声音在放出去之前排队的量，自动调到刚好不断流（约 15–50 ms）；卡顿后会多一阵，十几秒内追回来。\n" +
+            "设备：耳机 / 扬声器本身的延迟，不开拦截时也有。有线耳机几十毫秒，蓝牙耳机常有 150–300 ms。\n" +
+            "延迟主要在「设备」上时，换有线耳机或低延迟的蓝牙耳机才降得下来。",
+    ),
     HelpItem("效果参数", "下面的效果参数和「网页」页共用一份配置；输出增益只调实时听到的音量，不影响文件转换。"),
     HelpItem("版本", BuildConfig.VERSION_NAME),
 )
@@ -175,12 +193,12 @@ private fun ServiceCard() {
                         Text("拦截其他 App 的声音", style = MaterialTheme.typography.bodyLarge)
                         Text(
                             if (p.running) {
-                                String.format(Locale.ROOT, "峰值 %.2f → %.2f · 断流 %d · 缓冲 %.0f ms", p.inPeak, p.outPeak, p.underruns, p.outBuf)
+                                String.format(Locale.ROOT, "峰值 %.2f → %.2f · 断流 %d", p.inPeak, p.outPeak, p.underruns) + latencyParts(p)
                             } else {
                                 "已暂停：各 App 的声音照常直接放出"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }

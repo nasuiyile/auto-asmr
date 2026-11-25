@@ -50,6 +50,19 @@ const AsmrTele *asmr_proc_tele(const AsmrProcessor *p);
 // out[6..11]：是不是左右双人（0 / 1），2 号声音的方位角、仰角、距离、说话活动（左右双人时前 4 项是 1 号）
 void asmr_tele_read(const AsmrTele *t, float *out);
 
+// 全局模式的输出节拍（每路一个）：按输出流里的积压量微调速度，卡顿后追回实时，见 rust/src/pace.rs
+typedef struct Pacer AsmrPacer;
+AsmrPacer *asmr_pace_new(void);
+void asmr_pace_free(AsmrPacer *p);
+// 输出流（重新）开始放：第一块是 first 帧时前面要先垫多少帧静音
+int asmr_pace_begin(AsmrPacer *p, int first);
+int asmr_pace_start_fill(const AsmrPacer *p);
+// 送进 frames 帧处理好的交错立体声（不超过 4096 帧）；fill = 写之前输出流里还没放出去的帧数，underruns = 输出流累计断流次数。
+// 要写进输出流的帧写到 out（可写 out_cap 帧，至少 frames + 64；再多 4800 帧，断流后才垫得下静音），返回帧数；0 = 这一块丢掉
+int asmr_pace_push(AsmrPacer *p, const float *data, int frames, int fill, int underruns, float *out, int out_cap);
+// out[0..4]：目标（写之前至少剩多少，毫秒）、速度偏差（ppm）、丢掉旧声音的次数、这一层的延时（毫秒）
+void asmr_pace_stats(const AsmrPacer *p, float *out);
+
 // 背景雨声（单独的输出流，48 kHz 立体声）
 void *asmr_rain_new(void);
 void asmr_rain_free(void *p);

@@ -34,6 +34,7 @@ const PRIME: usize = 128;
 
 pub mod aout;
 pub mod files;
+pub mod pace;
 pub mod rain;
 pub mod settings;
 use settings::{current_cfg, update_params, with_global, CFG_VER, DRY, GLOBAL};
@@ -677,6 +678,87 @@ pub unsafe extern "C" fn asmr_rain_render(p: *mut rain::RainOut, data: *mut f32,
 #[no_mangle]
 pub extern "C" fn asmr_rain_set_on(_p: *mut rain::RainOut, on: c_int) {
     rain::set_wanted(on != 0);
+}
+
+// ------------------------------------------------------------------ 全局模式的输出节拍
+
+/// 建输出节拍（全局模式每路一个，见 [`pace`]）。
+#[no_mangle]
+pub extern "C" fn asmr_pace_new() -> *mut pace::Pacer {
+    catch_unwind(|| Box::into_raw(Box::new(pace::Pacer::new()))).unwrap_or(std::ptr::null_mut())
+}
+
+/// # Safety
+/// `p` 来自 `asmr_pace_new`，之后不再使用。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_pace_free(p: *mut pace::Pacer) {
+    if !p.is_null() {
+        drop(Box::from_raw(p));
+    }
+}
+
+/// 输出流（重新）开始放：第一块是 `first` 帧时前面要先垫多少帧静音。
+///
+/// # Safety
+/// `p` 来自 `asmr_pace_new`；同一个 `p` 不能被两个线程同时用。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_pace_begin(p: *mut pace::Pacer, first: c_int) -> c_int {
+    if p.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| (*p).begin(first.max(0) as usize) as c_int)).unwrap_or(0)
+}
+
+/// 开始放之前输出流里要攒够多少帧。
+///
+/// # Safety
+/// 同 `asmr_pace_begin`。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_pace_start_fill(p: *const pace::Pacer) -> c_int {
+    if p.is_null() {
+        return 0;
+    }
+    (*p).start_fill() as c_int
+}
+
+/// 送进一块处理好的交错立体声（`frames` 帧，不超过 [`pace::MAX_FRAMES`]）：`fill` 是写之前输出流里还没放出去的帧数，
+/// `underruns` 是输出流累计的断流次数。要写进输出流的帧写到 `out`（可写 `out_cap` 帧，至少 `frames + 64`；再多
+/// [`pace::PAD_MAX`] 帧，断流后才垫得下静音），返回帧数（0 = 这一块丢掉）；出错时原样拷过去。
+///
+/// # Safety
+/// `p` 来自 `asmr_pace_new`；`data` 指向 `frames * 2` 个 float，`out` 可写 `out_cap * 2` 个 float；
+/// 同一个 `p` 不能被两个线程同时用。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_pace_push(p: *mut pace::Pacer, data: *const f32, frames: c_int, fill: c_int, underruns: c_int, out: *mut f32, out_cap: c_int) -> c_int {
+    if data.is_null() || out.is_null() || frames <= 0 || out_cap <= 0 {
+        return 0;
+    }
+    let input = std::slice::from_raw_parts(data, frames as usize * 2);
+    let output = std::slice::from_raw_parts_mut(out, out_cap as usize * 2);
+    let direct = |output: &mut [f32]| {
+        let n = (frames as usize).min(out_cap as usize);
+        output[..n * 2].copy_from_slice(&input[..n * 2]);
+        n as c_int
+    };
+    if p.is_null() {
+        return direct(output);
+    }
+    match catch_unwind(AssertUnwindSafe(|| (*p).push(input, fill, underruns, output) as c_int)) {
+        Ok(m) => m,
+        Err(_) => direct(output),
+    }
+}
+
+/// 状态：out[0] 目标（写之前至少剩多少，毫秒）、[1] 速度偏差（ppm）、[2] 丢掉旧声音的次数、[3] 这一层的延时（毫秒）。
+///
+/// # Safety
+/// `p` 来自 `asmr_pace_new`；`out` 可写 4 个 float。
+#[no_mangle]
+pub unsafe extern "C" fn asmr_pace_stats(p: *const pace::Pacer, out: *mut f32) {
+    if p.is_null() || out.is_null() {
+        return;
+    }
+    std::slice::from_raw_parts_mut(out, 4).copy_from_slice(&(*p).stats());
 }
 
 // ------------------------------------------------------------------ 文件转换页

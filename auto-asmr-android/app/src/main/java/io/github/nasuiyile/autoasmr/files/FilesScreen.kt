@@ -386,10 +386,10 @@ private fun LayoutRow(busy: Boolean) {
     }
 }
 
-/** 左右双人：一个音频当成两个人（多音频合成生效时不显示）。 */
+/** 左右双人：一个音频当成两个人。多音频合成生效时只留延迟滑条，用来把几个音频错开（自动对齐之后再错开）。 */
 @Composable
 private fun DuoBlock(st: JSONObject, busy: Boolean) {
-    if (st.optBoolean("multi")) return
+    val multi = st.optBoolean("multi")
     val p = Settings.params
     val ms = p.optDouble("duo_ms", 0.0)
     var drag by remember { mutableStateOf<Float?>(null) }
@@ -399,7 +399,7 @@ private fun DuoBlock(st: JSONObject, busy: Boolean) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TipLabel(
                 "左右双人",
-                "把一个音频当成两个人：同一个声音一个在左耳、一个在右耳（和导入两个音频的多音频合成一样，各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音，50–120 ms 像两个人，150 ms 以上像回声。打开时排布默认是「一起移动」（按「左右移动」一起走、始终相对），下面可以改两个声音的位置、音量、排布和自动平衡；试听中拖这个滑条实时生效。输出比原音频长出这段延迟。列表里有几个音频时，试听的是选中的那个，「全部转换」时每个文件都这样做。0 = 关闭",
+                if (multi) MIX_DELAY_TIP else "把一个音频当成两个人：同一个声音一个在左耳、一个在右耳（和导入两个音频的多音频合成一样，各自忽远忽近），第 2 个整体晚这么多毫秒，听得出是两个人一前一后地说。30 ms 以下两边容易融成一个声音，50–120 ms 像两个人，150 ms 以上像回声。打开时排布默认是「一起移动」（按「左右移动」一起走、始终相对），下面可以改两个声音的位置、音量、排布和自动平衡；试听中拖这个滑条实时生效。输出比原音频长出这段延迟。列表里有几个音频时，试听的是选中的那个，「全部转换」时每个文件都这样做。0 = 关闭",
                 Modifier.weight(1f),
             )
             Text(if (shown < 0.5) "0 关" else "${shown.roundToInt()} ms", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
@@ -408,7 +408,10 @@ private fun DuoBlock(st: JSONObject, busy: Boolean) {
             drag = (t * 300f).roundToInt().toFloat()
             Settings.setNumber("duo_ms", drag!!.toDouble())
         }, onValueChangeFinished = { drag = null }, enabled = !busy, modifier = Modifier.height(32.dp))
-        Note(if (ms <= 0.0) "同一个声音一左一右两个人说" else if (n > 1) "转换时每个文件都这样" else "50–120 ms 最像两个人")
+        Note(
+            if (multi) st.optString("stagger").ifEmpty { "调几个声音之间的延迟（对齐之后再加）" }
+            else if (ms <= 0.0) "同一个声音一左一右两个人说" else if (n > 1) "转换时每个文件都这样" else "50–120 ms 最像两个人",
+        )
         if (st.optBoolean("duo")) {
             val voices = st.optJSONArray("voices")
             val offsets = st.optJSONArray("follow_offsets")
@@ -604,3 +607,7 @@ private fun PreviewBar(st: JSONObject) {
         )
     }
 }
+
+/** 多音频合成时「左右双人」滑条的说明（同桌面版）。 */
+private const val MIX_DELAY_TIP =
+    "多音频合成时，这个滑条调几个声音之间的延迟：第 2 个音频整体晚这么多毫秒（3、4 个音频时第 3 个晚两倍、第 4 个晚三倍），听起来是几个人一前一后地说。勾着「自动对齐」时先对齐、再在对齐的基础上加这段延迟；没勾时按各文件原样的开头加。30 ms 以下容易融成一个声音（偏在先到的那一边），50–120 ms 像几个人，150 ms 以上像回声。试听中拖这个滑条实时生效，「合成并保存」用同样的延迟，输出比不加延迟时长出这段。位置、音量、排布和自动平衡在上面合成那里设。和单个音频的左右双人是同一个设置。0 = 不错开"

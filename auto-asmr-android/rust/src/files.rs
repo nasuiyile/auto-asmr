@@ -54,6 +54,12 @@ fn motion_name(m: MotionMode) -> &'static str {
     }
 }
 
+/// 多音频合成的错开延迟写成一句话（同桌面版）：两个音频时"错开：第 2 个晚 80 ms"，多个时依次列出。
+fn stagger_text(ms: f32, n: usize) -> String {
+    let parts: Vec<String> = (1..n).map(|k| format!("第 {} 个晚 {:.0} ms", k + 1, ms * k as f32)).collect();
+    format!("错开：{}", parts.join("，"))
+}
+
 /// 位置名（预设的名字，摆到别处时是方位角）。
 fn voice_name(v: &Voice) -> String {
     match v.preset_index() {
@@ -318,9 +324,12 @@ impl Files {
         self.multi() && self.s.mix_align
     }
 
+    /// 同桌面版：左右双人的第 2 个声音晚 `duo_ms`；多音频合成时同一个滑条是错开延迟，第 k 个音频晚 k × `duo_ms`（在自动对齐之后）。
     fn mix_delays(&self) -> [usize; MAX_VOICES] {
         let mut d = [0; MAX_VOICES];
-        if self.duo() {
+        if self.multi() {
+            d = mix::stagger_delays(self.s.duo_ms, self.mix_paths().len());
+        } else if self.duo() {
             d[1] = mix::delay_samples(self.s.duo_ms);
         }
         d
@@ -664,7 +673,8 @@ impl Files {
         let inputs: Vec<MixInput> = paths.iter().cloned().zip(voices.iter().copied()).map(|(path, voice)| MixInput { path, voice }).collect();
         let follow = self.s.mix_follow;
         let align = self.s.mix_align;
-        let mo = MixOptions { follow, align, balance: self.s.mix_balance / 100.0, ..Default::default() };
+        let delays = mix::stagger_delays(self.s.duo_ms, inputs.len());
+        let mo = MixOptions { follow, align, balance: self.s.mix_balance / 100.0, delays };
         let offsets = mix::follow_offsets(inputs.len(), follow);
         let list = inputs
             .iter()
@@ -679,6 +689,7 @@ impl Files {
         let desc = if follow { format!("一起移动（{}）  {list}", motion_name(self.s.params.mode)) } else { list };
         let desc = if align { format!("自动对齐  {desc}") } else { desc };
         let desc = if mo.balance > 0.0 { format!("自动平衡 {:.0}%  {desc}", self.s.mix_balance) } else { desc };
+        let desc = if self.s.duo_ms > 0.0 { format!("{}  {desc}", stagger_text(self.s.duo_ms, inputs.len())) } else { desc };
         let opts = self.convert_options(paths[0].clone(), out.clone());
         let job = Job {
             paths: vec![out.clone()],
@@ -1331,6 +1342,7 @@ impl Files {
             "mix_sel": self.mix_sel,
             "multi": multi,
             "duo": self.duo(),
+            "stagger": if multi && self.s.duo_ms > 0.0 { stagger_text(self.s.duo_ms, n_voices) } else { String::new() },
             "mixing": mixing,
             "align_on": self.align_on(),
             "n_voices": n_voices,
@@ -1557,6 +1569,18 @@ mod tests {
         let report = st["report"].as_str().unwrap();
         assert!(report.contains("1. 甲.wav（左耳）") && report.contains("2. 乙.wav（右耳，-3.0 dB）"), "{report}");
         assert!(staging.join("2/甲_mix_asmr.wav").is_file());
+        // 合成时左右双人的滑条是错开延迟：第 2 个音频晚这么多，不动合成的排布；合成说明里写着错开了多少
+        crate::settings::update_doc("duo_ms", json!(100.0)).unwrap();
+        let st = f.handle(&json!({"op": "poll"}));
+        assert!(st["multi"].as_bool().unwrap() && !st["duo"].as_bool().unwrap());
+        assert_eq!(st["stagger"], json!("错开：第 2 个晚 100 ms"));
+        assert!(!crate::settings::with_global(|g| g.saved.mix_follow), "合成的排布不变");
+        assert_eq!(f.mix_delays()[..2], [0, 4800]);
+        f.handle(&json!({"op": "convert", "staging": staging.display().to_string()}));
+        let st = wait(&mut f, |s| !s["busy"].as_bool().unwrap());
+        let report = st["report"].as_str().unwrap();
+        assert!(report.contains("错开：第 2 个晚 100 ms"), "{report}");
+        crate::settings::update_doc("duo_ms", json!(0.0)).unwrap();
         crate::settings::update_doc("mix", json!(false)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -51,6 +51,13 @@ fn motion_name(m: MotionMode) -> &'static str {
     }
 }
 
+/// 多音频合成的错开延迟写成一句话（界面提示和合成说明用）：两个音频时"错开：第 2 个晚 80 ms"，多个时依次列出。
+fn stagger_text(ms: f32, n: usize) -> String {
+    let en = ENGLISH.load(Ordering::Relaxed);
+    let parts: Vec<String> = (1..n).map(|k| if en { format!("#{} +{:.0} ms", k + 1, ms * k as f32) } else { format!("第 {} 个晚 {:.0} ms", k + 1, ms * k as f32) }).collect();
+    format!("{}{}", t("错开：", "delayed: "), parts.join(t("，", ", ")))
+}
+
 /// 合成音源的位置名：预设位置用它的名字，拖出来的位置用方位角。
 fn voice_name(v: &Voice) -> String {
     match v.preset_index() {
@@ -610,10 +617,13 @@ impl App {
         self.multi() && self.s.mix_align
     }
 
-    /// 各声音比时间线晚多少个样本：左右双人的第 2 个声音晚 `duo_ms`（实时页是 `rt_duo_ms`），其余都是 0。
+    /// 各声音比时间线晚多少个样本：左右双人的第 2 个声音晚 `duo_ms`（实时页是 `rt_duo_ms`）；多音频合成时
+    /// 同一个滑条是错开延迟，第 k 个音频晚 k × `duo_ms`（在自动对齐之后）；其余都是 0。
     fn mix_delays(&self) -> [usize; MAX_VOICES] {
         let mut d = [0; MAX_VOICES];
-        if self.mic_duo() {
+        if self.multi() && self.s.tab == Tab::File {
+            d = mix::stagger_delays(self.s.duo_ms, self.mix_paths().len());
+        } else if self.mic_duo() {
             d[1] = mix::delay_samples(self.s.rt_duo_ms);
         } else if self.duo() {
             d[1] = mix::delay_samples(self.s.duo_ms);
@@ -640,7 +650,7 @@ impl App {
     /// 改左右双人的延迟（0 = 关）。试听中开 / 关时按新的方式从当前位置重新开始；只是改延迟时实时生效（淡过去）。
     fn set_duo(&mut self, ms: f32) {
         let was = self.duo();
-        self.s.set_duo_ms(ms); // 从 0 拖上来时排布切到一起移动
+        self.s.set_duo_ms(ms); // 从 0 拖上来时排布切到一起移动（勾着多音频合成时不切）
         if self.duo() == was {
             return;
         }
@@ -996,7 +1006,8 @@ impl App {
         let inputs: Vec<MixInput> = paths.iter().cloned().zip(voices.iter().copied()).map(|(path, voice)| MixInput { path, voice }).collect();
         let follow = self.s.mix_follow;
         let align = self.s.mix_align;
-        let mo = MixOptions { follow, align, balance: self.s.mix_balance / 100.0, ..Default::default() };
+        let delays = mix::stagger_delays(self.s.duo_ms, inputs.len());
+        let mo = MixOptions { follow, align, balance: self.s.mix_balance / 100.0, delays };
         let offsets = mix::follow_offsets(inputs.len(), follow);
         let list = inputs
             .iter()
@@ -1011,6 +1022,7 @@ impl App {
         let desc = if follow { format!("{}（{}）  {list}", t("一起移动", "moving together"), motion_name(self.s.params.mode)) } else { list };
         let desc = if align { format!("{}  {desc}", t("自动对齐", "auto-aligned")) } else { desc };
         let desc = if mo.balance > 0.0 { format!("{} {:.0}%  {desc}", t("自动平衡", "auto-balance"), self.s.mix_balance) } else { desc };
+        let desc = if self.s.duo_ms > 0.0 { format!("{}  {desc}", stagger_text(self.s.duo_ms, inputs.len())) } else { desc };
         let opts = self.convert_options(paths[0].clone(), out.clone());
         let job = Job {
             paths: vec![out.clone()],
@@ -2449,12 +2461,39 @@ impl App {
         });
     }
 
-    /// 文件页的左右双人：一个音频当成两个人。多音频合成生效时不显示。
+    /// 文件页的左右双人：一个音频当成两个人。多音频合成生效时只留延迟滑条，用来把几个音频错开（自动对齐之后再错开）。
     fn ui_duo(&mut self, ui: &mut egui::Ui, busy: bool) {
         if self.multi() {
-            return; // 多音频合成时用不上，也不占地方
+            self.ui_mix_delay(ui, busy);
+            return;
         }
         self.ui_duo_block(ui, busy, false);
+    }
+
+    /// 多音频合成时的左右双人：和单个音频时是同一个滑条（同一个设置），这时调的是几个音频之间的延迟。
+    /// 位置、音量、排布、自动平衡都在上面合成那里，这里不重复。
+    fn ui_mix_delay(&mut self, ui: &mut egui::Ui, busy: bool) {
+        let tip = t(
+            "多音频合成时，这个滑条调几个声音之间的延迟：第 2 个音频整体晚这么多毫秒（3、4 个音频时第 3 个晚两倍、第 4 个晚三倍），听起来是几个人一前一后地说。勾着「自动对齐」时先对齐、再在对齐的基础上加这段延迟；没勾时按各文件原样的开头加。30 ms 以下容易融成一个声音（偏在先到的那一边），50–120 ms 像几个人，150 ms 以上像回声。试听中拖这个滑条实时生效，「合成并保存」用同样的延迟，输出比不加延迟时长出这段。位置、音量、排布和自动平衡在上面合成那里设。和单个音频的左右双人是同一个设置。0 = 不错开",
+            "When mixing several files, this slider sets the delay between the voices: the second file is delayed by this many milliseconds as a whole (with 3 or 4 files the third is delayed twice as much and the fourth three times), so it sounds like people speaking one after another. With Auto-align on, the files are aligned first and then delayed by this much on top; without it, the delay is added to each file's own start. Below about 30 ms they tend to fuse into one voice (heard on the earlier side); 50–120 ms sounds like several people; above 150 ms it sounds like an echo. Dragging it during Preview takes effect live; Mix & save uses the same delay, and the output gets longer by it. Positions, volumes, layout and balance are set in the mix section above. It is the same setting as the single-file Two voices. 0 = no delay",
+        );
+        let ms = self.s.duo_ms;
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!busy, |ui| {
+                ui.label(t("左右双人", "Two voices")).on_hover_text(tip);
+                ui.spacing_mut().slider_width = 140.0;
+                let mut v = ms;
+                if ui.add(duo_slider(&mut v)).on_hover_text(tip).changed() {
+                    self.set_duo(v);
+                }
+            });
+            let note = if ms <= 0.0 {
+                t("调几个声音之间的延迟（对齐之后再加）", "delay between the voices (added after aligning)").to_string()
+            } else {
+                stagger_text(ms, self.mix_paths().len())
+            };
+            ui.label(RichText::new(note).small().weak());
+        });
     }
 
     /// 左右双人这一块，文件页和实时（主播）页共用、一模一样：延迟滑条和提示；打开后下面一行是两个声音的位置 / 音量，

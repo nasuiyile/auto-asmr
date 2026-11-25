@@ -45,7 +45,9 @@ convert 的选项（括号里是默认值）：
   --duo [毫秒]            第 2 个声音晚多少毫秒（1–300；不写数值 = 80）。30 ms 以下两边容易融成一个声音，
                           50–120 ms 像两个人一前一后地说，150 ms 以上像回声。默认一起移动（两个人按 --mode 的方式
                           一起走、彼此相对，同 --mix-follow）；给了 --pos 就各自固定在这两个位置（--pos left,right =
-                          一左一右各自固定）。可以和 --mix-gain、--mix-balance 一起用；输出比原音频长出这段延迟
+                          一左一右各自固定）。可以和 --mix-gain、--mix-balance 一起用；输出比原音频长出这段延迟。
+                          和 --mix 一起用时是几个音频之间的错开延迟：第 2 个晚这么多毫秒，第 3、4 个晚两倍、三倍
+                          （加了 --mix-align 时先对齐、再错开）；位置和排布照 --pos / --mix-follow
   --style ear|ku100|breath|earclean|music   ear=贴耳加强；ku100=KU100 近耳轻语；breath=呼吸音（近耳呼吸与气流）；
                           earclean=掏耳（给棉签 / 挖耳勺 / 刮擦这类触发音用：伸进耳道进进出出，
                           带耳道共鸣和耳内低频，每只耳朵约 15 秒换一次边，目标响度默认 −20 LUFS）；
@@ -600,9 +602,6 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         None => Params::default_level_follow(p.mode),
     };
     let duo_on = duo_ms > 0.0;
-    if duo_on && mix_on {
-        return Err("--duo（一个音频当成左右两个人）不能和 --mix 一起用".into());
-    }
     if mix_align && !mix_on {
         return Err("--mix-align 只用于多音频合成，请同时加 --mix".into());
     }
@@ -613,7 +612,8 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         return Err("一起移动时位置由 --mode 的走位决定，不能再用 --pos".into());
     }
     // 左右双人：两个声音的位置和音量（默认左耳、右耳）
-    let duo = if duo_on {
+    // 和 --mix 一起用时 --duo 是几个音频之间的错开延迟（见下面合成那里），不是左右双人
+    let duo = if duo_on && !mix_on {
         let mut voices = [Voice::preset(0), Voice::preset(1)];
         if let Some(s) = &pos_list {
             let v = s.split(',').filter(|x| !x.trim().is_empty()).map(parse_pos).collect::<Result<Vec<Voice>, String>>()?;
@@ -702,7 +702,12 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         if mix_balance > 0.0 {
             eprintln!("  自动平衡 {mix_balance:.0}%（按短时响度让几段一样响）");
         }
-        let mo = MixOptions { follow: mix_follow, align: mix_align, balance: mix_balance / 100.0, ..Default::default() };
+        if duo_on {
+            let list: Vec<String> = (1..items.len()).map(|k| format!("第 {} 个晚 {:.0} ms", k + 1, duo_ms * k as f32)).collect();
+            eprintln!("  错开：{}{}", list.join("，"), if mix_align { "（在对齐之后）" } else { "" });
+        }
+        let delays = mix::stagger_delays(duo_ms, items.len());
+        let mo = MixOptions { follow: mix_follow, align: mix_align, balance: mix_balance / 100.0, delays };
         let rep = convert_mix(&opts, &items, &p, mo, Arc::new(AtomicBool::new(false)), |f, stage| {
             let pc = (f * 100.0) as i32;
             if pc / 10 != last / 10 {

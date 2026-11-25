@@ -37,6 +37,17 @@ pub fn delay_samples(ms: f32) -> usize {
     (ms.clamp(0.0, DUO_MAX_MS) * 0.001 * FS).round() as usize
 }
 
+/// 多音频合成的错开延迟（自动对齐之后再加）：第 k 个音源比第 1 个晚 k × `ms`（两个音频时就是第 2 个晚 `ms`）。
+/// `ms` 和左右双人共用一个滑条（0 = 不错开），超出 `n` 的位置是 0。
+pub fn stagger_delays(ms: f32, n: usize) -> [usize; MAX_VOICES] {
+    let step = delay_samples(ms);
+    let mut d = [0; MAX_VOICES];
+    for (k, v) in d.iter_mut().enumerate().take(n) {
+        *v = k * step;
+    }
+    d
+}
+
 /// 加了声部延迟之后的总长：各段（长 `lens[k]`、晚 `delays[k]` 个样本）都放完为止。
 pub fn timeline_len(lens: &[usize], delays: &[usize]) -> usize {
     lens.iter().enumerate().map(|(k, &l)| l + delays.get(k).copied().unwrap_or(0)).max().unwrap_or(0)
@@ -801,6 +812,9 @@ mod tests {
         assert_eq!(timeline_len(&[10, 20], &[5]), 20);
         assert_eq!(delay_samples(80.0), 3840);
         assert_eq!(delay_samples(1e6), delay_samples(DUO_MAX_MS));
+        assert_eq!(stagger_delays(80.0, 2), [0, 3840, 0, 0]);
+        assert_eq!(stagger_delays(80.0, 3)[..3], [0, 3840, 7680]);
+        assert_eq!(stagger_delays(0.0, 4), [0; MAX_VOICES]);
     }
 
     fn energy(v: &[f32]) -> f64 {

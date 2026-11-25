@@ -148,7 +148,8 @@ pub struct MixOptions {
     pub align: bool,
     /// 自动平衡的强度（0–1，0 = 关）：按短时响度让几段每一段时间都差不多一样响。
     pub balance: f32,
-    /// 各音源比时间线晚多少个样本（左右双人：[0, 延迟, …]；多音频合成全是 0）。
+    /// 各音源比时间线晚多少个样本（左右双人：[0, 延迟, …]；多音频合成用 [`mix::stagger_delays`] 错开，
+    /// 不错开时全是 0）。打开了自动对齐时在对齐之后再错开。
     pub delays: [usize; MAX_VOICES],
 }
 
@@ -813,7 +814,7 @@ pub fn align_tracks(monos: &[&[f32]], names: &[String]) -> Result<(Vec<Vec<f32>>
 /// `mo.align`：先自动对齐（整段解码后对齐、裁掉对不上的开头和结尾），起点和时长按对齐之后的时间算；
 /// 对齐的说明（每段从哪里开始用、裁掉多少）放在报告的 `align_note` 里。
 /// `mo.balance`：自动平衡（整段算增益曲线，再截起点和时长），说明放在 `balance_note` 里。
-/// `mo.delays`：各音源比时间线晚多少个样本（左右双人），截取各段时直接错开，时间线随之变长。
+/// `mo.delays`：各音源比时间线晚多少个样本（左右双人、合成的错开延迟），在对齐之后、截取各段时直接错开，时间线随之变长。
 /// 对齐、平衡或有延迟时整段解码（同一个文件只解码一次）、按整段测响度，和合成试听完全一样；
 /// 都没有时和以前一样只解码要处理的那一段。
 pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, mo: MixOptions, cancel: Arc<AtomicBool>, mut progress: impl FnMut(f32, &str)) -> Result<ConvertReport, String> {
@@ -993,6 +994,16 @@ mod tests {
         part.start = 2.0;
         part.duration = Some(5.0);
         assert!((run(&part).seconds - 5.0).abs() < 0.02);
+        // 对齐之后再错开（左右双人的滑条）：长度多出这段延迟，右耳（第 2 个）比左耳正好晚这么多
+        opts.output = dir.join("mix_delay.wav");
+        let mo = MixOptions { align: true, delays: mix::stagger_delays(120.0, 2), ..Default::default() };
+        let rd = convert_mix(&opts, &inputs, &Params::default(), mo, Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+        assert!((rd.seconds - 20.12).abs() < 0.02, "{}", rd.seconds);
+        assert_eq!(rd.align_note, rep.align_note);
+        let (l, r) = read_stereo(&opts.output);
+        let lag = envelope_lag_ms(&l, &r);
+        assert!((lag - 120).abs() <= 3, "右耳比左耳晚 {lag} ms");
+        opts.output = dir.join("mix.wav");
         // 试听：整段解码（和界面的 decode_mix 一样）再用同一个函数对齐，结果与合成时用的一致
         let ma = load_mono(&ConvertOptions::new(pa.clone()), &AtomicBool::new(false)).unwrap().0;
         let mb = load_mono(&ConvertOptions::new(pb.clone()), &AtomicBool::new(false)).unwrap().0;

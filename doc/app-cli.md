@@ -68,12 +68,13 @@ auto-asmr convert 摇滚版.m4a DJ版.m4a --mix --mix-align --duration 60 -o 合
 auto-asmr convert a.m4a b.m4a --mix --mix-balance 80 -o 合成.wav
 ```
 
-一个音频当成左右两个人（同一个声音一个在左耳、一个在右耳，第 2 个晚一点）加 `--duo`，后面是第 2 个声音晚多少毫秒（1–300，不写就是 80）。默认一起移动（两个人按 `--mode` 的方式一起走、始终在头的两侧相对，和界面上打开左右双人时一样）；给了 `--pos`（两个位置）就各自固定在那两个位置，`--pos left,right` 就是一左一右各自固定。`--mix-gain`、`--mix-balance` 也能一起用；批量时每个文件都这样做；输出比原音频长出这段延迟（做法见[界面使用说明 · 左右双人](app-usage.md#左右双人一个音频当成两个人)）：
+一个音频当成左右两个人（同一个声音一个在左耳、一个在右耳，第 2 个晚一点）加 `--duo`，后面是第 2 个声音晚多少毫秒（1–300，不写就是 80）。默认一起移动（两个人按 `--mode` 的方式一起走、始终在头的两侧相对，和界面上打开左右双人时一样）；给了 `--pos`（两个位置）就各自固定在那两个位置，`--pos left,right` 就是一左一右各自固定。`--mix-gain`、`--mix-balance` 也能一起用；批量时每个文件都这样做；输出比原音频长出这段延迟（做法见[界面使用说明 · 左右双人](app-usage.md#左右双人一个音频当成两个人)）。和 `--mix` 一起用时 `--duo` 是几个音频之间的错开延迟：第 2 个晚这么多毫秒，第 3、4 个晚两倍、三倍；加了 `--mix-align` 时先对齐再错开，位置和排布照 `--pos` / `--mix-follow`（见[错开延迟](app-usage.md#错开延迟合成时的左右双人滑条)）：
 
 ```bash
 auto-asmr convert 人声.m4a --duo 80 --duration 60
 auto-asmr convert 人声.m4a --duo 80 --pos left,right -o 双人_固定.wav
 auto-asmr convert 人声.m4a --duo 100 --pos left,front-right --mix-balance 50 -o 双人.wav
+auto-asmr convert 摇滚版.m4a DJ版.m4a --mix --mix-align --duo 80 -o 跟唱.wav
 ```
 
 背景音（实时生成的雨声，见[界面使用说明 · 背景音](app-usage.md#背景音雨声)）：`--bg rain-night` 打开雨夜预设，后面再写 `--bg-level`（音量）、`--rain`（雨量）、`--bg-pan`（左右）、`--bg-width`（包围感）、`--bg-flow`（流动）、`--bg-indoor`（隔窗）、`--rain-land`（落地声；旧名 `--rain-near` 也能用）、`--rain-drip`（屋檐滴水）、`--thunder`（雷声，可选，默认 0 = 没有）覆盖它，都是 0–100（`--bg-pan` 是 −100–100）。单个文件、批量、多音频合成、左右双人都能用：

@@ -69,10 +69,12 @@ impl Saved {
     /// 按「左右移动」一起走、彼此相对（之后可以再改回各自固定，只要不关掉左右双人就不会再被切回来）。
     /// 移动方式是"固定"时（比如「听歌」）切到"各自固定"：没有走位可以一起走，一起移动只会把两个声音一前一后
     /// 钉在固定的方位上，一左一右才是想要的。
-    /// 排布和多音频合成共用，所以多音频合成的排布也跟着变。桌面版、安卓版、浏览器插件打开左右双人都走这里。
+    /// 排布和多音频合成共用，所以多音频合成的排布也跟着变；勾着多音频合成时（这时滑条是各音频之间的错开延迟）不切。
+    /// 桌面版、安卓版、浏览器插件打开左右双人都走这里。
     pub fn set_duo_ms(&mut self, ms: f32) {
         let ms = ms.clamp(0.0, DUO_MAX_MS);
-        if self.duo_ms <= 0.0 && ms > 0.0 {
+        // 勾着多音频合成时这个滑条是各音频之间的错开延迟，几个音频的排布是自己摆好的，不动它
+        if self.duo_ms <= 0.0 && ms > 0.0 && !self.mix {
             self.mix_follow = self.params.mode != MotionMode::Static;
         }
         self.duo_ms = ms;
@@ -197,6 +199,10 @@ mod tests {
             }
             assert!(!s.mix_follow);
         }
+        // 勾着多音频合成时滑条是几个音频之间的错开延迟：不动合成自己的排布
+        let mut s = Saved { mix: true, ..Saved::default() };
+        s.set_duo_ms(80.0);
+        assert!(!s.mix_follow && s.duo_ms == 80.0);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 name = "asmr-chromium"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 publish = false
 description = "auto-asmr 浏览器插件的 Rust 层：把桌面版的引擎和配置文件格式编成 wasm，给 AudioWorklet 和插件页面调用"
 

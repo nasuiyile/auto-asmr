@@ -26,3 +26,7 @@ cargo build --release
 ## 文档
 
 详细说明在仓库根目录的 [`doc/`](../doc/README.md)（发布压缩包里是 `doc/` 文件夹）：[界面使用说明](../doc/app-usage.md)、[命令行](../doc/app-cli.md)、[构建、发布与开发](../doc/development.md)、[效果与依据](../doc/effects.md)、[数据与许可](../doc/data-license.md)。
+
+## 许可
+
+代码采用 [GPL-3.0-or-later](../LICENSE)（发布压缩包里是 `LICENSE`）；内嵌的 HRIR、房间、耳廓数据为 CC BY 4.0，出处见[数据与许可](../doc/data-license.md)。

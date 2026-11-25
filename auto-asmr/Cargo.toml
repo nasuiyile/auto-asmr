@@ -2,6 +2,7 @@
 name = "auto-asmr"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "KU100 双耳 ASMR 空间化：实时（主播用）+ 音频文件转换，纯 CPU"
 
 # 库（src/lib.rs）只有信号处理 `dsp`，安卓版也用它；程序（src/main.rs）是桌面版的界面和命令行。

@@ -36,4 +36,4 @@ uv run asmr_binaural.py 输入.wav
 
 ## 许可
 
-HRIR、房间、耳机补偿数据来自 TH Köln，耳廓数据来自 TU Berlin HUTUBS，均为 CC BY 4.0，出处见[数据与许可](doc/data-license.md)。
+代码采用 [GPL-3.0-or-later](LICENSE)。HRIR、房间、耳机补偿数据来自 TH Köln，耳廓数据来自 TU Berlin HUTUBS，均为 CC BY 4.0，出处见[数据与许可](doc/data-license.md)。

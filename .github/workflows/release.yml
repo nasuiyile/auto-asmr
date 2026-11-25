@@ -54,7 +54,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path '../dist' -Force | Out-Null
           Copy-Item 'target/x86_64-pc-windows-msvc/release/auto-asmr.exe' '../dist/auto-asmr.exe'
-          Compress-Archive -Path '../dist/auto-asmr.exe', 'README.md', '../doc' -DestinationPath '../dist/auto-asmr-windows-x64.zip' -Force
+          Compress-Archive -Path '../dist/auto-asmr.exe', 'README.md', '../LICENSE', '../doc' -DestinationPath '../dist/auto-asmr-windows-x64.zip' -Force
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -109,7 +109,7 @@ jobs:
           tar -czf ../dist/auto-asmr-linux-x64.tar.gz \
             -C target/x86_64-unknown-linux-gnu/release auto-asmr \
             -C "$GITHUB_WORKSPACE/auto-asmr" README.md \
-            -C "$GITHUB_WORKSPACE" doc
+            -C "$GITHUB_WORKSPACE" LICENSE doc
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

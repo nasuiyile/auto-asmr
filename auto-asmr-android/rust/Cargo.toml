@@ -2,6 +2,7 @@
 name = "asmr-android"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 publish = false
 description = "auto-asmr 安卓版的 Rust 层：把桌面版的引擎包成 C 接口，给 hook 层调用"
 

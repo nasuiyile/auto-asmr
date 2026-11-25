@@ -21,5 +21,6 @@ if [ "${1:-}" = "--zip" ]; then
   mkdir -p dist
   rm -f dist/auto-asmr-chromium.zip
   (cd extension && zip -qr ../dist/auto-asmr-chromium.zip . -x '.*')
+  zip -qj dist/auto-asmr-chromium.zip ../LICENSE
   echo "dist/auto-asmr-chromium.zip $(du -h dist/auto-asmr-chromium.zip | cut -f1)"
 fi

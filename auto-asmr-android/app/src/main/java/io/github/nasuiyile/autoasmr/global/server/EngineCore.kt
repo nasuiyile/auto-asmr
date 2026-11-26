@@ -215,6 +215,8 @@ internal object EngineCore {
         o.put("lag_buf", r.lagBufMs.toDouble().takeIf { it.isFinite() } ?: -1.0)
         o.put("lag_dev", r.lagDevMs.toDouble().takeIf { it.isFinite() } ?: -1.0)
         o.put("engine", r.engineLatencyMs.toDouble())
+        // 指定了输出设备、单独截下来的 App（没有时为空）
+        o.put("bypass", r.bypassNote)
         o.put("underruns", r.underruns)
         o.put("drops", r.drops)
         o.put("stat", statLine)
@@ -246,6 +248,8 @@ internal object EngineCore {
                 cpuPct = 0f; peakIn = 0f; peakOut = 0f
                 continue
             }
+            // 找出指定了输出设备、绕开了拦截规则的 App，单独截下来（见 AudioRouter.watchBypass）
+            runCatching { r.watchBypass() }.onFailure { emit("warn 检查绕开拦截的 App 时出错：${HiddenAudio.describe(it)}") }
             val frames = r.framesIn
             val procNs = r.procNs
             cpuPct = ((procNs - lastProcNs) / 1e7).toFloat() // 占单核的百分比（1 s = 1e9 ns）

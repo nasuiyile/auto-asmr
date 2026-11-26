@@ -282,6 +282,81 @@ LR_JS = """(async (n) => {
 })(%d)"""
 
 
+def multi_tabs(cdp, bg, page, prepare_offscreen, n=6):
+    """多个标签页一起处理、反复刷新（B 站这类页面刷新时有一两秒静音）：都照常处理；同一个标签页同时开始两次只算一次；
+    最后一个标签页刚停就开始另一个也能开始；全关掉后 offscreen 页面关掉。"""
+
+    def open_tab(k):
+        t = cdp.call("Target.createTarget", {"url": page + f"?wait&tab={k}"})["targetId"]
+        s = cdp.attach(t)
+        time.sleep(0.8)
+        return t, s, cdp.eval(bg, "chrome.tabs.query({}).then(ts => Math.max(...ts.map(t => t.id)))")
+
+    def play(s):
+        for _ in range(50):
+            if cdp.eval(s, "typeof window.play === 'function'"):
+                return cdp.eval(s, "window.play()")
+            time.sleep(0.1)
+
+    def speaking(tabs, secs=4):
+        """几秒内引擎看到在说话（发声页的合成人声有停顿，取最大值）的标签页有几个。"""
+        best = {}
+        for _ in range(int(secs / 0.25)):
+            time.sleep(0.25)
+            st = cdp.eval(bg, "status()")
+            for _, _, tab in tabs:
+                me = st["tabs"].get(str(tab))
+                if me and me.get("tele") and not me.get("error"):
+                    best[tab] = max(best.get(tab, 0), me["tele"]["act"])
+        return sum(1 for v in best.values() if v > 0.3)
+
+    prepare_offscreen()
+    tabs = [open_tab(k) for k in range(n)]
+    rs = [cdp.eval(bg, f"start({tab})") for _, _, tab in tabs]
+    for _, s, _ in tabs:
+        play(s)
+    ok = speaking(tabs)
+    check(f"{n} 个标签页同时处理", all(r.get("ok") for r in rs) and ok == n, f"{ok} 个在说话")
+    for k in range(2):
+        for _, s, _ in tabs:
+            cdp.call("Page.reload", {}, session=s)
+        time.sleep(1.5)
+        for _, s, _ in tabs:
+            play(s)
+        ok = speaking(tabs)
+        n_tabs = len(cdp.eval(bg, "status()")["tabs"])
+        check(f"{n} 个标签页一起刷新（第 {k + 1} 次）后照常处理", ok == n and n_tabs == n, f"{ok} 个在说话，在处理 {n_tabs} 个")
+
+    # 同一个标签页、同一个 streamId 同时发两次开始：只开始一次，两次都回应成功
+    for _, s, _ in tabs:
+        cdp.eval(s, "document.getElementById('a').pause(); true")
+    extra = open_tab(n)
+    r = cdp.eval(
+        bg,
+        f"chrome.tabCapture.getMediaStreamId({{ targetTabId: {extra[2]} }}).then((id) => serial(async () => {{ await ensureOffscreen();"
+        f" return Promise.all([1, 2].map(() => toOffscreen({{ type: 'start', tabId: {extra[2]}, streamId: id, config: '' }}))); }}))",
+    )
+    n_tabs = len(cdp.eval(bg, "status()")["tabs"])
+    check("同一个标签页同时开始两次只算一次", all(x.get("ok") for x in r) and n_tabs == n + 1, f"{json.dumps(r, ensure_ascii=False)}，在处理 {n_tabs} 个")
+
+    # 停掉所有标签页，最后一个刚停就开始另一个（offscreen 页面不能在开始到一半时被关掉）
+    for _, _, tab in tabs[:-1] + [extra]:
+        cdp.eval(bg, f"stop({tab})")
+    last = tabs[-1]
+    again = tabs[0]
+    r = cdp.eval(bg, f"stop({last[2]}).then(() => start({again[2]}))")
+    time.sleep(1.5)
+    st = cdp.eval(bg, "status()")
+    check("最后一个刚停就开始另一个", r.get("ok") and list(st["tabs"]) == [str(again[2])], f"{json.dumps(r, ensure_ascii=False)}，在处理 {list(st['tabs'])}")
+
+    # 关掉所有标签页：自动停止、关掉 offscreen 页面
+    for t, _, _ in tabs + [extra]:
+        cdp.call("Target.closeTarget", {"targetId": t})
+    time.sleep(2)
+    n_off = cdp.eval(bg, "chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] }).then(c => c.length)")
+    check("关掉所有标签页后释放 offscreen 页面", n_off == 0, f"offscreen {n_off} 个")
+
+
 def run(cdp, ext_id, page, audible):
     origin = f"chrome-extension://{ext_id}/"
     sw = cdp.wait_target(lambda t: t["type"] == "service_worker" and t["url"].startswith(origin), "插件的 service worker")
@@ -421,6 +496,8 @@ def run(cdp, ext_id, page, audible):
     time.sleep(2)
     n_off = cdp.eval(bg, "chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] }).then(c => c.length)")
     check("关掉正在处理的标签页后自动停止", r.get("ok") and n_off == 0, f"offscreen {n_off} 个")
+
+    multi_tabs(cdp, bg, page, prepare_offscreen)
 
     # 真弹窗（chrome.action.openPopup）：打开就自动开始处理当前标签页、显示实时状态；关掉开关停止
     tid = cdp.call("Target.createTarget", {"url": page + "?wait"})["targetId"]

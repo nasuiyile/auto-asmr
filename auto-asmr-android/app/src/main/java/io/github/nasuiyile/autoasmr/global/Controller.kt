@@ -57,6 +57,8 @@ object Controller {
         val underruns: Int = 0,
         /** 积压太多、丢掉旧声音追上实时的次数。 */
         val drops: Int = 0,
+        /** 指定了输出设备、绕开拦截规则而被单独截下来的 App（服务进程给的说明，没有时为空）。 */
+        val bypass: String = "",
         val fatal: String? = null,
     )
 
@@ -371,6 +373,7 @@ object Controller {
             engine = o.optDouble("engine").toFloat(),
             underruns = o.optInt("underruns"),
             drops = o.optInt("drops"),
+            bypass = o.optString("bypass"),
             fatal = o.optString("fatal").ifEmpty { null },
         )
         val seq = o.optLong("log")

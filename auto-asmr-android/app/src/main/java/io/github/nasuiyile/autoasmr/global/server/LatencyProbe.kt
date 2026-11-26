@@ -1,6 +1,7 @@
 package io.github.nasuiyile.autoasmr.global.server
 
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTimestamp
@@ -18,11 +19,17 @@ import kotlin.math.sin
  * 不拦截时 present − write = 正常播放的延迟；拦截时用服务进程报的 onset present − 这里的 write = 拦截后的延迟。
  * 要以和服务进程不同的身份运行（服务进程是 shell 时用 root 跑它，反之亦然），否则会被当成服务自己的声音排除掉。
  *
- * 第二个参数是 `voice` 时模拟语音通话类 App（QQ 通话、语音房）：先把音频模式设成 MODE_IN_COMMUNICATION，
- * 再用"语音通话"用途（USAGE_VOICE_COMMUNICATION）播放，用来验证全局模式截得到这类声音。
+ * 短音个数之后的选项（可以组合）：
+ * - `voice`：模拟语音通话类 App（QQ 通话、语音房）：先把音频模式设成 MODE_IN_COMMUNICATION，
+ *   再用"语音通话"用途（USAGE_VOICE_COMMUNICATION）播放，用来验证全局模式截得到这类声音；
+ * - `pref`：像有的语音 SDK 那样给播放流指定输出设备（扬声器），这种流不按拦截规则走（见 AudioRouter.watchBypass）；
+ * - `lowlat`：低延迟模式。
+ * 开始放 1.5 秒后打印播放流实际的去向（AudioDeviceInfo 的类型：25 = remote submix，也就是被截到了）。
+ * 测单独截的那一路时，探针不要以 root 身份跑：root 进程的播放在系统的播放器列表里记成 UID 0，在音频策略里却是 1000，
+ * 按 UID 写的规则匹配不上；可以用 `run-as <可调试的 App>` 以普通 App 的 UID 跑。
  *
  * ```
- * CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.LatencyProbe [短音个数] [voice]
+ * CLASSPATH=<apk> app_process /system/bin io.github.nasuiyile.autoasmr.global.server.LatencyProbe [短音个数] [voice] [pref] [lowlat]
  * ```
  */
 object LatencyProbe {
@@ -30,7 +37,8 @@ object LatencyProbe {
     fun main(args: Array<String>) {
         val sr = 48_000
         val clicks = args.firstOrNull()?.toIntOrNull() ?: 10
-        val voice = args.getOrNull(1) == "voice"
+        val opts = args.drop(1).toSet()
+        val voice = "voice" in opts
         val block = 480
         // 通话模式由持有这个 token 的进程占着，进程退出时系统自动恢复
         val modeToken = if (voice) setCommunicationMode() else null
@@ -46,8 +54,20 @@ object LatencyProbe {
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build()
             )
             .setTransferMode(AudioTrack.MODE_STREAM)
+            .apply { if ("lowlat" in opts) setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY) }
             .build()
+        // pref：像有的语音 SDK 那样给播放流指定输出设备（这里指定扬声器）
+        if ("pref" in opts) {
+            val outs = AudioManager::class.java.getMethod("getDevicesStatic", Int::class.javaPrimitiveType)
+                .invoke(null, AudioManager.GET_DEVICES_OUTPUTS) as Array<AudioDeviceInfo>
+            val spk = outs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            println("setPreferredDevice(${spk?.type}) = ${spk?.let { t.setPreferredDevice(it) }}")
+        }
         t.play()
+        Thread {
+            Thread.sleep(1500)
+            println("routed device type=${t.routedDevice?.type}")
+        }.apply { isDaemon = true; start() }
         val buf = FloatArray(block * 2)
         val ts = AudioTimestamp()
         val clickFrames = LongArray(clicks) { (it + 1L) * sr }

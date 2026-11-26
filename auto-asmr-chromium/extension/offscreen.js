@@ -5,6 +5,7 @@
 // offscreen 页面只能用 chrome.runtime，配置由 background.js 发过来。
 
 const tabs = new Map(); // tabId → { stream, src, node, tele, error, started }
+const starting = new Map(); // tabId → 正在开始的 Promise（同一个标签页同时只开始一次）
 let ctx = null;
 let wasmModule = null;
 let ready = null;
@@ -15,6 +16,10 @@ const dec = new TextDecoder();
 
 async function init() {
   ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+  // 被挂起（换输出设备、系统休眠等）后，还有标签页在处理就接着跑：被采集的标签页只从这里出声
+  ctx.onstatechange = () => {
+    if (ctx.state === 'suspended' && tabs.size) ctx.resume().catch(() => {});
+  };
   await ctx.audioWorklet.addModule('worklet.js');
   try {
     wasmModule = await WebAssembly.compileStreaming(fetch('asmr.wasm'));
@@ -34,32 +39,54 @@ function notify(msg) {
   chrome.runtime.sendMessage({ to: 'bg', ...msg }).catch(() => {});
 }
 
-async function start(tabId, streamId, config) {
+function start(tabId, streamId, config) {
+  if (tabs.has(tabId)) {
+    if (ctx.state !== 'running') ctx.resume().catch(() => {});
+    return { ok: true };
+  }
+  // 同一个标签页同时只开始一次（快捷键和弹窗前后脚）。没开始成、也没有别的标签页时通知后台关掉 offscreen 页面
+  if (!starting.has(tabId)) {
+    const p = open(tabId, streamId, config).finally(() => {
+      starting.delete(tabId);
+      if (!tabs.size && !starting.size) notify({ type: 'idle' });
+    });
+    starting.set(tabId, p);
+  }
+  return starting.get(tabId);
+}
+
+async function open(tabId, streamId, config) {
   ready ??= init();
   await ready;
-  if (tabs.has(tabId)) return { ok: true };
   setConfig(config);
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
     video: false,
   });
-  const src = ctx.createMediaStreamSource(stream);
-  const node = new AudioWorkletNode(ctx, 'auto-asmr', {
-    numberOfInputs: 1,
-    numberOfOutputs: 1,
-    outputChannelCount: [2],
-    channelCount: 2,
-    channelCountMode: 'explicit',
-    channelInterpretation: 'speakers',
-    processorOptions: { module: wasmModule, config: configBytes, gen },
-  });
-  const t = { stream, src, node, tele: null, error: '', started: Date.now() };
-  node.port.onmessage = (e) => onWorklet(tabId, t, e.data);
-  node.onprocessorerror = () => {
-    t.error = '音频处理器出错，已停止';
-  };
-  src.connect(node);
-  node.connect(ctx.destination);
+  let t;
+  try {
+    const src = ctx.createMediaStreamSource(stream);
+    const node = new AudioWorkletNode(ctx, 'auto-asmr', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      channelCount: 2,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+      processorOptions: { module: wasmModule, config: configBytes, gen },
+    });
+    t = { stream, src, node, tele: null, error: '', started: Date.now() };
+    node.port.onmessage = (e) => onWorklet(tabId, t, e.data);
+    node.onprocessorerror = () => {
+      t.error = '音频处理器出错，已停止';
+    };
+    src.connect(node);
+    node.connect(ctx.destination);
+  } catch (e) {
+    // 标签页已经被采集、不在本地出声了：这里不停掉采集，它会一直没声音
+    for (const track of stream.getTracks()) track.stop();
+    throw e;
+  }
   for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => stop(tabId));
   tabs.set(tabId, t);
   if (ctx.state !== 'running') await ctx.resume();
@@ -105,6 +132,8 @@ function status() {
   }
   return {
     tabs: out,
+    // 正在开始、还没开始好的标签页有几个（这时不能关 offscreen 页面）
+    pending: starting.size,
     // 输出端的延时：AudioContext 的缓冲 + 声卡（标签页采集本身的延时 Chrome 不报告，不在这里）
     outputMs: ctx ? ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000 : 0,
     state: ctx ? ctx.state : 'none',

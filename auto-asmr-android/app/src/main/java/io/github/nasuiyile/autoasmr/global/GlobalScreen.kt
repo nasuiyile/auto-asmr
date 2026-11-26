@@ -117,6 +117,12 @@ private fun globalHelp(): List<HelpItem> = listOf(
             "设备：耳机 / 扬声器本身的延迟，不开拦截时也有。有线耳机几十毫秒，蓝牙耳机常有 150–300 ms。\n" +
             "延迟主要在「设备」上时，换有线耳机或低延迟的蓝牙耳机才降得下来。",
     ),
+    HelpItem(
+        "单独截下",
+        "有的 App（语音房、通话类 App 常见）给自己的声音指定了输出设备，系统就不按拦截规则走，原声会直接进耳机。" +
+            "发现这种情况时，服务进程单独录一份这个 App 的声音来处理，录到后把它的原声静音；这时拦截开关下面会显示「单独截下：包名」。" +
+            "录不到的（极少数低延迟直通的声音）不静音，照常放原声，日志里有说明。",
+    ),
     HelpItem("效果参数", "下面的效果参数和「网页」页共用一份配置；输出增益只调实时听到的音量，不影响文件转换。"),
     HelpItem("版本", BuildConfig.VERSION_NAME),
 )
@@ -193,12 +199,13 @@ private fun ServiceCard() {
                         Text("拦截其他 App 的声音", style = MaterialTheme.typography.bodyLarge)
                         Text(
                             if (p.running) {
-                                String.format(Locale.ROOT, "峰值 %.2f → %.2f · 断流 %d", p.inPeak, p.outPeak, p.underruns) + latencyParts(p)
+                                String.format(Locale.ROOT, "峰值 %.2f → %.2f · 断流 %d", p.inPeak, p.outPeak, p.underruns) + latencyParts(p) +
+                                    (if (p.bypass.isNotEmpty()) "\n单独截下：${p.bypass}" else "")
                             } else {
                                 "已暂停：各 App 的声音照常直接放出"
                             },
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 2,
+                            maxLines = 3,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }

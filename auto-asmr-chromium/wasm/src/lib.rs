@@ -365,6 +365,17 @@ pub extern "C" fn asmr_engine_apply() {
     });
 }
 
+/// 防非规格化数的噪声幅度（约 −200 dBFS）。wasm 设不了 FTZ / DAZ（桌面版在 x86 上靠它，见 `dsp::flush_denormals`）：
+/// 输入静音时（暂停、刷新网页的那一两秒）引擎里滤波器的状态会衰减成非规格化数，两秒后输出的每个非零样本都是；
+/// x86 上这类数的运算慢几十倍，所有标签页共用的音频线程跟不上，全都断断续续甚至没声音。给输入加这么一点白噪声，
+/// 状态就停在正常数的范围里（平方后也还是正常数）；比 24 位的最低位还低约 55 dB，听不到，也不会被当成说话。
+const ANTI_DENORMAL: f32 = 1e-10;
+/// 输入的绝对值都不超过这个（−120 dBFS）就算静音。
+const QUIET: f32 = 1e-6;
+/// 输入连续静音这么久（3 秒，引擎的尾音早已衰减到听不见）且没开背景音时不跑引擎、直接输出静音：
+/// 同时处理好几个标签页、只有一两个在放时，暂停的那些几乎不占音频线程。有声音的第一块起照常处理。
+const IDLE_AFTER: usize = 3 * FS_USIZE;
+
 /// 一个标签页的处理器：立体声 → [`Solo`]（平时合成单声道过一个引擎；「立体声宽度」大于 0 时左右声道各一个声源）→ 双耳；
 /// 左右双人时合成单声道交给 [`LiveMix`]；「监听原声」时输出原来的立体声，只乘输出增益、过峰值限制器
 /// （[`DryOut`]，音量滑条照样起作用；引擎照常在跑，切回效果时动作和响度是接着的）。
@@ -383,6 +394,16 @@ pub struct Processor {
     /// 监听原声时的输出级，以及上一块是不是原声（刚切到原声时清掉它的旧状态）。
     dry_out: DryOut,
     was_dry: bool,
+    /// 防非规格化数噪声的随机数状态（[`ANTI_DENORMAL`]）。
+    seed: u32,
+    /// 输入已经连续静音了多少帧（[`IDLE_AFTER`]）。
+    quiet: usize,
+}
+
+/// 防非规格化数的白噪声：均匀分布在 ±[`ANTI_DENORMAL`] 里（线性同余，够用且便宜）。
+fn anti_denormal(seed: &mut u32) -> f32 {
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (*seed as i32) as f32 * (ANTI_DENORMAL / 2_147_483_648.0)
 }
 
 impl Processor {
@@ -407,7 +428,14 @@ impl Processor {
             tele: [0.0; tele::N],
             dry_out: DryOut::new(FS_USIZE as f32),
             was_dry: false,
+            seed: 0x2545_f491,
+            quiet: 0,
         }
+    }
+
+    /// 现在是不是因为输入静音太久而没跑引擎（[`IDLE_AFTER`]）。
+    pub fn idle(&self) -> bool {
+        self.quiet >= IDLE_AFTER && self.solo.config().params.bg_level <= 0.0
     }
 
     /// 配置换过了就换上（只换 `Arc`）。左右双人开 / 关、换排布时重新建一份（会分配内存，只在用户改这两项的那一下）。
@@ -431,9 +459,23 @@ impl Processor {
     pub fn process(&mut self, n: usize) {
         self.sync();
         let n = n.min(CAP);
+        let loud = self.io[..n].iter().chain(&self.io[CAP..CAP + n]).any(|x| x.abs() > QUIET);
+        self.quiet = if loud { 0 } else { self.quiet.saturating_add(n) };
+        if self.idle() {
+            self.io[2 * CAP..2 * CAP + n].fill(0.0);
+            self.io[3 * CAP..3 * CAP + n].fill(0.0);
+            return;
+        }
         let (inl, rest) = self.io.split_at_mut(CAP);
         let (inr, rest) = rest.split_at_mut(CAP);
         let (outl, outr) = rest.split_at_mut(CAP);
+        // 防非规格化数（见 ANTI_DENORMAL）；左右各自独立，左右相减的那一路也有
+        let mut seed = self.seed;
+        for (l, r) in inl[..n].iter_mut().zip(&mut inr[..n]) {
+            *l += anti_denormal(&mut seed);
+            *r += anti_denormal(&mut seed);
+        }
+        self.seed = seed;
         match &mut self.duo {
             Some(d) => {
                 for i in 0..n {
@@ -800,6 +842,66 @@ mod tests {
         asmr_engine_apply();
         let (l, r) = run(&mut p);
         assert!(e(&l[h..]) > 1e-3 && e(&r[h..]) < 1e-9);
+        asmr_doc_reset_params();
+    }
+
+    /// 标签页静音（暂停、刷新网页）时：引擎里不出现非规格化数（wasm 设不了 FTZ / DAZ，x86 上这类数慢几十倍，
+    /// 共用的音频线程会跟不上），各种风格、左右双人都一样；静音 3 秒后不再跑引擎、输出静音，有声音了立即照常处理；
+    /// 开着背景音（雨声）时一直跑。
+    #[test]
+    fn silence_stays_normal_and_goes_idle() {
+        let is_sub = |x: &f32| *x != 0.0 && x.abs() < f32::MIN_POSITIVE;
+        // 送 `secs` 秒（`voice` = 合成人声，否则全 0），返回 (输出里的非规格化数个数, 输出能量)
+        let feed = |p: &mut Processor, i0: &mut usize, secs: f32, voice: bool| {
+            let (mut sub, mut e) = (0usize, 0f64);
+            for _ in 0..(secs * FS_USIZE as f32) as usize / 128 {
+                let io = p.io();
+                for k in 0..128 {
+                    let (l, r) = if voice { speech(*i0 + k) } else { (0.0, 0.0) };
+                    io[k] = l;
+                    io[CAP + k] = r;
+                }
+                *i0 += 128;
+                p.process(128);
+                let out = &p.io()[2 * CAP..4 * CAP];
+                let out = out[..128].iter().chain(&out[CAP..CAP + 128]);
+                for x in out {
+                    sub += is_sub(x) as usize;
+                    e += (*x as f64).powi(2);
+                }
+            }
+            (sub, e)
+        };
+        for (name, cfg) in [("默认", &[][..]), ("掏耳", &[("style", "2")]), ("听歌", &[("style", "4")]), ("左右双人", &[("duo_ms", "80")])] {
+            asmr_doc_reset_params();
+            for (k, v) in cfg {
+                assert_eq!(set(k, v), 0);
+            }
+            asmr_engine_apply();
+            let mut p = Processor::new();
+            let mut i = 0;
+            // 合成人声自己有停顿：2 秒处正在说话（之前最多停 0.15 秒）
+            feed(&mut p, &mut i, 2.0, true);
+            // 不加噪声时静音 2 秒后输出的每个非零样本都是非规格化数
+            let (sub, _) = feed(&mut p, &mut i, 2.5, false);
+            assert_eq!(sub, 0, "{name}：静音时输出里有 {sub} 个非规格化数");
+            assert!(!p.idle(), "{name}：静音不到 3 秒还在处理");
+            feed(&mut p, &mut i, 0.7, false);
+            assert!(p.idle(), "{name}：静音 3 秒后应停下引擎");
+            let (_, e) = feed(&mut p, &mut i, 1.0, false);
+            assert_eq!(e, 0.0, "{name}：停下引擎时输出静音");
+            let (sub, e) = feed(&mut p, &mut i, 1.5, true);
+            assert!(!p.idle() && e > 1.0 && sub == 0, "{name}：有声音后照常处理：能量 {e}，非规格化 {sub}");
+        }
+        // 开着雨声：静音时也一直跑（雨声不断）
+        asmr_doc_reset_params();
+        assert_eq!(set("bg_preset", "\"rain_night\""), 0);
+        asmr_engine_apply();
+        let mut p = Processor::new();
+        let mut i = 0;
+        feed(&mut p, &mut i, 1.0, true);
+        let (sub, e) = feed(&mut p, &mut i, 5.0, false);
+        assert!(!p.idle() && e > 0.1 && sub == 0, "雨声时静音也要一直有雨：能量 {e}，非规格化 {sub}");
         asmr_doc_reset_params();
     }
 

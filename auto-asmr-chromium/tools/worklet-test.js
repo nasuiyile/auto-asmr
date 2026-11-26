@@ -279,6 +279,26 @@ const errors = (msgs) => msgs.filter((m) => m.type === 'error').map((m) => (m.de
   check('两个处理器同时工作', ready === 2 && e > 0.1 && !errors(r.msgs).length, `就绪 ${ready} 个`);
 }
 
+// 6b. 标签页静音（暂停、刷新网页）：说 2 秒后全是 0。输出里不能有非规格化数（wasm 设不了 FTZ / DAZ，x86 上这类数慢几十倍，
+//     共用的音频线程会跟不上，所有标签页一起断）；静音 3 秒后不再跑引擎，输出正好是 0
+{
+  const [l, r] = speech(8);
+  l.fill(0, 2 * FS);
+  r.fill(0, 2 * FS);
+  const res = await render({ secs: 8, input: [l, r] });
+  let sub = 0;
+  let nonzero = 0;
+  for (const ch of [res.L, res.R]) {
+    for (let i = 2 * FS; i < ch.length; i++) {
+      const a = Math.abs(ch[i]);
+      if (a !== 0 && a < 1.1754944e-38) sub++;
+      if (i >= 5.2 * FS && a !== 0) nonzero++;
+    }
+  }
+  check('静音时输出里没有非规格化数', sub === 0 && !errors(res.msgs).length, `静音 6 秒里 ${sub} 个`);
+  check('静音 3 秒后不跑引擎、输出静音', nonzero === 0 && energy(res.L).e > 0.1, `5.2 秒后非零样本 ${nonzero} 个`);
+}
+
 // 7. 改参数的耗时：生成引擎配置 + 处理器换上后的第一块（都在音频线程上做，超过一个渲染块 2.7 ms 就会卡一下）。
 //    开始处理时（worklet.js 的 setup）先 warm_up，这里同样先做。
 {

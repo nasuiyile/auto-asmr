@@ -33,6 +33,15 @@ function toOffscreen(msg) {
   return chrome.runtime.sendMessage({ to: 'offscreen', ...msg });
 }
 
+// 开始处理和"没有标签页了就关掉 offscreen 页面"排队做：最后一个标签页刚停、马上又开始一个时，
+// 不会在开始到一半时把 offscreen 页面关掉
+let queue = Promise.resolve();
+function serial(f) {
+  const r = queue.then(f);
+  queue = r.catch(() => {});
+  return r;
+}
+
 /**
  * 开始处理一个标签页。没给 streamId 时在这里取（和 Chrome 官方示例一样由后台取，用户点过插件图标或按过快捷键才取得到）；
  * 取不到时返回 needStreamId，弹窗会自己取一个再发过来。
@@ -45,8 +54,10 @@ async function start(tabId, streamId) {
       return { ok: false, needStreamId: true, error: String((e && e.message) || e) };
     }
   }
-  await ensureOffscreen();
-  return toOffscreen({ type: 'start', tabId, streamId, config: await configText() });
+  return serial(async () => {
+    await ensureOffscreen();
+    return toOffscreen({ type: 'start', tabId, streamId, config: await configText() });
+  });
 }
 
 async function stop(tabId) {
@@ -120,12 +131,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case 'stopped':
         await setActive(msg.tabId, false);
         return { ok: true };
-      case 'idle': {
-        // 再确认一次（这期间可能又开始了一个）
-        const st = await status();
-        if (!Object.keys(st.tabs || {}).length && (await hasOffscreen())) await chrome.offscreen.closeDocument();
-        return { ok: true };
-      }
+      case 'idle':
+        return serial(async () => {
+          // 再确认一次（这期间可能又开始了一个）
+          const st = await status();
+          if (!Object.keys(st.tabs || {}).length && !st.pending && (await hasOffscreen())) await chrome.offscreen.closeDocument();
+          return { ok: true };
+        });
       default:
         return { ok: false, error: `不认识的消息：${msg.type}` };
     }

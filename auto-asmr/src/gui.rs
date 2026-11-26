@@ -293,10 +293,10 @@ pub struct App {
     dl_input: String,
     /// 本机的 yt-dlp（没找到为 None；点「下载并导入」时再找一次）。
     ytdlp: Option<PathBuf>,
-    /// 排队等着下载的链接。
+    /// 排队等着下载的链接（同时下载的已经有 [`DL_MAX_PARALLEL`] 个，或者在等 yt-dlp 装好 / 更新完）。
     dl_queue: VecDeque<String>,
-    /// 正在进行的下载（音频，或者 yt-dlp 本身的下载 / 更新）。
-    dl_run: Option<DlRun>,
+    /// 正在进行的下载：几个链接的音频同时下；yt-dlp 本身的下载 / 更新单独进行，这时不下音频。
+    dl_runs: Vec<DlRun>,
     /// 下载好、还没加进列表的文件（正在转换时列表不能改，转换完再加）。
     dl_ready: Vec<PathBuf>,
     /// 最近几次下载的结果：(是否出错, 说明)，新的在后面。
@@ -306,6 +306,9 @@ pub struct App {
     /// 点了「清理下载目录」，正在等确认。
     dl_confirm_clean: bool,
 }
+
+/// 最多同时下载几个链接（再多 B 站容易限速、拒绝），多出来的排队。
+const DL_MAX_PARALLEL: usize = 3;
 
 /// 正在下载的是什么。
 enum DlKind {
@@ -484,7 +487,7 @@ impl App {
             dl_input: String::new(),
             ytdlp: download::find_ytdlp(),
             dl_queue: VecDeque::new(),
-            dl_run: None,
+            dl_runs: Vec::new(),
             dl_ready: Vec::new(),
             dl_notes: Vec::new(),
             dl_stats: None,
@@ -1387,7 +1390,7 @@ impl App {
         }
         self.dl_input.clear();
         for l in links {
-            let running = matches!(&self.dl_run, Some(DlRun { kind: DlKind::Audio(u), .. }) if *u == l);
+            let running = self.dl_runs.iter().any(|r| matches!(&r.kind, DlKind::Audio(u) if *u == l));
             if !running && !self.dl_queue.contains(&l) {
                 self.dl_queue.push_back(l);
             }
@@ -1404,38 +1407,51 @@ impl App {
         }
     }
 
-    /// 没有正在进行的下载时，开始下载队列里的下一个链接（没有 yt-dlp 时等它装好）。
+    /// 正在下载 / 更新 yt-dlp 本身（这时不开始新的音频下载，等它好了再接着下）。
+    fn dl_tool_busy(&self) -> bool {
+        self.dl_runs.iter().any(|r| !matches!(r.kind, DlKind::Audio(_)))
+    }
+
+    /// 同时下载的还没到 [`DL_MAX_PARALLEL`] 个时，开始下载队列里的下一个（几个）链接（没有 yt-dlp 时等它装好）。
     fn dl_next(&mut self) {
-        if self.dl_run.is_some() {
+        if self.dl_tool_busy() {
             return;
         }
         let Some(ytdlp) = self.ytdlp.clone() else { return };
-        if let Some(url) = self.dl_queue.pop_front() {
-            self.dl_start(DlKind::Audio(url.clone()), download::fetch_audio(ytdlp, url));
+        while self.dl_runs.len() < DL_MAX_PARALLEL {
+            let Some(url) = self.dl_queue.pop_front() else { break };
+            self.dl_start(DlKind::Audio(url.clone()), download::fetch_audio(ytdlp.clone(), url));
         }
     }
 
     fn dl_start(&mut self, kind: DlKind, task: download::Task) {
-        self.dl_run = Some(DlRun { kind, task, title: String::new(), progress: download::Progress::default(), files: Vec::new(), attempt: 1 });
+        self.dl_runs.push(DlRun { kind, task, title: String::new(), progress: download::Progress::default(), files: Vec::new(), attempt: 1 });
     }
 
     /// 自动下载 yt-dlp（本机没有时）。装好后接着下载排队的链接。
     fn dl_install(&mut self) {
-        if self.dl_run.is_none() {
+        if self.dl_runs.is_empty() {
             self.dl_start(DlKind::Install, download::install_ytdlp());
         }
     }
 
-    /// 让 yt-dlp 自己更新（B 站改了接口、以前能下现在下不了时用）。
+    /// 让 yt-dlp 自己更新（B 站改了接口、以前能下现在下不了时用）。正在下载时不行（会替换正在运行的程序）。
     fn dl_update(&mut self) {
-        if let (None, Some(p)) = (&self.dl_run, self.ytdlp.clone()) {
+        if let (true, Some(p)) = (self.dl_runs.is_empty(), self.ytdlp.clone()) {
             self.dl_start(DlKind::Update, download::update_ytdlp(p));
         }
     }
 
-    /// 取消正在进行的下载，排队的也不下了。
+    /// 取消第 i 个正在进行的下载（排队的接着下）。
+    fn dl_cancel_one(&mut self, i: usize) {
+        if let Some(r) = self.dl_runs.get(i) {
+            r.task.cancel();
+        }
+    }
+
+    /// 取消所有正在进行的下载，排队的也不下了。
     fn dl_cancel(&mut self) {
-        if let Some(r) = &self.dl_run {
+        for r in &self.dl_runs {
             r.task.cancel();
         }
         self.dl_queue.clear();
@@ -1455,7 +1471,7 @@ impl App {
 
     /// 现在能不能清理下载目录：正在下载音频（yt-dlp 在写文件）、正在转换（可能在读这些文件）时不行。
     fn dl_can_clean(&self) -> bool {
-        self.job.is_none() && self.dl_ready.is_empty() && !matches!(self.dl_run, Some(DlRun { kind: DlKind::Audio(_), .. }))
+        self.job.is_none() && self.dl_ready.is_empty() && !self.dl_runs.iter().any(|r| matches!(r.kind, DlKind::Audio(_)))
     }
 
     /// 清理下载目录：删掉下载的音频和没下完的临时文件（转换出来的 `_asmr` 文件保留），
@@ -1506,8 +1522,8 @@ impl App {
 
     /// 每帧：收下载任务的消息；下好的文件加进列表（正在转换时列表不能改，等转换完再加）。
     fn poll_downloads(&mut self, ctx: &egui::Context) {
-        let mut done = None;
-        if let Some(run) = &mut self.dl_run {
+        let mut done = Vec::new();
+        for (i, run) in self.dl_runs.iter_mut().enumerate() {
             for m in run.task.poll() {
                 match m {
                     download::Msg::Title(s) => run.title = s,
@@ -1520,13 +1536,18 @@ impl App {
                         run.attempt = n;
                         run.progress = download::Progress::default();
                     }
-                    download::Msg::Done(r) => done = Some(r),
+                    download::Msg::Done(r) => done.push((i, r)),
                 }
             }
+        }
+        if !self.dl_runs.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if let Some(r) = done {
-            if let Some(run) = self.dl_run.take() {
+        if !done.is_empty() {
+            // 从后往前移除，前面的下标不变；说明按开始的先后记
+            let mut finished: Vec<(DlRun, Result<String, String>)> = done.into_iter().rev().map(|(i, r)| (self.dl_runs.remove(i), r)).collect();
+            finished.reverse();
+            for (run, r) in finished {
                 self.dl_finish(run, r);
             }
             self.dl_next();
@@ -2024,14 +2045,14 @@ impl App {
 
     /// 文件页上方：待转换的文件列表（可多选添加、拖进窗口、点选试听），以及输出位置。
     /// 文件页最上面的「按链接下载」：贴 B 站链接（或分享文字、BV 号），只下音频，存进运行目录的 bilibili 文件夹，
-    /// 下好后自动加进列表。下载时可以接着贴下一个（排队）。
+    /// 下好后自动加进列表。下载时可以接着贴下一个：同时下载（最多 DL_MAX_PARALLEL 个），再多的排队。
     fn ui_download(&mut self, ui: &mut egui::Ui) {
         let dir = download::download_dir();
         // 从右往左排：「⋯」、「下载并导入」放在右边，输入框占剩下的宽度（中英文按钮宽度不同）
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("⋯", |ui| {
-                    let can_update = self.dl_run.is_none() && self.ytdlp.is_some();
+                    let can_update = self.dl_runs.is_empty() && self.ytdlp.is_some();
                     if ui
                         .add_enabled(can_update, egui::Button::new(t("更新 yt-dlp", "Update yt-dlp")))
                         .on_hover_text(t("B 站改了接口时 yt-dlp 会下载失败，更新到最新版通常就好了（用 brew、pip 这类包管理器装的，要用包管理器更新）", "Bilibili changes break old yt-dlp versions; updating usually fixes it (if installed with brew, pip etc., update it with that tool)"))
@@ -2049,8 +2070,8 @@ impl App {
                 let tip = format!(
                     "{}\n{}",
                     t(
-                        "只下载视频的音频，存进运行目录下的 bilibili 文件夹，下好后自动加进下面的列表，和本地文件一样试听、转换、多音频合成、自动对齐。分 P 视频只下链接里那一 P；下过的不再重复下。下载时可以接着贴下一个，按顺序排队下",
-                        "Downloads only the audio into the bilibili folder in the working directory and adds it to the list below, where it works like any local file (preview, convert, mix, auto-align). For multi-part videos only the part in the link is downloaded; files already downloaded are reused. You can paste the next link while one is downloading; they queue up",
+                        "只下载视频的音频，存进运行目录下的 bilibili 文件夹，下好后自动加进下面的列表，和本地文件一样试听、转换、多音频合成、自动对齐。分 P 视频只下链接里那一 P；下过的不再重复下。下载时可以接着贴下一个，最多同时下 3 个，再多的排队",
+                        "Downloads only the audio into the bilibili folder in the working directory and adds it to the list below, where it works like any local file (preview, convert, mix, auto-align). For multi-part videos only the part in the link is downloaded; files already downloaded are reused. You can paste the next link while one is downloading; up to 3 download at once, the rest queue up",
                     ),
                     dir.display()
                 );
@@ -2068,42 +2089,60 @@ impl App {
             });
         });
         self.ui_download_dir(ui, &dir);
-        if let Some(run) = &self.dl_run {
-            let f = run.progress.frac;
-            let text = match &run.kind {
-                DlKind::Audio(url) => {
-                    let mut s = format!("{} {}", t("正在下载", "Downloading"), if run.title.is_empty() { url.as_str() } else { run.title.as_str() });
-                    if let Some(f) = f {
-                        s.push_str(&format!("  {:.0}%", f * 100.0));
+        if !self.dl_runs.is_empty() {
+            let mut cancel_one = None;
+            let audio = self.dl_runs.iter().filter(|r| matches!(r.kind, DlKind::Audio(_))).count();
+            for (i, run) in self.dl_runs.iter().enumerate() {
+                let f = run.progress.frac;
+                let text = match &run.kind {
+                    DlKind::Audio(url) => {
+                        let mut s = format!("{} {}", t("正在下载", "Downloading"), if run.title.is_empty() { url.as_str() } else { run.title.as_str() });
+                        if let Some(f) = f {
+                            s.push_str(&format!("  {:.0}%", f * 100.0));
+                        }
+                        if let Some(v) = run.progress.speed.filter(|v| *v > 0.0) {
+                            s.push_str(&format!(" · {}", rate_text(v)));
+                        }
+                        if run.attempt > 1 {
+                            s.push_str(&format!("  {}{}{}", t("（上次没下成，第 ", "(attempt "), run.attempt, t(" 次尝试）", ")")));
+                        }
+                        s
                     }
-                    if let Some(v) = run.progress.speed.filter(|v| *v > 0.0) {
-                        s.push_str(&format!(" · {}", rate_text(v)));
+                    DlKind::Install => {
+                        let mut s = format!("{} {:.0}%（{:.1} MB）", t("正在下载 yt-dlp", "Downloading yt-dlp"), f.unwrap_or(0.0) * 100.0, run.progress.bytes as f64 / 1e6);
+                        if !self.dl_queue.is_empty() {
+                            s.push_str(&format!("{}{}{}", t("，好了之后接着下载你贴的 ", ", then the "), self.dl_queue.len(), t(" 个链接", " link(s) you pasted")));
+                        }
+                        s
                     }
-                    if run.attempt > 1 {
-                        s.push_str(&format!("  {}{}{}", t("（上次没下成，第 ", "(attempt "), run.attempt, t(" 次尝试）", ")")));
+                    DlKind::Update => t("正在更新 yt-dlp…", "Updating yt-dlp…").to_string(),
+                };
+                ui.horizontal(|ui| {
+                    let bar = egui::ProgressBar::new(f.unwrap_or(0.0)).text(text).desired_width((ui.available_width() - 60.0).max(80.0));
+                    ui.add(bar.animate(f.is_none()));
+                    let b = ui.add_enabled(!run.task.cancelled(), egui::Button::new(t("取消", "Cancel")));
+                    if b.clicked() {
+                        cancel_one = Some(i);
                     }
-                    if !self.dl_queue.is_empty() {
-                        s.push_str(&format!("  {}{}{}", t("（还有 ", "("), self.dl_queue.len(), t(" 个排队）", " queued)")));
+                });
+            }
+            // 同时下几个、或者还有排队的：显示排队数和「全部取消」
+            let queued = if audio > 0 { self.dl_queue.len() } else { 0 };
+            let mut cancel_all = false;
+            if audio > 1 || queued > 0 {
+                ui.horizontal(|ui| {
+                    let mut s = format!("{}{}{}", t("同时下载 ", "Downloading "), audio, t(" 个", " at once"));
+                    if queued > 0 {
+                        s.push_str(&format!("{}{}{}", t("，还有 ", ", "), queued, t(" 个排队", " queued")));
                     }
-                    s
-                }
-                DlKind::Install => {
-                    let mut s = format!("{} {:.0}%（{:.1} MB）", t("正在下载 yt-dlp", "Downloading yt-dlp"), f.unwrap_or(0.0) * 100.0, run.progress.bytes as f64 / 1e6);
-                    if !self.dl_queue.is_empty() {
-                        s.push_str(&format!("{}{}{}", t("，好了之后接着下载你贴的 ", ", then the "), self.dl_queue.len(), t(" 个链接", " link(s) you pasted")));
-                    }
-                    s
-                }
-                DlKind::Update => t("正在更新 yt-dlp…", "Updating yt-dlp…").to_string(),
-            };
-            let mut cancel = false;
-            ui.horizontal(|ui| {
-                let bar = egui::ProgressBar::new(f.unwrap_or(0.0)).text(text).desired_width((ui.available_width() - 60.0).max(80.0));
-                ui.add(bar.animate(f.is_none()));
-                cancel = ui.button(t("取消", "Cancel")).clicked();
-            });
-            if cancel {
+                    ui.label(RichText::new(s).small().weak());
+                    cancel_all = ui.small_button(t("全部取消", "Cancel all")).clicked();
+                });
+            }
+            if cancel_all {
                 self.dl_cancel();
+            } else if let Some(i) = cancel_one {
+                self.dl_cancel_one(i);
             }
         } else if self.ytdlp.is_none() {
             ui.horizontal_wrapped(|ui| {
@@ -3573,8 +3612,12 @@ impl eframe::App for App {
     /// 关闭窗口时还在转换：取消，等工作线程收尾（删掉临时文件和写了一半的输出），最多等 3 秒。
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // 还在下载：结束 yt-dlp / curl，别留下后台进程
-        if let Some(r) = &mut self.dl_run {
-            r.task.cancel_and_wait(std::time::Duration::from_secs(4));
+        for r in &self.dl_runs {
+            r.task.cancel();
+        }
+        let t0 = std::time::Instant::now();
+        for r in &mut self.dl_runs {
+            r.task.cancel_and_wait(std::time::Duration::from_secs(4).saturating_sub(t0.elapsed()));
         }
         if let Some(j) = &self.job {
             j.cancel.store(true, Ordering::Relaxed);

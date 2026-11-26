@@ -59,14 +59,82 @@ internal object HiddenAudio {
         return call { clsRuleBuilder.getMethod("build").invoke(b) }!!
     }
 
-    /** 只回环、不送到设备的播放端混音。[format] 是送进 remote submix（也就是录音端读出来）的格式。 */
-    fun loopbackMix(rule: Any, format: AudioFormat): Any {
+    /**
+     * 二级混音（录屏内录那种）的规则：只要 [uid] 这个 App、用途是 [usages] 之一的播放（不同类的条件要同时满足）。
+     * 用途里有语音通话时要打开 voiceCommunicationCaptureAllowed（需要 CAPTURE_VOICE_COMMUNICATION_OUTPUT，shell / root 有）。
+     */
+    fun buildTeeRule(uid: Int, usages: IntArray): Any {
+        val b = clsRuleBuilder.getConstructor().newInstance()
+        val add = clsRuleBuilder.getMethod("addMixRule", Int::class.javaPrimitiveType, Any::class.java)
+        val usage = ruleConst("RULE_MATCH_ATTRIBUTE_USAGE") ?: error("没有 RULE_MATCH_ATTRIBUTE_USAGE")
+        val uidRule = ruleConst("RULE_MATCH_UID") ?: error("没有 RULE_MATCH_UID")
+        for (u in usages) call { add.invoke(b, usage, AudioAttributes.Builder().setUsage(u).build()) }
+        call { add.invoke(b, uidRule, uid) }
+        if (AudioAttributes.USAGE_VOICE_COMMUNICATION in usages) {
+            call { clsRuleBuilder.getMethod("voiceCommunicationCaptureAllowed", Boolean::class.javaPrimitiveType).invoke(b, true) }
+        }
+        return call { clsRuleBuilder.getMethod("build").invoke(b) }!!
+    }
+
+    /**
+     * 播放端混音。[format] 是送进 remote submix（也就是录音端读出来）的格式。
+     * 平时只回环（ROUTE_FLAG_LOOP_BACK）：声音改送进 remote submix，不再送到设备。
+     * [render] = 回环 + 照常放（ROUTE_FLAG_LOOP_BACK_RENDER，二级混音）：声音照常送到原来的设备，另外复制一份
+     * （复制的是 App 写进来的原始数据，在音量之前）。App 给播放流指定了输出设备时只有这种截得到。
+     */
+    fun loopbackMix(rule: Any, format: AudioFormat, render: Boolean = false): Any {
         val b = clsMixBuilder.getConstructor(clsRule).newInstance(rule)
         call { clsMixBuilder.getMethod("setFormat", AudioFormat::class.java).invoke(b, format) }
-        val flag = clsMix.getField("ROUTE_FLAG_LOOP_BACK").getInt(null)
+        val flag = clsMix.getField(if (render) "ROUTE_FLAG_LOOP_BACK_RENDER" else "ROUTE_FLAG_LOOP_BACK").getInt(null)
         call { clsMixBuilder.getMethod("setRouteFlags", Int::class.javaPrimitiveType).invoke(b, flag) }
         return call { clsMixBuilder.getMethod("build").invoke(b) }!!
     }
+
+    /** 一个正在放声音的播放器（系统的 AudioPlaybackConfiguration）。[deviceType] 是它此刻的去向（AudioDeviceInfo.TYPE_*）。 */
+    class Player(val piid: Int, val uid: Int, val usage: Int, val started: Boolean, val deviceType: Int?, val proxy: Any?)
+
+    /** AudioPlaybackConfiguration 的系统接口（用到时才找：老系统上缺哪个，只影响 [players]，不影响拦截本身）。 */
+    private class Apc {
+        val cls = Class.forName("android.media.AudioPlaybackConfiguration")
+        val uid: Method = cls.getMethod("getClientUid")
+        val state: Method = cls.getMethod("getPlayerState")
+        val piid: Method = cls.getMethod("getPlayerInterfaceId")
+        /** Android 11 起才有；没有时去向一律不知道。 */
+        val device: Method? = runCatching { cls.getMethod("getAudioDeviceInfo") }.getOrNull()
+        val proxy: Method = cls.getMethod("getPlayerProxy")
+        val started = cls.getField("PLAYER_STATE_STARTED").getInt(null)
+        val am = newAudioManager()
+    }
+    private val apc by lazy { Apc() }
+
+    /**
+     * 各 App 此刻的播放器。有 MODIFY_AUDIO_ROUTING 的身份（shell / root）拿到的是完整信息：UID、去向、播放器代理；
+     * 别的身份只有匿名的，这里就读不到 UID。
+     */
+    fun players(): List<Player> {
+        val a = apc
+        return a.am.activePlaybackConfigurations.map { c ->
+            Player(
+                piid = a.piid.invoke(c) as Int,
+                uid = a.uid.invoke(c) as Int,
+                usage = c.audioAttributes.usage,
+                started = a.state.invoke(c) as Int == a.started,
+                deviceType = runCatching { (a.device?.invoke(c) as android.media.AudioDeviceInfo?)?.type }.getOrNull(),
+                proxy = runCatching { a.proxy.invoke(c) }.getOrNull(),
+            )
+        }
+    }
+
+    /**
+     * 设播放器的音量系数（PlayerProxy.setVolume；系统通话时静音别的 App 用的也是它）。乘在 App 自己设的音量上，
+     * 作用在混音时，二级混音复制的那份不受影响。播放器已经没了时抛出异常。
+     */
+    fun setPlayerVolume(proxy: Any, vol: Float) {
+        call { proxy.javaClass.getMethod("setVolume", Float::class.javaPrimitiveType).invoke(proxy, vol) }
+    }
+
+    /** UID 对应的包名（几个 App 共用一个 UID 时是系统给的名字）；查不到时为空。 */
+    fun packageOf(uid: Int): String? = runCatching { ProcessEnv.context().packageManager?.getNameForUid(uid) }.getOrNull()
 
     /** 一个策略里可以放几个混音（全局模式按用途分两路，见 [AudioRouter]），各有各的 remote submix 和录音端。 */
     fun buildPolicy(context: Context, mixes: List<Any>, looper: Looper): Any {

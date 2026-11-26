@@ -1,6 +1,7 @@
 package io.github.nasuiyile.autoasmr.global.server
 
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTimestamp
@@ -64,26 +65,53 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
         const val STUCK_MS = 500L
         /** 通话一路两次查声道数至少隔这么久（毫秒）。 */
         const val CHECK_GAP_MS = 30_000L
+        /** 单独截的那一路：这么久（毫秒）没再看到这个 App 绕开拦截的声音就撤掉，原声恢复音量。 */
+        const val TEE_IDLE_MS = 10_000L
+        /** 单独截建不起来时，隔这么久（毫秒）再试。 */
+        const val TEE_RETRY_MS = 30_000L
+        /** 单独截的那一路这么久（毫秒）还没录到声音时在日志里说一声（一直在出声的话，说明这样也录不到）。 */
+        const val TEE_DEAF_MS = 5_000L
     }
 
     private val policyThread = HandlerThread("asmr-policy").apply { start() }
     private var policy: Any? = null
+    /** 送进 remote submix、录音端读出来的格式。 */
+    private val mixFmt: AudioFormat = AudioFormat.Builder()
+        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+        .setSampleRate(SR)
+        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+        .build()
     /** [0] 媒体一路，[1] 通话一路；没在拦截时为空。 */
     @Volatile private var lanes: List<Lane> = emptyList()
     @Volatile private var running = false
     /** 测延迟时打开（--onset）：每个声音的开头放出来时发一行 onset。 */
     @Volatile var reportOnsets = false
+    private var excludeUids = intArrayOf()
+    private var onlyUids = intArrayOf()
 
-    // ---- 统计：两路合起来（音频线程写，统计线程读）
+    // ---- 指定了输出设备的播放（见 [watchBypass]）
+    /** 单独截的路，按 (UID, 是不是通话) 分；只在持锁时改。 */
+    private val tees = HashMap<Pair<Int, Boolean>, Lane>()
+    /** [tees] 的快照，给统计线程读。 */
+    @Volatile private var teeList: List<Lane> = emptyList()
+    /** 单独截建不起来的组和时刻（[TEE_RETRY_MS] 之后再试）。 */
+    private val teeFailed = HashMap<Pair<Int, Boolean>, Long>()
+    /** 界面上显示：哪些 App 指定了输出设备、是不是已经单独截下来了。没有时为空。 */
+    @Volatile var bypassNote = ""
+        private set
+
+    private fun all(): List<Lane> = lanes + teeList
+
+    // ---- 统计：各路合起来（音频线程写，统计线程读）
     var peakIn: Float
-        get() = lanes.maxOfOrNull { it.peakIn } ?: 0f
-        set(v) = lanes.forEach { it.peakIn = v }
+        get() = all().maxOfOrNull { it.peakIn } ?: 0f
+        set(v) = all().forEach { it.peakIn = v }
     var peakOut: Float
-        get() = lanes.maxOfOrNull { it.peakOut } ?: 0f
-        set(v) = lanes.forEach { it.peakOut = v }
+        get() = all().maxOfOrNull { it.peakOut } ?: 0f
+        set(v) = all().forEach { it.peakOut = v }
     val framesIn: Long get() = lanes.maxOfOrNull { it.framesIn } ?: 0L
-    val procNs: Long get() = lanes.sumOf { it.procNs }
-    val gated: Boolean get() = lanes.all { it.gated }
+    val procNs: Long get() = all().sumOf { it.procNs }
+    val gated: Boolean get() = all().all { it.gated }
     /** 录音端读到的数据离被录下过了多久（毫秒；系统给得出时间戳时含 remote submix 管道里的那一段）。 */
     val lagInMs: Float get() = shown()?.lagInMs ?: Float.NaN
     /** 输出流里攒着还没被取走的量（毫秒，半秒里的平均）：我们自己留的缓冲。 */
@@ -93,9 +121,9 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
     /** 输出节拍的状态：目标（写之前至少剩多少，毫秒）、速度偏差（ppm）、丢掉旧声音的次数（两路加起来）。 */
     val targetMs: Float get() = shown()?.targetMs ?: 0f
     val trimPpm: Float get() = shown()?.trimPpm ?: 0f
-    val drops: Int get() = lanes.sumOf { it.drops }
-    val readErrors: Int get() = lanes.sumOf { it.readErrors }
-    val underruns: Int get() = lanes.sumOf { it.underruns }
+    val drops: Int get() = all().sumOf { it.drops }
+    val readErrors: Int get() = all().sumOf { it.readErrors }
+    val underruns: Int get() = all().sumOf { it.underruns }
     /** 引擎算法的延迟 + 输出节拍的插值延时（毫秒）。 */
     var engineLatencyMs = 0f
         private set
@@ -103,9 +131,9 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
         private set
     val isRunning: Boolean get() = running
 
-    /** 界面上显示哪一路：在出声的那路（两路都在出声时显示通话一路），都没出声时显示媒体一路。 */
+    /** 界面上显示哪一路：在出声的那路（几路都在出声时显示单独截的、再是通话一路），都没出声时显示媒体一路。 */
     private fun shown(): Lane? {
-        val ls = lanes
+        val ls = all()
         return ls.lastOrNull { !it.gated } ?: ls.firstOrNull()
     }
 
@@ -120,6 +148,10 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
     @Synchronized
     fun start(excludeUids: IntArray, onlyUids: IntArray): String? {
         if (running) return null
+        this.excludeUids = excludeUids
+        this.onlyUids = onlyUids
+        teeFailed.clear()
+        warned.clear()
         try {
             val ls = listOf(Lane("媒体", false, MEDIA_USAGES), Lane("通话", true, VOICE_USAGES))
             lanes = ls
@@ -129,11 +161,6 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
                 l.session = t.audioSessionId
             }
             val sessions = ls.map { it.session }.toIntArray()
-            val mixFmt = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(SR)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                .build()
             for (l in ls) {
                 val rule = HiddenAudio.buildRule(l.usages, excludeUids, onlyUids, sessions, emit)
                 l.mix = HiddenAudio.loopbackMix(rule, mixFmt)
@@ -180,6 +207,7 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
 
     @Synchronized
     fun stop() {
+        closeTees("停止拦截")
         running = false
         val ls = lanes
         for (l in ls) l.record?.let { r -> runCatching { HiddenAudio.stopRecording(r) } } // 让阻塞在 read 里的音频线程返回
@@ -199,6 +227,7 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
     }
 
     private fun release() {
+        closeTees("停止拦截")
         running = false
         val ls = lanes
         for (l in ls) {
@@ -207,15 +236,166 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
         }
         policy?.let { p -> runCatching { HiddenAudio.unregister(p) }.onFailure { emit("warn 注销策略失败：${HiddenAudio.describe(it)}") } }
         policy = null
-        for (l in ls) {
-            l.track?.let { t -> runCatching { t.pause(); t.flush() }; runCatching { t.release() } }
-            l.track = null
-            if (l.proc != 0L) Engine.procFree(l.proc)
-            l.proc = 0L
-            if (l.pace != 0L) Engine.paceFree(l.pace)
-            l.pace = 0L
-        }
+        for (l in ls) releaseLane(l)
         lanes = emptyList()
+    }
+
+    /** 放掉一路的录音端、它自己的策略（单独截的那种）、输出流、处理器。音频线程要已经停了。 */
+    private fun releaseLane(l: Lane) {
+        l.record?.let { r -> runCatching { HiddenAudio.stopRecording(r) }; runCatching { r.release() } }
+        l.record = null
+        l.policy?.let { p -> runCatching { HiddenAudio.unregister(p) }.onFailure { emit("warn 注销策略失败：${HiddenAudio.describe(it)}") } }
+        l.policy = null
+        l.track?.let { t -> runCatching { t.pause(); t.flush() }; runCatching { t.release() } }
+        l.track = null
+        if (l.proc != 0L) Engine.procFree(l.proc)
+        l.proc = 0L
+        if (l.pace != 0L) Engine.paceFree(l.pace)
+        l.pace = 0L
+    }
+
+    // ---- 指定了输出设备的播放
+
+    /**
+     * 找出绕开了拦截规则的播放，单独截下来（统计线程每秒调一次）。
+     *
+     * App 给播放流指定了输出设备（`AudioTrack.setPreferredDevice`，AAudio / Oboe 的 `setDeviceId`；语音房这类 App 的
+     * 语音 SDK 自己管耳机 / 蓝牙 / 外放时常这样做）时，系统先按指定的设备放，根本不看动态音频策略
+     * （AOSP `AudioPolicyMixCollection::getOutputForAttr`："Explicit routing is higher priority than dynamic policy"），
+     * 回环规则截不到，原声直接进耳机。只有二级混音（ROUTE_FLAG_LOOP_BACK_RENDER）不管去向都会复制一份，所以：
+     *
+     * 1. 每秒看一遍各 App 正在放的播放器：用途在拦截范围里、去向不是 remote submix 的，就是绕开了的。
+     * 2. 按 (UID, 是不是通话) 分组，每组建一路：二级混音（只要这个 App 的这类用途）→ 录音端 → 处理器 → 自己的输出流。
+     * 3. 这一路录到声音（说明真的截得到）之后，才把那几个播放器的音量系数设成 0（原声静音），同时这一路开始出声；
+     *    录不到（低延迟直通流、App 禁止被录等）就不静音，照常放原声，不会变成没声音。之后每秒重设一次 0（系统通话结束时会把它恢复成 1）。
+     * 4. 这一组 [TEE_IDLE_MS] 没再出现绕开的播放器、或者同一组里出现了被正常截到的播放器（二级混音会把它再录一份、处理两遍），
+     *    就撤掉这一路，静音过的播放器恢复音量。停止拦截时也一样。
+     *
+     * 服务进程被强行杀掉时来不及恢复：那几个播放器会一直静音，直到 App 重新建播放流（比如退出语音房再进）。
+     */
+    @Synchronized
+    fun watchBypass() {
+        if (!running) return
+        val players = try {
+            HiddenAudio.players()
+        } catch (e: Throwable) {
+            warnOnce("players", "读不到各 App 的播放状态，发现不了指定了输出设备的 App：${HiddenAudio.describe(e)}")
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val bypass = HashMap<Pair<Int, Boolean>, MutableList<HiddenAudio.Player>>()
+        val captured = HashSet<Pair<Int, Boolean>>()
+        for (p in players) {
+            if (!p.started || p.uid in excludeUids || (onlyUids.isNotEmpty() && p.uid !in onlyUids)) continue
+            val voice = p.usage in VOICE_USAGES
+            if (!voice && p.usage !in MEDIA_USAGES) continue
+            val dev = p.deviceType ?: continue
+            val key = p.uid to voice
+            if (dev == AudioDeviceInfo.TYPE_REMOTE_SUBMIX) captured += key else bypass.getOrPut(key) { mutableListOf() } += p
+        }
+        for ((key, ps) in bypass) {
+            if (key in captured) {
+                warnOnce("mixed$key", "${appName(key.first)} 有的声音指定了输出设备、有的没有：单独截会把没指定的那些再录一份，所以不单独截，指定了设备的那些还是原声")
+                continue
+            }
+            val tee = tees[key] ?: openTee(key, ps.first().deviceType) ?: continue
+            tee.lastBypass = now
+            if (tee.heard) {
+                for (p in ps) {
+                    val px = p.proxy ?: continue
+                    runCatching { HiddenAudio.setPlayerVolume(px, 0f) }.onSuccess { tee.muted[p.piid] = px }
+                }
+                if (tee.hold) {
+                    tee.hold = false
+                    emit("log 已截到 ${tee.name} 的声音，原声静音（${tee.muted.size} 个播放器）")
+                }
+            } else if (now - tee.since > TEE_DEAF_MS) {
+                warnOnce("deaf$key", "${tee.name}：单独截的这一路 ${TEE_DEAF_MS / 1000} 秒里还没录到声音。它一直在出声的话，说明这样也截不到（例如低延迟直通流、App 禁止被录），原声照常放")
+            }
+        }
+        for ((key, tee) in tees.toList()) {
+            when {
+                key in captured -> closeTee(key, "它的声音又能被正常截到了")
+                now - tee.lastBypass > TEE_IDLE_MS -> closeTee(key, "${TEE_IDLE_MS / 1000} 秒没再放")
+            }
+        }
+        bypassNote = tees.values.joinToString("，") { "${it.name}${if (it.hold) "（等声音）" else ""}" }
+    }
+
+    private val warned = HashSet<String>()
+
+    private fun warnOnce(key: String, msg: String) {
+        if (warned.add(key)) emit("warn $msg")
+    }
+
+    private fun appName(uid: Int): String = HiddenAudio.packageOf(uid) ?: "UID $uid"
+
+    private fun deviceName(type: Int?): String = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "扬声器"
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "听筒"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "有线耳机"
+        AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE -> "USB 耳机"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "蓝牙耳机"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "蓝牙耳机（通话）"
+        AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> "蓝牙耳机（LE）"
+        else -> "设备类型 $type"
+    }
+
+    /** 给一组建单独截的一路（见 [watchBypass]）；建不起来时为空，[TEE_RETRY_MS] 之内不再试。 */
+    private fun openTee(key: Pair<Int, Boolean>, device: Int?): Lane? {
+        val now = SystemClock.elapsedRealtime()
+        teeFailed[key]?.let { if (now - it < TEE_RETRY_MS) return null }
+        val (uid, voice) = key
+        val name = appName(uid) + if (voice) "（通话）" else ""
+        val l = Lane(name, voice, if (voice) VOICE_USAGES else MEDIA_USAGES, tee = true)
+        try {
+            emit("warn $name 的声音指定了输出设备（${deviceName(device)}），绕开了拦截规则：单独截一份来处理，截到后把原声静音")
+            val t = buildTrack(voice, 0) ?: error("输出流建不起来")
+            l.track = t
+            l.session = t.audioSessionId
+            l.mix = HiddenAudio.loopbackMix(HiddenAudio.buildTeeRule(uid, l.usages), mixFmt, render = true)
+            val p = HiddenAudio.buildPolicy(ProcessEnv.context(), listOf(l.mix!!), policyThread.looper)
+            val r = HiddenAudio.register(p)
+            if (r != 0) error("registerAudioPolicy 返回 $r")
+            l.policy = p
+            val rec = HiddenAudio.recordSink(p, l.mix!!) ?: error("createAudioRecordSink 返回空")
+            l.record = rec
+            if (rec.state != AudioRecord.STATE_INITIALIZED) error("录音端初始化失败")
+            l.proc = Engine.procNew(SR, CH)
+            l.pace = Engine.paceNew()
+            HiddenAudio.startRecording(rec)?.let { emit("warn startRecording 出错（$it），已绕开厂商代码直接开始录音") }
+            if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) error("录音端开不起来")
+            l.worker = Thread(l::loop, "asmr-route-tee").apply { start() }
+            tees[key] = l
+            teeList = tees.values.toList()
+            return l
+        } catch (e: Throwable) {
+            android.util.Log.e("AsmrShizuku", "openTee", e)
+            emit("warn 单独截 $name 失败，原声照常放：${HiddenAudio.describe(e)}")
+            l.alive = false
+            releaseLane(l)
+            teeFailed[key] = now
+            return null
+        }
+    }
+
+    /** 撤掉一组单独截的路：先恢复原声的音量（宁可叠一下也不断），再停这一路。 */
+    private fun closeTee(key: Pair<Int, Boolean>, why: String) {
+        val l = tees.remove(key) ?: return
+        teeList = tees.values.toList()
+        for (px in l.muted.values) runCatching { HiddenAudio.setPlayerVolume(px, 1f) }
+        l.alive = false
+        l.record?.let { r -> runCatching { HiddenAudio.stopRecording(r) } }
+        l.worker?.join(2000)
+        l.worker = null
+        releaseLane(l)
+        warned.remove("deaf$key")
+        emit("log 不再单独截 ${l.name}（$why）" + if (l.muted.isNotEmpty()) "，原声恢复音量" else "")
+        bypassNote = tees.values.joinToString("，") { it.name }
+    }
+
+    private fun closeTees(why: String) {
+        for (key in tees.keys.toList()) closeTee(key, why)
     }
 
     /**
@@ -255,9 +435,23 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
         return t
     }
 
-    /** 一路：一个混音 → 录音端 → 处理器 → 输出流。 */
-    private inner class Lane(val name: String, val voice: Boolean, val usages: IntArray) {
+    /**
+     * 一路：一个混音 → 录音端 → 处理器 → 输出流。[tee] = 单独截指定了输出设备的 App 的那种（见 [watchBypass]）：
+     * 有自己的策略，原声静音之前（[hold]）只听不放。
+     */
+    private inner class Lane(val name: String, val voice: Boolean, val usages: IntArray, val tee: Boolean = false) {
         var mix: Any? = null
+        /** 单独截的那种自己注册的策略（媒体、通话两路共用 [AudioRouter.policy]）。 */
+        var policy: Any? = null
+        /** 撤掉单独截的那一路时置为 false，音频线程随之退出。 */
+        @Volatile var alive = true
+        /** 只听不放：原声还没静音时不出声，免得同时听到两份。录到声音时置 [heard]。 */
+        @Volatile var hold = tee
+        @Volatile var heard = false
+        /** 被静音的原播放器（piid → 播放器代理），撤掉时恢复音量。只在持 AudioRouter 的锁时改。 */
+        val muted = HashMap<Int, Any>()
+        val since = SystemClock.elapsedRealtime()
+        var lastBypass = since
         var record: AudioRecord? = null
         @Volatile var track: AudioTrack? = null
         var session = 0
@@ -368,7 +562,7 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
         private fun writeAll(t: AudioTrack, a: FloatArray, frames: Int): Boolean {
             var off = 0
             val n = frames * CH
-            while (off < n && running) {
+            while (off < n && running && alive) {
                 val w = t.write(a, off, n - off, AudioTrack.WRITE_BLOCKING)
                 if (w < 0) {
                     emit("warn ${name}一路写输出流出错（$w）")
@@ -402,7 +596,7 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
             var onsetFrame = -1L
             var fillSum = 0L
             var fillCount = 0
-            while (running) {
+            while (running && alive) {
                 // 来多少取多少：没有就等 2 ms 的量，等到了把已经到的一起取走。不按固定的块攒，声音不在录音缓冲里多等，
                 // 音频线程卡了一下之后也一次读完，不留积压
                 var n = rec.read(s16, 0, s16.size, AudioRecord.READ_NON_BLOCKING)
@@ -438,6 +632,11 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
                 }
                 framesIn += frames
                 if (pk > peakIn) peakIn = pk
+                if (hold) {
+                    // 原声还没静音：只确认截得到，不出声
+                    if (pk > 0f) heard = true
+                    continue
+                }
 
                 // 每 0.5 s 量一次：录音端这边读到的数据有多旧
                 val now = System.nanoTime()
@@ -511,7 +710,7 @@ internal class AudioRouter(private val emit: (String) -> Unit) {
                     headMovedAt = now
                     if (outVoice) checkChannels()
                     var left = prefill
-                    while (left > 0 && running) {
+                    while (left > 0 && running && alive) {
                         val k = min(left, MAX_FRAMES)
                         if (!writeAll(t, zeros, k)) break
                         left -= k

@@ -604,12 +604,12 @@ impl App {
 
     /// 多音频合成是否生效：勾上了，并且列表里至少有两个音频。
     fn multi(&self) -> bool {
-        self.s.mix && self.files.len() >= 2
+        !self.s.file_dry && self.s.mix && self.files.len() >= 2
     }
 
     /// 左右双人是否生效：没在多音频合成、滑条不为 0、选中了一个音频。
     fn duo(&self) -> bool {
-        !self.multi() && self.s.duo_ms > 0.0 && self.file_in.is_some()
+        !self.s.file_dry && !self.multi() && self.s.duo_ms > 0.0 && self.file_in.is_some()
     }
 
     /// 实时（主播）页的左右双人是否打开：麦克风的声音一左一右两个人说。
@@ -643,7 +643,7 @@ impl App {
 
     /// 转换时的左右双人设置（不是左右双人时 None）。
     fn duo_options(&self) -> Option<Duo> {
-        (!self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, follow: self.s.mix_follow, balance: self.s.mix_balance / 100.0 })
+        (!self.s.file_dry && !self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, follow: self.s.mix_follow, balance: self.s.mix_balance / 100.0 })
     }
 
     /// 改第 k 个声音的位置 / 音量：多音频合成按文件记，左右双人（文件和实时共用）记在自己的两个位置里。
@@ -1132,6 +1132,9 @@ impl App {
     /// 解码结果按它区分（变了就要重新解码）：1–3 是「取哪个声道」选的左 / 右 / 混合；「自动」平时是 0（更响的那个声道），
     /// 听歌（立体声宽度大于 0）时单个音频是 4（左右声道都要，各当一个声源），多音频合成、左右双人是 3（左右混合）。
     fn ch_key(&self) -> u8 {
+        if self.s.file_dry && self.s.file_channel == 0 {
+            return 4;
+        }
         match (self.s.file_channel, self.s.params.stereo_width > 0.0) {
             (0, true) => {
                 if self.mixing() {
@@ -1151,6 +1154,7 @@ impl App {
         o.duration = if self.dur_s > 0.0 { Some(self.dur_s as f64) } else { None };
         o.channel = self.file_channel();
         o.bits = self.s.bits;
+        o.dry = self.s.file_dry;
         o.lufs = self.s.file_lufs;
         o.peak_db = self.s.params.ceiling_db;
         o.duo = self.duo_options();
@@ -1253,12 +1257,12 @@ impl App {
                 let start = ((self.preview_s.max(0.0) * FS as f64) as usize).min(audio.len());
                 // 左右声道都解码了（听歌、立体声的音频）：左右声道各当一个声源
                 let started = match &self.decoded_r {
-                    Some(right) => Realtime::start_preview_stereo(&self.rt_options(), self.cfg.clone(), audio.clone(), right.clone(), start),
-                    None => Realtime::start_preview(&self.rt_options(), self.cfg.clone(), audio.clone(), start),
+                    Some(right) => Realtime::start_preview_stereo(&self.rt_options(), self.cfg.clone(), audio.clone(), right.clone(), start, self.s.file_dry),
+                    None => Realtime::start_preview(&self.rt_options(), self.cfg.clone(), audio.clone(), start, self.s.file_dry),
                 };
                 match started {
                     Ok(rt) => {
-                        self.status = format!("{}：{}（{} Hz）{}", t("试听中", "Previewing"), rt.info.output_name, rt.info.out_rate, if self.decoded_r.is_some() { t("，立体声：左右声道各一个声源", ", stereo: one source per channel") } else { "" });
+                        self.status = format!("{}：{}（{} Hz）{}", t("试听中", "Previewing"), rt.info.output_name, rt.info.out_rate, if self.s.file_dry { t("，保持原声", ", original audio") } else if self.decoded_r.is_some() { t("，立体声：左右声道各一个声源", ", stereo: one source per channel") } else { "" });
                         self.rt = Some(rt);
                         self.rt_preview = true;
                     }
@@ -1280,7 +1284,7 @@ impl App {
         let mut o = ConvertOptions::new(input.clone());
         o.channel = self.file_channel();
         // 听歌时「自动」：单个音频左右声道都要；左右双人（当成一个声源再变成两个人）左右混合
-        let pick = auto_pick(&self.s.params, !self.mixing());
+        let pick = if self.s.file_dry { crate::offline::AutoPick::Stereo } else { auto_pick(&self.s.params, !self.mixing()) };
         std::thread::spawn(move || {
             let r = load_audio(&o, &AtomicBool::new(false), pick).map(|(c, _)| {
                 let mut it = c.into_iter().map(Arc::new);
@@ -1348,6 +1352,7 @@ impl App {
         self.decoding = None;
         self.preview_pending = false;
         self.report.clear();
+        self.dl_notes.clear();
         self.voices.clear();
         self.mix_audio = None;
         self.mix_decoding = None;
@@ -2243,7 +2248,7 @@ impl App {
                 ui.label(RichText::new(format!("{} {}", self.files.len(), t("个", "files"))).weak());
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!busy && !self.files.is_empty(), egui::Button::new(t("清空", "Clear"))).clicked() {
+                if ui.add_enabled(!busy && (!self.files.is_empty() || !self.dl_notes.is_empty()), egui::Button::new(t("清空", "Clear"))).on_hover_text(t("清空文件列表、转换说明和下载日志", "Clears the file list, conversion report and download log")).clicked() {
                     self.clear_files();
                 }
                 if ui.add_enabled(!busy, egui::Button::new(t("添加文件夹…", "Add folder…"))).on_hover_text(t("加入文件夹里的全部音频文件（不含子文件夹，跳过已转换的 _asmr 文件）", "Adds every audio file in the folder (not subfolders; skips _asmr outputs)")).clicked() {
@@ -2338,17 +2343,20 @@ impl App {
                 }
             }
         }
+        if self.s.file_dry {
+            ui.label(RichText::new(t("保持原声时分别转换各文件，不使用多音频合成和左右双人", "Dry output converts files separately, without mixing or two voices")).small().weak());
+        }
         // 多音频合成开关
         ui.horizontal(|ui| {
-            let mut on = self.s.mix;
+            let mut on = self.s.mix && !self.s.file_dry;
             let tip = t(
                 "勾上后，列表里的前 4 个音频各放一个位置（默认一个在左耳、一个在右耳，再多就放正前、正后），「试听」时一起播放，「合成并保存」输出一个文件。下面的「排布」可以选各自固定（位置在列表里选或在位置图上拖）或一起移动（按右侧「左右移动」的方式一起走，彼此始终相对）。各音频先自动对齐到一样响，列表里的 dB 是在这之上的加减",
                 "When on, the first 4 files each get a position (left ear and right ear by default, then front and back), play together in Preview, and Mix & save writes one file. Below, Layout picks Fixed (positions from the list or dragged on the map) or Together (they follow Left / right motion and always stay opposite). The files are matched in loudness first; the dB in the list is added on top",
             );
-            if ui.add_enabled(!busy, egui::Checkbox::new(&mut on, t("多音频合成：几个音频各在一个位置，同时播放", "Multi-audio mix: files at different positions, played together"))).on_hover_text(tip).changed() {
+            if ui.add_enabled(!busy && !self.s.file_dry, egui::Checkbox::new(&mut on, t("多音频合成：几个音频各在一个位置，同时播放", "Multi-audio mix: files at different positions, played together"))).on_hover_text(tip).changed() {
                 self.set_mix_mode(on);
             }
-            if self.s.mix {
+            if self.s.mix && !self.s.file_dry {
                 let n = self.files.len();
                 let note = if n < 2 {
                     t("再添加一个音频", "add another file").to_string()
@@ -2361,11 +2369,11 @@ impl App {
             }
         });
         // 合成的排布：各自固定 / 一起移动
-        if self.s.mix {
+        if self.s.mix && !self.s.file_dry {
             self.ui_layout_row(ui, busy);
         }
         // 合成前自动对齐：同一首歌的几个版本（前奏长短不同、编曲不同），从一起开始唱的地方叠加
-        if self.s.mix {
+        if self.s.mix && !self.s.file_dry {
             ui.horizontal(|ui| {
                 let mut on = self.s.mix_align;
                 let tip = t(
@@ -2509,6 +2517,9 @@ impl App {
 
     /// 文件页的左右双人：一个音频当成两个人。多音频合成生效时只留延迟滑条，用来把几个音频错开（自动对齐之后再错开）。
     fn ui_duo(&mut self, ui: &mut egui::Ui, busy: bool) {
+        if self.s.file_dry {
+            return;
+        }
         if self.multi() {
             self.ui_mix_delay(ui, busy);
             return;
@@ -2676,11 +2687,35 @@ impl App {
     fn ui_file(&mut self, ui: &mut egui::Ui) {
         ui.group(|ui| {
             ui.set_width(ui.available_width());
+            let before = self.s.file_dry;
+            ui.add_enabled_ui(self.job.is_none(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(t("输出", "Output"));
+                    ui.radio_value(&mut self.s.file_dry, false, t("ASMR 效果", "ASMR effect"));
+                    ui.radio_value(&mut self.s.file_dry, true, t("保持原声输出", "Keep original audio"));
+                });
+            });
+            if before != self.s.file_dry {
+                let resume = self.rt_preview || self.preview_pending;
+                self.stop();
+                self.decoded = None;
+                self.decoded_r = None;
+                self.decoding = None;
+                self.mix_audio = None;
+                self.mix_decoding = None;
+                self.preview_pending = resume;
+                if self.file_in.is_some() {
+                    if self.mixing() { self.decode_mix(); } else { self.decode_file(); }
+                }
+            }
+            if self.s.file_dry {
+                ui.label(RichText::new(t("保留原音量和立体声，跳过全部效果、降噪和背景音；只在峰值超限时保护。输出仍为 48 kHz WAV", "Keeps the original level and stereo; skips effects, denoise and background audio, with peak protection only. Saves 48 kHz WAV")).small().weak());
+            }
             self.ui_file_list(ui);
             egui::Grid::new("fileopts").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
                 ui.label(t("取哪个声道", "Channel")).on_hover_text(t(
-                    "立体声的音频怎么取。自动：平时取更响的那个声道（人声的两个声道多半是同一个声音）；「立体声宽度」大于 0（听歌）时，单个音频左右声道都要、各当一个声源，多音频合成和左右双人里左右混合成一个声源。选了左 / 右 / 混合就总是按选的取成一个声源",
-                    "How a stereo file is read. Auto: normally the louder channel (voice recordings usually carry the same voice on both); with Stereo width above 0 (music) a single file keeps both channels, one source each, while files in a mix or Two voices are mixed down to one source. Left / Right / Mix always give one source",
+                    "立体声的音频怎么取。保持原声时，自动保留左右声道；ASMR 效果下，自动：平时取更响的那个声道（人声的两个声道多半是同一个声音）；「立体声宽度」大于 0（听歌）时，单个音频左右声道都要、各当一个声源，多音频合成和左右双人里左右混合成一个声源。选了左 / 右 / 混合就总是按选的取成一个声源",
+                    "How a stereo file is read. Dry output keeps both channels in Auto; with ASMR effects, Auto normally takes the louder channel (voice recordings usually carry the same voice on both); with Stereo width above 0 (music) a single file keeps both channels, one source each, while files in a mix or Two voices are mixed down to one source. Left / Right / Mix always give one source",
                 ));
                 // 「自动」在听歌时的含义不一样，写在选项上
                 let auto = match self.ch_key() {
@@ -2708,7 +2743,7 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.dur_s).range(0.0..=36000.0).speed(1.0)).on_hover_text(t("0 = 到结尾。先试 60 秒听听效果很方便", "0 = to the end. Try 60 s first to audition"));
                 ui.end_row();
                 ui.label(t("目标响度", "Loudness"));
-                ui.add(egui::Slider::new(&mut self.s.file_lufs, -24.0..=-10.0).clamping(egui::SliderClamping::Never).suffix(" LUFS").fixed_decimals(0));
+                ui.add_enabled(!self.s.file_dry, egui::Slider::new(&mut self.s.file_lufs, -24.0..=-10.0).clamping(egui::SliderClamping::Never).suffix(" LUFS").fixed_decimals(0));
                 ui.end_row();
                 if self.multi() {
                     return; // 合成只输出一个文件（几个音源的引擎已经各用一个核并行），没有"同时转换几个文件"
@@ -3210,6 +3245,9 @@ impl App {
 
     /// 在控件修改参数的当帧提交，音频线程下一次回调直接使用最新快照。
     fn sync_params(&mut self) {
+        if let Some(rt) = self.rt.as_ref().filter(|_| self.rt_preview) {
+            rt.shared.monitor_dry.store(self.s.file_dry, Ordering::Relaxed);
+        }
         let mode = self.s.params.mode;
         if mode != self.last_mode {
             if mode == MotionMode::Manual {

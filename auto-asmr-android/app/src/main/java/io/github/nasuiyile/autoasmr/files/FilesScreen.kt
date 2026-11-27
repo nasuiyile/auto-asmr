@@ -107,6 +107,7 @@ fun FilesScreen(onImport: () -> Unit, onExport: () -> Unit) {
     val saveAs = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) { uri -> saveAsKey?.let { if (uri != null) FileSession.setSaveAs(it, uri) } }
 
     val busy = st.optBoolean("busy")
+    val dry = Settings.params.optBoolean("file_dry")
     val multi = st.optBoolean("multi")
     val mixing = st.optBoolean("mixing")
     val tele = st.optJSONArray("tele").floats()
@@ -122,8 +123,17 @@ fun FilesScreen(onImport: () -> Unit, onExport: () -> Unit) {
         map = if (mixing) ({ MixMap(st) }) else null,
         header = {
             item { PageHeader("文件转换", help = FILES_HELP) }
-            item { FileList(st, busy, multi, onAddFiles = { addFiles.launch(arrayOf("audio/*", "video/*", "application/ogg", "application/octet-stream")) }, onAddFolder = { addFolder.launch(null) }) }
             item {
+                Section("输出模式") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = !dry, enabled = !busy, onClick = { Settings.set("file_dry", "false") }, label = { Text("ASMR 效果") })
+                        FilterChip(selected = dry, enabled = !busy, onClick = { Settings.set("file_dry", "true") }, label = { Text("保持原声输出") })
+                    }
+                    if (dry) Note("保留原音量和立体声，跳过全部效果、降噪和背景音；只在峰值超限时保护。输出仍为 48 kHz WAV，每个文件分别转换。")
+                }
+            }
+            item { FileList(st, busy, multi, onAddFiles = { addFiles.launch(arrayOf("audio/*", "video/*", "application/ogg", "application/octet-stream")) }, onAddFolder = { addFolder.launch(null) }) }
+            if (!dry) item {
                 Section("多人声音") {
                     MixBlock(st, busy)
                     DuoBlock(st, busy)
@@ -482,6 +492,7 @@ private fun Options(st: JSONObject, busy: Boolean, multi: Boolean) {
             // 「自动」：平时取更响的那个声道；听歌（立体声宽度大于 0）时单个音频左右声道都要、各当一个声源，
             // 多音频合成 / 左右双人里左右混合成一个声源（同电脑版）
             val auto = when {
+                p.optBoolean("file_dry") -> "自动（立体声）"
                 p.optDouble("stereo_width", 0.0) <= 0.0 -> "自动（更响的）"
                 st.optBoolean("mixing") -> "自动（左右混合）"
                 else -> "自动（立体声）"
@@ -515,7 +526,7 @@ private fun Options(st: JSONObject, busy: Boolean, multi: Boolean) {
         Slider(value = (((drag ?: lufs.toFloat()) + 24f) / 14f).coerceIn(0f, 1f), onValueChange = { t ->
             drag = (-24f + 14f * t).roundToInt().toFloat()
             Settings.setNumber("file_lufs", drag!!.toDouble())
-        }, onValueChangeFinished = { drag = null }, modifier = Modifier.height(32.dp))
+        }, onValueChangeFinished = { drag = null }, enabled = !p.optBoolean("file_dry"), modifier = Modifier.height(32.dp))
         if (!multi) {
             // 合成只输出一个文件（几个音源的引擎已经各用一个核并行），没有"同时转换几个文件"
             val cores = st.optInt("cores", 1)

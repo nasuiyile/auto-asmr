@@ -293,7 +293,7 @@ enum Feed {
 impl Realtime {
     /// 麦克风 → 引擎 → 输出设备。
     pub fn start(opts: &RtOptions, cfg: Arc<EngineConfig>) -> Result<Realtime, String> {
-        Self::start_inner(opts, cfg, Feed::Mic(None))
+        Self::start_inner(opts, cfg, Feed::Mic(None), false)
     }
 
     /// 主播模式的左右双人：麦克风 → 几个声音（`setup` 里每个音源一个引擎，一般是左耳、右耳两个）→ 相加 → 输出设备。
@@ -305,18 +305,18 @@ impl Realtime {
             return Err(format!("左右双人需要 1–{MAX_VOICES} 个声音，延迟不超过 {:.0} ms", mix::DUO_MAX_MS));
         }
         let cfg = setup.cfgs[0].clone();
-        Self::start_inner(opts, cfg, Feed::Mic(Some(setup)))
+        Self::start_inner(opts, cfg, Feed::Mic(Some(setup)), false)
     }
 
     /// 试听：用实时引擎把一段已解码的音频（48 kHz 单声道）播到输出设备，可以边听边调参数。
-    pub fn start_preview(opts: &RtOptions, cfg: Arc<EngineConfig>, audio: Arc<Vec<f32>>, start_sample: usize) -> Result<Realtime, String> {
-        Self::start_inner(opts, cfg, Feed::File(audio, start_sample))
+    pub fn start_preview(opts: &RtOptions, cfg: Arc<EngineConfig>, audio: Arc<Vec<f32>>, start_sample: usize, dry: bool) -> Result<Realtime, String> {
+        Self::start_inner(opts, cfg, Feed::File(audio, start_sample), dry)
     }
 
     /// 试听一个立体声文件（左右声道各一段，48 kHz）：「立体声宽度」大于 0 时左右声道各当一个声源，为 0 时合成单声道
     /// 过一个引擎；边听边改参数（[`Realtime::set_config`]）时随时切换，不用重新开始。
-    pub fn start_preview_stereo(opts: &RtOptions, cfg: Arc<EngineConfig>, left: Arc<Vec<f32>>, right: Arc<Vec<f32>>, start_sample: usize) -> Result<Realtime, String> {
-        Self::start_inner(opts, cfg, Feed::Stereo(left, right, start_sample))
+    pub fn start_preview_stereo(opts: &RtOptions, cfg: Arc<EngineConfig>, left: Arc<Vec<f32>>, right: Arc<Vec<f32>>, start_sample: usize, dry: bool) -> Result<Realtime, String> {
+        Self::start_inner(opts, cfg, Feed::Stereo(left, right, start_sample), dry)
     }
 
     /// 多音频合成的试听：几段已解码的音频（48 kHz 单声道，与 `setup` 里的音源一一对应）各在自己的位置，同时播放。
@@ -326,10 +326,10 @@ impl Realtime {
             return Err(format!("合成试听需要 1–{MAX_VOICES} 段音频，且与位置一一对应"));
         }
         let cfg = setup.cfgs[0].clone();
-        Self::start_inner(opts, cfg, Feed::Mix(audio, setup, start_sample))
+        Self::start_inner(opts, cfg, Feed::Mix(audio, setup, start_sample), false)
     }
 
-    fn start_inner(opts: &RtOptions, cfg: Arc<EngineConfig>, feed: Feed) -> Result<Realtime, String> {
+    fn start_inner(opts: &RtOptions, cfg: Arc<EngineConfig>, feed: Feed, dry: bool) -> Result<Realtime, String> {
         let host = host_of(opts.host);
         let find = |id: &Option<String>, input: bool| -> Result<cpal::Device, String> {
             let none = if input { "没有可用的输入设备（麦克风）" } else { "没有可用的输出设备" };
@@ -345,6 +345,7 @@ impl Realtime {
         let out_dev = find(&opts.output, false)?;
         let (out_cfg, out_fmt) = pick_config(&out_dev, false, opts.buffer_frames)?;
         let sh = Shared::new(cfg.clone());
+        sh.monitor_dry.store(dry, Ordering::Relaxed);
         if let Feed::Mix(_, setup, _) | Feed::Mic(Some(setup)) = &feed {
             if let Ok(mut g) = sh.mix.lock() {
                 *g = Some(setup.clone());
@@ -447,7 +448,7 @@ pub fn selftest(seconds: f32, opts: &RtOptions, cfg: Arc<EngineConfig>, file: Op
             let mut o = crate::offline::ConvertOptions::new(f);
             o.duration = Some(seconds as f64 + 2.0);
             let (mono, _) = crate::offline::load_mono(&o, &AtomicBool::new(false))?;
-            Realtime::start_preview(opts, cfg, Arc::new(mono), 0)?
+            Realtime::start_preview(opts, cfg, Arc::new(mono), 0, false)?
         }
         None => Realtime::start(opts, cfg)?,
     };

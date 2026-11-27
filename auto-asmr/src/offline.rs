@@ -1,4 +1,5 @@
 //! 文件模式：解码任意常见格式 → 取一个声道 → 48 kHz → 引擎（带约 1 秒预读）→ 精确响度归一化和真峰值限制 → WAV。
+//! 保持原声（[`ConvertOptions::dry`]）：保留原音量和声道，跳过引擎与响度归一化，仅保留峰值保护。
 //! 「立体声宽度」大于 0（听歌）时，立体声的音频左右声道都要，各当一个声源（[`mix::pair_setup`]，两个引擎）。
 //! 多音频合成（[`convert_mix`]）：几个文件各过一个引擎、各在一个位置，相加之后同样两遍处理；
 //! 可以先自动对齐（[`align_tracks`]：同一首歌的几个版本，从一起开始唱的地方叠加）。
@@ -70,6 +71,8 @@ pub struct ConvertOptions {
     pub start: f64,
     pub duration: Option<f64>,
     pub channel: Channel,
+    /// 保持原声：自动时保留立体声，跳过全部效果和响度归一化，只保留峰值保护。不支持合成和轨迹。
+    pub dry: bool,
     pub bits: u16,
     pub lufs: f32,
     pub peak_db: f32,
@@ -83,7 +86,7 @@ pub struct ConvertOptions {
 impl ConvertOptions {
     pub fn new(input: PathBuf) -> Self {
         let output = default_output(&input);
-        ConvertOptions { input, output, start: 0.0, duration: None, channel: Channel::Auto, bits: 24, lufs: -16.0, peak_db: -1.0, max_gr_db: 8.0, save_trajectory: None, duo: None }
+        ConvertOptions { input, output, start: 0.0, duration: None, channel: Channel::Auto, dry: false, bits: 24, lufs: -16.0, peak_db: -1.0, max_gr_db: 8.0, save_trajectory: None, duo: None }
     }
 }
 
@@ -526,8 +529,8 @@ struct Finished {
 }
 
 /// 去掉尾部多余的静音，第二遍精确响度归一化 + 真峰值限制，写出 WAV。`n_sig`：输入（最长的那个）的样本数。
-/// 第二遍。`cfg`：背景音（雨声）在这里加——人声归一化之后、限制器之前，比人声低"音量"那么多，开头 1 秒淡入、结尾 2 秒淡出。
-fn finish(opts: &ConvertOptions, r: Rendered, n_sig: usize, cfg: &EngineConfig, cancel: &AtomicBool, progress: &mut impl FnMut(f32, &str)) -> Result<Finished, String> {
+/// 第二遍。原声不归一化，`cfg` 为 None（不创建效果配置）；其它模式的背景音（雨声）在这里加——人声归一化之后、限制器之前，比人声低"音量"那么多，开头 1 秒淡入、结尾 2 秒淡出。
+fn finish(opts: &ConvertOptions, r: Rendered, n_sig: usize, cfg: Option<&EngineConfig>, cancel: &AtomicBool, progress: &mut impl FnMut(f32, &str)) -> Result<Finished, String> {
     let Rendered { tmp, written, peak, meter } = r;
     let cancelled = || cancel.load(Ordering::Relaxed);
     // 去掉尾部多余的静音：保留到最后一个高于最大值 −100 dB 的样本
@@ -546,7 +549,7 @@ fn finish(opts: &ConvertOptions, r: Rendered, n_sig: usize, cfg: &EngineConfig, 
     }
 
     // 第二遍：响度归一化；峰值太高时用前瞻限制器最多压 max_gr dB，再不够就整体降低
-    let g0 = db_to_lin(meter.gain_db_for(opts.lufs));
+    let g0 = if opts.dry { 1.0 } else { db_to_lin(meter.gain_db_for(opts.lufs)) };
     let mut gain = g0;
     let lim = db_to_lin(opts.peak_db);
     if peak * gain > lim {
@@ -557,7 +560,7 @@ fn finish(opts: &ConvertOptions, r: Rendered, n_sig: usize, cfg: &EngineConfig, 
     }
     // 背景音按人声实际的响度定（峰值太高、人声整体降低了时跟着降）
     let rain_ref = opts.lufs + 20.0 * (gain / g0).max(1e-9).log10();
-    let mut rain = cfg.derived.rain.as_ref().map(|s| {
+    let mut rain = cfg.and_then(|c| c.derived.rain.as_ref().map(|s| (c, s))).map(|(cfg, s)| {
         let mut r = Rain::new(s.clone(), cfg.params.seed, cfg.derived.playback.as_ref());
         r.prime_gain(rain_ref);
         r
@@ -625,7 +628,7 @@ fn finish(opts: &ConvertOptions, r: Rendered, n_sig: usize, cfg: &EngineConfig, 
                 }
             }
             fed += m;
-            progress(0.8 + 0.2 * emitted as f32 / n_out.max(1) as f32, "响度归一化");
+            progress(0.8 + 0.2 * emitted as f32 / n_out.max(1) as f32, if opts.dry { "保存原声" } else { "响度归一化" });
         }
         wav.finalize().map_err(|e| e.to_string())
     })();
@@ -641,6 +644,9 @@ fn finish(opts: &ConvertOptions, r: Rendered, n_sig: usize, cfg: &EngineConfig, 
 
 /// 转换一个文件。`progress(0–1, 阶段说明)`；`cancel` 置位时中止。
 pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, mut progress: impl FnMut(f32, &str)) -> Result<ConvertReport, String> {
+    if opts.dry {
+        return convert_dry(opts, &cancel, progress);
+    }
     if let Some(d) = opts.duo.filter(|d| d.delay_ms > 0.0) {
         return convert_duo(opts, d, params, cancel, progress);
     }
@@ -686,7 +692,7 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
     if let (Some(path), Some(tr)) = (&opts.save_trajectory, &eng.trace) {
         write_trajectory(path, tr, 0.0)?;
     }
-    let fin = finish(opts, rendered, n_sig, &eng_cfg, &cancel, &mut progress)?;
+    let fin = finish(opts, rendered, n_sig, Some(&eng_cfg), &cancel, &mut progress)?;
     Ok(ConvertReport {
         seconds: fin.seconds,
         lufs: fin.lufs,
@@ -704,6 +710,31 @@ pub fn convert(opts: &ConvertOptions, params: &Params, cancel: Arc<AtomicBool>, 
         n_updowns: eng.tele.n_updowns,
         n_strokes: eng.tele.n_strokes,
         speech_pct: 100.0 * eng.n_speech as f32 / eng.n_blocks.max(1) as f32,
+        elapsed_s: t_start.elapsed().as_secs_f64(),
+    })
+}
+
+/// 原声不经过引擎，不增加预读或混响尾音；输出级仍补偿限制器时延，保留截取后的长度。
+fn convert_dry(opts: &ConvertOptions, cancel: &AtomicBool, mut progress: impl FnMut(f32, &str)) -> Result<ConvertReport, String> {
+    if opts.save_trajectory.is_some() || opts.duo.is_some_and(|d| d.delay_ms > 0.0) {
+        return Err("保持原声输出不能同时使用左右双人或导出走位".into());
+    }
+    let t_start = std::time::Instant::now();
+    progress(0.0, "读取音频");
+    let (chans, _) = load_audio(opts, cancel, AutoPick::Stereo)?;
+    let left = &chans[0];
+    let right = chans.get(1).unwrap_or(left);
+    let n = left.len();
+    let rendered = render_to_temp(n, 0, cancel, &mut |f, _| progress(f, "保留原声"), |done, ol, or| {
+        ol.copy_from_slice(&left[done..done + ol.len()]);
+        or.copy_from_slice(&right[done..done + or.len()]);
+    })?;
+    let fin = finish(opts, rendered, n, None, cancel, &mut progress)?;
+    Ok(ConvertReport {
+        seconds: fin.seconds, lufs: fin.lufs, true_peak_db: fin.true_peak_db, max_gr_db: fin.max_gr_db,
+        channel_note: if chans.len() == 2 { "保持原声输出：保留左右声道和原音量（峰值超限时保护）" } else { "保持原声输出：所选声道同时输出到左右耳，保留原音量（峰值超限时保护）" }.into(),
+        align_note: String::new(), balance_note: String::new(), duo_note: String::new(), bg_note: String::new(), level_note: String::new(),
+        n_moves: 0, n_sways: 0, n_tops: 0, n_updowns: 0, n_strokes: 0, speech_pct: 0.0,
         elapsed_s: t_start.elapsed().as_secs_f64(),
     })
 }
@@ -753,7 +784,7 @@ fn convert_pair(opts: &ConvertOptions, params: &Params, left: Vec<f32>, right: V
     if let (Some(path), Some(tr)) = (&opts.save_trajectory, &mixer.engine(0).trace) {
         write_trajectory(path, tr, mixer.engine(0).az_offset)?;
     }
-    let fin = finish(opts, rendered, n_sig, &cfg, cancel, &mut progress)?;
+    let fin = finish(opts, rendered, n_sig, Some(&cfg), cancel, &mut progress)?;
     let t = mixer.engine(0).tele;
     let speech = (0..2).map(|k| 100.0 * mixer.engine(k).n_speech as f32 / mixer.engine(k).n_blocks.max(1) as f32).sum::<f32>() / 2.0;
     Ok(ConvertReport {
@@ -818,6 +849,9 @@ pub fn align_tracks(monos: &[&[f32]], names: &[String]) -> Result<(Vec<Vec<f32>>
 /// 对齐、平衡或有延迟时整段解码（同一个文件只解码一次）、按整段测响度，和合成试听完全一样；
 /// 都没有时和以前一样只解码要处理的那一段。
 pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, mo: MixOptions, cancel: Arc<AtomicBool>, mut progress: impl FnMut(f32, &str)) -> Result<ConvertReport, String> {
+    if opts.dry {
+        return Err("保持原声输出不支持多音频合成，请分别转换各文件".into());
+    }
     let (follow, align) = (mo.follow, mo.align);
     let n = inputs.len();
     let delays = &mo.delays[..n.min(MAX_VOICES)];
@@ -935,7 +969,7 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
         let ins: Vec<&[f32]> = bufs.iter().map(|b| &b[..m]).collect();
         mixer.process_parallel(&ins, ol, or);
     })?;
-    let fin = finish(opts, rendered, n_sig, &base, &cancel, &mut progress)?;
+    let fin = finish(opts, rendered, n_sig, Some(&base), &cancel, &mut progress)?;
     if mo.balance > 0.0 {
         balance_note = balance::describe(mo.balance, mixer.balance_stats(), false);
     }
@@ -967,6 +1001,75 @@ pub fn convert_mix(opts: &ConvertOptions, inputs: &[MixInput], params: &Params, 
 mod tests {
     use super::*;
     use crate::dsp::testsig::test_voice;
+
+    #[test]
+    fn dry_conversion_keeps_channels_level_and_trim_without_effects() {
+        let dir = std::env::temp_dir().join(format!("auto_asmr_dry_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("stereo.wav");
+        let left: Vec<f32> = (0..FS_USIZE * 2).map(|i| 0.12 * (i as f32 * 0.057).sin()).collect();
+        let right: Vec<f32> = (0..left.len()).map(|i| 0.03 * (i as f32 * 0.091).cos()).collect();
+        write_wav2(&input, &left, &right);
+        let mut opts = ConvertOptions::new(input.clone());
+        opts.dry = true;
+        opts.start = 0.25;
+        opts.duration = Some(1.0);
+        opts.lufs = -10.0; // 原声不归一化到这里，也不读取 Params 里的任何效果。
+        let params = Params { denoise: true, static_ambience: true, room: true, out_gain_db: 12.0, ..Params::default().style_music().bg_rain_night() };
+        for (k, channel) in [Channel::Auto, Channel::Left, Channel::Right, Channel::Mix].into_iter().enumerate() {
+            opts.output = dir.join(format!("dry{k}.wav"));
+            opts.channel = channel;
+            let rep = convert(&opts, &params, Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+            let (l, r) = read_stereo(&opts.output);
+            assert_eq!(l.len(), FS_USIZE);
+            assert_eq!(r.len(), l.len());
+            assert!(rep.max_gr_db < 0.001 && rep.bg_note.is_empty() && rep.level_note.is_empty());
+            assert!(report_text(&rep, "test.wav", false).contains("保持原声输出"));
+            for i in 0..l.len() {
+                let (a, b) = (left[FS_USIZE / 4 + i], right[FS_USIZE / 4 + i]);
+                let expected = match channel { Channel::Auto => (a, b), Channel::Left => (a, a), Channel::Right => (b, b), Channel::Mix => ((a + b) * 0.5, (a + b) * 0.5) };
+                assert!((l[i] - expected.0).abs() < 1.3e-7 && (r[i] - expected.1).abs() < 1.3e-7, "样本 {i} 未保持原声");
+            }
+        }
+        // 单声道、16 bit：两耳一致，长度不增加，只有位深量化误差。
+        write_wav(&input, &left);
+        opts.channel = Channel::Auto;
+        opts.bits = 16;
+        convert(&opts, &params, Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+        let samples: Vec<i16> = hound::WavReader::open(&opts.output).unwrap().samples::<i16>().map(Result::unwrap).collect();
+        assert_eq!(samples.len(), FS_USIZE * 2);
+        for (i, pair) in samples.chunks_exact(2).enumerate() {
+            assert_eq!(pair[0], pair[1]);
+            assert!((pair[0] as f32 / 32767.0 - left[FS_USIZE / 4 + i]).abs() < 1.6e-5);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dry_conversion_limits_peaks_and_cleans_up_when_cancelled() {
+        let dir = std::env::temp_dir().join(format!("auto_asmr_dry_peak_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("loud.wav");
+        let x: Vec<f32> = (0..FS_USIZE).map(|i| 1.2 * (i as f32 * 0.13).sin()).collect();
+        write_wav(&input, &x);
+        let mut opts = ConvertOptions::new(input);
+        opts.dry = true;
+        opts.peak_db = -6.0;
+        let rep = convert(&opts, &Params::default(), Arc::new(AtomicBool::new(false)), |_, _| {}).unwrap();
+        assert!(rep.true_peak_db <= -5.9 && rep.max_gr_db > 3.0, "{} dBTP / {} dB", rep.true_peak_db, rep.max_gr_db);
+        let (l, r) = read_stereo(&opts.output);
+        assert_eq!(l, r);
+        assert_eq!(l.len(), x.len());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        opts.output = dir.join("cancelled.wav");
+        let result = convert(&opts, &Params::default(), cancel, |f, _| { if f > 0.85 { flag.store(true, Ordering::Relaxed); } });
+        assert!(result.unwrap_err().contains("取消"));
+        assert!(!opts.output.exists());
+        opts.duo = Some(Duo::new(80.0));
+        assert!(convert(&opts, &Params::default(), Arc::new(AtomicBool::new(false)), |_, _| {}).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn aligned_mix_trims_intro_and_preview_uses_the_same_audio() {

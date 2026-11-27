@@ -202,7 +202,7 @@ pub const VIRTUAL: [&str; 4] = ["ear_cm", "manual_cm", "moves_per_min", "denoise
 
 /// 配置文件里 `params` 之外、界面也按字段读写的设置（和桌面版共用）：左右双人（排布、自动平衡也是多音频合成的），
 /// 以及文件转换页的设置（多音频合成、自动对齐、目标响度、取哪个声道、位深、同时转换几个）。
-pub const DOC_KEYS: [&str; 9] = ["duo_ms", "mix_follow", "mix_balance", "mix", "mix_align", "file_lufs", "file_channel", "bits", "jobs"];
+pub const DOC_KEYS: [&str; 10] = ["duo_ms", "mix_follow", "mix_balance", "mix", "mix_align", "file_dry", "file_lufs", "file_channel", "bits", "jobs"];
 
 /// 改 [`DOC_KEYS`] 里的一项。范围和桌面版界面一样：延迟 0–300 ms（0 = 关），自动平衡 0–100 %，声道 0 自动 / 1 左 /
 /// 2 右 / 3 混合，位深 16 / 24，同时转换 0 = 自动（逻辑核数）。
@@ -214,6 +214,7 @@ pub fn set_doc_field(s: &mut Saved, key: &str, v: Value) -> Result<(), String> {
         "mix_balance" => s.mix_balance = as_f32(&v)?.clamp(0.0, 100.0),
         "mix" => s.mix = as_bool(&v)?,
         "mix_align" => s.mix_align = as_bool(&v)?,
+        "file_dry" => s.file_dry = as_bool(&v)?,
         "file_lufs" => s.file_lufs = as_f32(&v)?.clamp(-40.0, 0.0),
         "file_channel" => s.file_channel = (as_f32(&v)? as i64).clamp(0, 3) as u8,
         "bits" => s.bits = if as_f32(&v)? < 20.0 { 16 } else { 24 },
@@ -232,6 +233,7 @@ pub fn saved_json(s: &Saved) -> Value {
         m.insert("mix_balance".into(), json!(s.mix_balance));
         m.insert("mix".into(), json!(s.mix));
         m.insert("mix_align".into(), json!(s.mix_align));
+        m.insert("file_dry".into(), json!(s.file_dry));
         m.insert("file_lufs".into(), json!(s.file_lufs));
         m.insert("file_channel".into(), json!(s.file_channel));
         m.insert("bits".into(), json!(s.bits));

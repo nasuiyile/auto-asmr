@@ -34,6 +34,8 @@ pub struct Saved {
     pub buffer: u32,
     pub in_channel: usize,
     pub dry: bool,
+    /// 文件转换保持原声：保留声道和原音量，只做格式转换、截取和峰值保护；与实时监听开关分开保存。
+    pub file_dry: bool,
     pub bits: u16,
     pub file_lufs: f32,
     pub file_channel: u8,
@@ -60,7 +62,7 @@ pub struct Saved {
 
 impl Default for Saved {
     fn default() -> Self {
-        Saved { params: Params::default(), english: false, tab: Tab::Realtime, host: String::new(), input: None, output: None, buffer: 256, in_channel: 0, dry: false, bits: 24, file_lufs: -16.0, file_channel: 0, jobs: 0, out_dir: None, view3d: false, mix: false, mix_follow: false, mix_align: false, mix_balance: 0.0, duo_ms: 0.0, rt_duo_ms: 0.0 }
+        Saved { params: Params::default(), english: false, tab: Tab::Realtime, host: String::new(), input: None, output: None, buffer: 256, in_channel: 0, dry: false, file_dry: false, bits: 24, file_lufs: -16.0, file_channel: 0, jobs: 0, out_dir: None, view3d: false, mix: false, mix_follow: false, mix_align: false, mix_balance: 0.0, duo_ms: 0.0, rt_duo_ms: 0.0 }
     }
 }
 
@@ -150,15 +152,16 @@ mod tests {
 
     #[test]
     fn export_text_reads_back_and_keeps_desktop_only_settings() {
-        let s = Saved { buffer: 512, input: Some("Mic".into()), dry: true, rt_duo_ms: 90.0, params: Params { puff: 2.5, ..Params::default() }, ..Saved::default() };
+        let s = Saved { buffer: 512, input: Some("Mic".into()), dry: true, file_dry: true, rt_duo_ms: 90.0, params: Params { puff: 2.5, ..Params::default() }, ..Saved::default() };
         let back = parse(&to_text(&s).unwrap()).unwrap();
         assert_eq!(back.params, s.params);
-        assert!(back.dry && back.buffer == 512 && back.input.as_deref() == Some("Mic") && back.rt_duo_ms == 90.0);
+        assert!(back.dry && back.file_dry && back.buffer == 512 && back.input.as_deref() == Some("Mic") && back.rt_duo_ms == 90.0);
         // 只写了参数的文件（比如手写的）也能读，其余用默认值
         let bare = parse("(params: (seed: 3))").unwrap();
         assert_eq!(bare.params.seed, 3);
         assert_eq!(bare.buffer, 256);
         assert_eq!(bare.rt_duo_ms, 0.0);
+        assert!(!bare.file_dry);
         // 已删除的参数（如响应阈值 gate_db）留在旧配置里也照样能读，直接忽略
         let old = parse("(params: (seed: 4, gate_db: -50.0))").unwrap();
         assert_eq!(old.params.seed, 4);

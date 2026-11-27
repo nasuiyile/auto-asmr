@@ -127,6 +127,7 @@ convert 的选项（括号里是默认值）：
   --deess <dB>            去齿音最多压低（0）       --soft-voice <x>   轻声化（0）
   --sharp-soften <0–8>    强辅音柔化：强辅音突出时，5 kHz 附近最多收轻多少 dB（0=关）
  输出
+  --dry                  保持原声和原音量（自动保留立体声），只做峰值保护；不支持合成、左右双人和走位导出
   --lufs <L>（-16）  --peak <dBTP>（-1）  --max-gr <dB>（8）  --bits 16|24（24）  --seed <n>（1）
   --save-trajectory <csv> 导出实际走位（时间, 方位角, 距离, 不含忽远忽近的距离, 说话活动, 仰角, 入耳深度）
 ";
@@ -409,6 +410,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
     let mut output: Option<PathBuf> = None;
     let (mut start, mut duration) = (0.0f64, None);
     let mut channel = Channel::Auto;
+    let mut dry = false;
     let (mut bits, mut peak, mut max_gr) = (24u16, -1.0f32, 8.0f32);
     let mut level_follow: Option<f32> = None;
     let mut save_traj: Option<PathBuf> = None;
@@ -432,6 +434,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
             "--out-dir" => out_dir = Some(PathBuf::from(it.next().ok_or("--out-dir 后面缺少文件夹")?)),
             "-j" | "--jobs" => jobs = (f(&mut it)? as usize).max(1),
             "--mix" => mix_on = true,
+            "--dry" => dry = true,
             "--mix-follow" => mix_follow = true,
             "--mix-align" => mix_align = true,
             "--mix-balance" => {
@@ -602,6 +605,9 @@ fn run_convert(args: &[String]) -> Result<(), String> {
         None => Params::default_level_follow(p.mode),
     };
     let duo_on = duo_ms > 0.0;
+    if dry && (mix_on || duo_on || save_traj.is_some()) {
+        return Err("--dry 不能与 --mix、--duo 或 --save-trajectory 同时使用".into());
+    }
     if mix_align && !mix_on {
         return Err("--mix-align 只用于多音频合成，请同时加 --mix".into());
     }
@@ -777,6 +783,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
                 o.peak_db = peak;
                 o.max_gr_db = max_gr;
                 o.duo = duo;
+                o.dry = dry;
                 o
             })
             .collect();
@@ -818,6 +825,7 @@ fn run_convert(args: &[String]) -> Result<(), String> {
     opts.max_gr_db = max_gr;
     opts.save_trajectory = save_traj;
     opts.duo = duo;
+    opts.dry = dry;
     let mut last = -1i32;
     let rep = convert(&opts, &p, Arc::new(AtomicBool::new(false)), |f, stage| {
         let pc = (f * 100.0) as i32;

@@ -2,6 +2,12 @@
 
 不带参数启动是图形界面；带子命令时在终端运行。
 
+文件转换加 `--dry` 可以保持原声输出：跳过全部 ASMR 效果、降噪和背景音，保留原音量，只按 `--peak` 做峰值保护；`--lufs` 和 `--level-match` 不参与处理。默认 `--channel auto` 保留立体声；`left` / `right` / `mix` 把所选声道同时送到左右耳。仍支持 `--start`、`--duration`、`--bits` 和批量输出，统一保存为 48 kHz WAV；不能与 `--mix`、`--duo`、`--save-trajectory` 同用。
+
+```bash
+auto-asmr convert 输入.flac --dry -o 原声.wav
+```
+
 ```bash
 auto-asmr convert 输入.m4a -o 输出.wav --style ku100 --duration 60
 ```

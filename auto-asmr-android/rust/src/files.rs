@@ -153,8 +153,9 @@ struct Preview {
 }
 
 impl Preview {
-    fn file(cfg: Arc<EngineConfig>, audio: Arc<Vec<f32>>, start: usize) -> Result<Preview, String> {
+    fn file(cfg: Arc<EngineConfig>, audio: Arc<Vec<f32>>, start: usize, dry: bool) -> Result<Preview, String> {
         let shared = Arc::new(Shared::new(cfg.clone()));
+        shared.monitor_dry.store(dry, Ordering::Relaxed);
         let sh = shared.clone();
         // 试听不开主播模式的"话少时也一直在动"：动作严格跟着说话走，与文件转换一致（同桌面版）
         let out = Output::start(shared.clone(), move |rate| Pump::new(Source::Memory { data: audio, pos: start }, Engine::new(cfg, PostMode::Realtime, 0.0), sh, rate))?;
@@ -163,8 +164,9 @@ impl Preview {
 
     /// 试听一个立体声文件（听歌）：「立体声宽度」大于 0 时左右声道各当一个声源，为 0 时合成单声道过一个引擎；
     /// 边听边改参数时随时切换（同桌面版 `Realtime::start_preview_stereo`）。
-    fn stereo(cfg: Arc<EngineConfig>, left: Arc<Vec<f32>>, right: Arc<Vec<f32>>, start: usize) -> Result<Preview, String> {
+    fn stereo(cfg: Arc<EngineConfig>, left: Arc<Vec<f32>>, right: Arc<Vec<f32>>, start: usize, dry: bool) -> Result<Preview, String> {
         let shared = Arc::new(Shared::new(cfg.clone()));
+        shared.monitor_dry.store(dry, Ordering::Relaxed);
         let sh = shared.clone();
         let out = Output::start(shared.clone(), move |rate| {
             // 立体声对事先建好：播放中改「立体声宽度」时音频线程里不分配内存
@@ -305,11 +307,11 @@ impl Files {
     // ------------------------------------------------------------------ 多音频合成（同桌面版）
 
     fn multi(&self) -> bool {
-        self.s.mix && self.files.len() >= 2
+        !self.s.file_dry && self.s.mix && self.files.len() >= 2
     }
 
     fn duo_with(&self, s: &Saved) -> bool {
-        !(s.mix && self.files.len() >= 2) && s.duo_ms > 0.0 && self.file_in.is_some()
+        !s.file_dry && !(s.mix && self.files.len() >= 2) && s.duo_ms > 0.0 && self.file_in.is_some()
     }
 
     fn duo(&self) -> bool {
@@ -336,7 +338,7 @@ impl Files {
     }
 
     fn duo_options(&self) -> Option<Duo> {
-        (!self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, follow: self.s.mix_follow, balance: self.s.mix_balance / 100.0 })
+        (!self.s.file_dry && !self.multi() && self.s.duo_ms > 0.0).then(|| Duo { delay_ms: self.s.duo_ms, voices: self.duo_voices, follow: self.s.mix_follow, balance: self.s.mix_balance / 100.0 })
     }
 
     fn set_mix_voice(&mut self, k: usize, v: Voice) {
@@ -479,6 +481,9 @@ impl Files {
     /// （更响的那个声道），听歌（立体声宽度大于 0）时单个音频是 4（左右声道都要，各当一个声源），多音频合成、
     /// 左右双人是 3（左右混合）。
     fn ch_key(&self) -> u8 {
+        if self.s.file_dry && self.s.file_channel == 0 {
+            return 4;
+        }
         match (self.s.file_channel, self.s.params.stereo_width > 0.0) {
             (0, true) => {
                 if self.mixing() {
@@ -729,6 +734,7 @@ impl Files {
         o.duration = if self.dur_s > 0.0 { Some(self.dur_s as f64) } else { None };
         o.channel = self.file_channel();
         o.bits = self.s.bits;
+        o.dry = self.s.file_dry;
         o.lufs = self.s.file_lufs;
         o.peak_db = self.s.params.ceiling_db;
         o.duo = self.duo_options();
@@ -830,12 +836,12 @@ impl Files {
                 let start = ((self.preview_s.max(0.0) * FS as f64) as usize).min(audio.len());
                 // 左右声道都解码了（听歌、立体声的音频）：左右声道各当一个声源
                 let started = match &self.decoded_r {
-                    Some(right) => Preview::stereo(self.cfg.clone(), audio.clone(), right.clone(), start),
-                    None => Preview::file(self.cfg.clone(), audio.clone(), start),
+                    Some(right) => Preview::stereo(self.cfg.clone(), audio.clone(), right.clone(), start, self.s.file_dry),
+                    None => Preview::file(self.cfg.clone(), audio.clone(), start, self.s.file_dry),
                 };
                 match started {
                     Ok(rt) => {
-                        self.status = format!("试听中：{}（{} Hz）{}", rt.out.name, rt.out.out_rate, if self.decoded_r.is_some() { "，立体声：左右声道各一个声源" } else { "" });
+                        self.status = format!("试听中：{}（{} Hz）{}", rt.out.name, rt.out.out_rate, if self.s.file_dry { "，保持原声" } else if self.decoded_r.is_some() { "，立体声：左右声道各一个声源" } else { "" });
                         self.rt = Some(rt);
                         self.rt_preview = true;
                     }
@@ -857,7 +863,7 @@ impl Files {
         let mut o = ConvertOptions::new(input.clone());
         o.channel = self.file_channel();
         // 听歌时「自动」：单个音频左右声道都要；左右双人（当成一个声源再变成两个人）左右混合
-        let pick = auto_pick(&self.s.params, !self.mixing());
+        let pick = if self.s.file_dry { auto_asmr::offline::AutoPick::Stereo } else { auto_pick(&self.s.params, !self.mixing()) };
         std::thread::spawn(move || {
             let r = load_audio(&o, &AtomicBool::new(false), pick).map(|(c, _)| {
                 let mut it = c.into_iter().map(Arc::new);
@@ -1026,6 +1032,9 @@ impl Files {
         let was_duo = self.duo();
         let key_before = self.ch_key();
         let old = std::mem::replace(&mut self.s, new);
+        if old.file_dry != self.s.file_dry {
+            self.on_channel_changed();
+        }
         if old.mix != self.s.mix {
             self.on_mix_mode_changed();
         }
@@ -1633,6 +1642,58 @@ mod tests {
         wait(&mut f, |s| s["preview"].is_object() && !s["decoding"].as_bool().unwrap());
         assert!(f.decoded_r.is_none() && f.decoded.as_ref().is_some_and(|(_, c, _)| *c == 0));
         crate::settings::load_config("()").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dry_files_keep_stereo_and_convert_separately_with_mix_settings_saved() {
+        let _lock = crate::settings::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::settings::provide_repo_data();
+        crate::settings::load_config("()").unwrap();
+        let dir = std::env::temp_dir().join(format!("asmr-files-dry-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("原声.wav");
+        let second = dir.join("原声2.wav");
+        let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut wav = hound::WavWriter::create(&input, spec).unwrap();
+        for i in 0..48_000 {
+            wav.write_sample(0.08 * (i as f32 * 0.07).sin()).unwrap();
+            wav.write_sample(0.02 * (i as f32 * 0.11).sin()).unwrap();
+        }
+        wav.finalize().unwrap();
+        std::fs::copy(&input, &second).unwrap();
+        let mut f = Files::new();
+        f.handle(&json!({"op": "add", "paths": [input.display().to_string(), second.display().to_string()]}));
+        wait(&mut f, |s| s["preview"].is_object() && !s["decoding"].as_bool().unwrap());
+        assert!(f.decoded_r.is_none());
+        crate::settings::update_doc("mix", json!(true)).unwrap();
+        crate::settings::update_doc("duo_ms", json!(80.0)).unwrap();
+        crate::settings::update_doc("file_dry", json!(true)).unwrap();
+        f.handle(&json!({"op": "poll"}));
+        wait(&mut f, |s| s["preview"].is_object() && !s["decoding"].as_bool().unwrap());
+        assert!(f.s.file_dry && f.s.mix && f.s.duo_ms == 80.0 && !f.s.dry);
+        assert!(!f.mixing() && f.decoded_r.is_some() && f.ch_key() == 4);
+        assert!(f.convert_options(input.clone(), dir.join("unused.wav")).dry);
+        let left = f.decoded.as_ref().unwrap().2.clone();
+        let right = f.decoded_r.as_ref().unwrap().clone();
+        let staging = dir.join("out");
+        f.handle(&json!({"op": "convert", "staging": staging.display().to_string()}));
+        assert_eq!(f.job.as_ref().unwrap().paths.len(), 2, "原声模式分别转换两个文件");
+        wait(&mut f, |s| !s["busy"].as_bool().unwrap());
+        for output in ["原声_asmr.wav", "原声2_asmr.wav"] {
+            let mut wav = hound::WavReader::open(staging.join("1").join(output)).unwrap();
+            let samples: Vec<i32> = wav.samples::<i32>().map(Result::unwrap).collect();
+            assert_eq!(samples.len(), left.len() * 2);
+            for (i, pair) in samples.chunks_exact(2).enumerate() {
+                assert!((pair[0] as f32 / 8_388_607.0 - left[i]).abs() < 1.3e-7);
+                assert!((pair[1] as f32 / 8_388_607.0 - right[i]).abs() < 1.3e-7);
+            }
+        }
+        crate::settings::update_doc("file_dry", json!(false)).unwrap();
+        f.handle(&json!({"op": "poll"}));
+        assert!(f.multi(), "切回效果后恢复保存的合成设置");
+        crate::settings::load_config("()").unwrap();
+        drop(f);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
